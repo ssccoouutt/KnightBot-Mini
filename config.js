@@ -28,6 +28,9 @@ module.exports = {
     autoReactMode: 'bot', // set bot or all via cmd
     autoDownload: false,
     
+    // ===== NEW: Telegram Bridge Auto-Start =====
+    autoStartTelegram: true, // Set to false to disable auto-start of Telegram bridge
+    
     // Group Settings Defaults
     defaultGroupSettings: {
       antilink: false,
@@ -86,4 +89,3 @@ module.exports = {
       youtube: 'http://youtube.com/@mr_unique_hacker'
     }
 };
-  
