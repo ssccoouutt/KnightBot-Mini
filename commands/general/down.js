@@ -231,6 +231,7 @@ async function downloadFile(sock, chatId, messageKey, url, fileName, contentLeng
 module.exports = {
     name: 'download',
     aliases: ['down', 'dl', 'getfile'],
+    ownerOnly: true,
     description: 'Download files from direct links with real-time progress',
     usage: 'download <url>',
     category: 'general',
