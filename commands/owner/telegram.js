@@ -13,7 +13,7 @@ const API_HASH = "064a66fe7097452e6ac8f4e8df28aa97";  // Your Telegram API Hash
 const TELEGRAM_BOT_TOKEN = "8717510346:AAFi_8U7L0KCh13UzEu69EGc7j8qDteyu70";  // Your Telegram Bot Token
 const BOT_ID = "8717510346";  // Your Telegram Bot ID (without 'bot' prefix)
 
-// WhatsApp targets - EDIT THESE! (Removed channel, only groups now)
+// WhatsApp targets - EDIT THESE! (Only groups now)
 const WHATSAPP_NUMBER = "923247220362";  // Your WhatsApp number
 const WHATSAPP_GROUPS = [
     "120363140590753276@g.us",
@@ -637,5 +637,168 @@ module.exports = {
         
         // Invalid subcommand
         await reply(`❌ Unknown subcommand: ${sub}\nUse \`${config.prefix}telegram\` for help`);
+    }
+};
+
+// ===== AUTO-START FUNCTION =====
+module.exports.autoStart = async function(sock) {
+    // Don't auto-start if already active
+    if (isActive) {
+        return true;
+    }
+    
+    console.log('🔄 Auto-starting Telegram bridge...');
+    whatsappSock = sock;
+    
+    try {
+        // Initialize Telegram client
+        if (telegramClient) await telegramClient.disconnect();
+        
+        telegramClient = new TelegramClient(new StringSession(""), API_ID, API_HASH, {
+            connectionRetries: 5,
+            downloadRetries: 3
+        });
+        
+        await telegramClient.start({ botAuthToken: TELEGRAM_BOT_TOKEN });
+        
+        if (!telegramBot) {
+            initTelegramBot();
+        }
+        
+        startKeepAlive();
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        connectionReady = true;
+        
+        // Message handler (simplified version for auto-start)
+        async function messageHandler(event) {
+            try {
+                const msg = event.message;
+                if (!msg) return;
+                
+                let senderId = null;
+                if (msg.fromId) {
+                    if (msg.fromId.userId) senderId = msg.fromId.userId.toString();
+                    else if (msg.fromId.value) senderId = msg.fromId.value.toString();
+                }
+                
+                // Skip messages from the bot itself
+                if (senderId === BOT_ID) return;
+                
+                // Skip commands
+                if (msg.text && msg.text.startsWith('/')) return;
+                
+                const chatId = msg.chatId?.value?.toString() || msg.peerId?.userId?.toString();
+                if (!chatId) return;
+                
+                const text = msg.text || msg.caption || '';
+                const entities = msg.entities || [];
+                
+                const formattedText = convertTelegramToWhatsApp(text, entities);
+                
+                let messageData = {
+                    type: 'text',
+                    content: formattedText,
+                    timestamp: Date.now()
+                };
+                
+                if (msg.media && msg.media.className !== 'MessageMediaWebPage') {
+                    const mediaResult = await downloadMedia(telegramClient, msg);
+                    
+                    if (mediaResult) {
+                        let fileName = 'file';
+                        let mediaType = 'document';
+                        
+                        if (msg.photo) {
+                            mediaType = 'photo';
+                            fileName = `image_${msg.id}.jpg`;
+                        } else if (msg.video) {
+                            mediaType = 'video';
+                            fileName = `video_${msg.id}.mp4`;
+                        } else if (msg.document) {
+                            mediaType = 'document';
+                            const attr = msg.document.attributes.find(a => a.className === 'DocumentAttributeFilename');
+                            fileName = attr?.fileName || `file_${msg.id}.bin`;
+                        } else if (msg.audio) {
+                            mediaType = 'audio';
+                            fileName = `audio_${msg.id}.mp3`;
+                        } else if (msg.voice) {
+                            mediaType = 'voice';
+                            fileName = `voice_${msg.id}.ogg`;
+                        } else if (msg.sticker) {
+                            mediaType = 'sticker';
+                            fileName = `sticker_${msg.id}.webp`;
+                        }
+                        
+                        messageData = {
+                            type: 'media',
+                            mediaType,
+                            buffer: mediaResult.buffer,
+                            size: mediaResult.size,
+                            mimeType: mediaResult.mimeType,
+                            fileName,
+                            caption: formattedText,
+                            timestamp: Date.now()
+                        };
+                    } else {
+                        return;
+                    }
+                }
+                
+                // Store for user confirmation
+                const pendingKey = `${chatId}_${msg.id}`;
+                pendingMessages.set(pendingKey, messageData);
+                
+                // Cleanup old messages
+                const now = Date.now();
+                for (const [key, data] of pendingMessages.entries()) {
+                    if (now - data.timestamp > 300000) {
+                        pendingMessages.delete(key);
+                    }
+                }
+                
+                const previewText = formattedText.length > 100 ? 
+                    formattedText.substring(0, 100) + '...' : 
+                    formattedText || '[No text]';
+                
+                const fileSizeInfo = messageData.type === 'media' ? 
+                    ` (${(messageData.size / 1024 / 1024).toFixed(2)}MB)` : '';
+                
+                const confirmationMessage = 
+                    `📨 New Message\n\n` +
+                    `Preview: ${previewText}${fileSizeInfo}\n\n` +
+                    `Forward to?`;
+                
+                await telegramBot.telegram.sendMessage(
+                    parseInt(chatId),
+                    confirmationMessage,
+                    {
+                        reply_markup: {
+                            inline_keyboard: [
+                                [
+                                    { text: `👥 ALL GROUPS (${WHATSAPP_GROUPS.length})`, callback_data: `confirm_${msg.id}_all` },
+                                    { text: '📱 Own Chat', callback_data: `confirm_${msg.id}_own` }
+                                ],
+                                [
+                                    { text: '❌ Cancel', callback_data: `confirm_${msg.id}_cancel` }
+                                ]
+                            ]
+                        }
+                    }
+                );
+                
+            } catch (err) {
+                // Silent fail - no logs
+            }
+        }
+        
+        telegramClient.addEventHandler(messageHandler, new NewMessage({}));
+        
+        isActive = true;
+        console.log('✅ Telegram bridge auto-started successfully');
+        return true;
+        
+    } catch (error) {
+        console.error('❌ Telegram bridge auto-start failed:', error.message);
+        return false;
     }
 };
