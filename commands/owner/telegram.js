@@ -13,9 +13,8 @@ const API_HASH = "064a66fe7097452e6ac8f4e8df28aa97";  // Your Telegram API Hash
 const TELEGRAM_BOT_TOKEN = "8717510346:AAFi_8U7L0KCh13UzEu69EGc7j8qDteyu70";  // Your Telegram Bot Token
 const BOT_ID = "8717510346";  // Your Telegram Bot ID (without 'bot' prefix)
 
-// WhatsApp targets - EDIT THESE!
+// WhatsApp targets - EDIT THESE! (Removed channel, only groups now)
 const WHATSAPP_NUMBER = "923247220362";  // Your WhatsApp number
-const CRITICAL_CHANNEL = "120363304414452603@newsletter";  // Channel to forward to
 const WHATSAPP_GROUPS = [
     "120363140590753276@g.us",
     "120363162260844407@g.us",
@@ -24,17 +23,9 @@ const WHATSAPP_GROUPS = [
     "120363161222427319@g.us"
 ];
 
-// ALL TARGETS = Channel + All Groups
-const ALL_TARGETS = [
-    CRITICAL_CHANNEL,
-    ...WHATSAPP_GROUPS
-];
-
 // ===== CONSTANTS =====
 const TEMP_DIR = path.join(process.cwd(), 'temp');
 const RATE_LIMIT_DELAY = 3000;
-const BATCH_SIZE = 2;
-const KEEP_ALIVE_INTERVAL = 15000;
 
 // ===== STATE =====
 let telegramClient = null;
@@ -42,40 +33,24 @@ let isActive = false;
 let connectionReady = false;
 let telegramBot = null;
 let whatsappSock = null;
+let keepAliveInterval = null;
 
 // Store pending messages
 const pendingMessages = new Map();
-const pendingDownloads = new Map();
-
-// Auto-start tracking
-let autoStartCompleted = false;
 
 // Create temp directory
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 
-// Create logs directory
-const LOG_DIR = path.join(process.cwd(), 'logs');
-if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
-
-// ===== HELPER FUNCTIONS =====
-function log(level, message, data = null) {
+// ===== SILENT LOGGING - Only errors! =====
+function logError(message, error = null) {
     const timestamp = new Date().toISOString();
-    let logMessage = `[${timestamp}] [${level}] [TelegramBridge] ${message}`;
-    console.log(logMessage);
-    
-    if (data) {
-        const processedData = JSON.parse(JSON.stringify(data, (key, value) => 
-            typeof value === 'bigint' ? value.toString() : value
-        ));
-        console.log(JSON.stringify(processedData, null, 2));
+    console.error(`[${timestamp}] [TelegramBridge ERROR] ${message}`);
+    if (error) {
+        console.error(error);
     }
-    
-    fs.appendFileSync(
-        path.join(LOG_DIR, 'telegram_bridge.log'),
-        logMessage + (data ? '\n' + JSON.stringify(data) : '') + '\n'
-    );
 }
 
+// ===== HELPER FUNCTIONS =====
 async function generateThumbnail(buffer) {
     try {
         const thumbnail = await sharp(buffer)
@@ -84,29 +59,26 @@ async function generateThumbnail(buffer) {
             .toBuffer();
         return thumbnail.toString('base64');
     } catch (err) {
-        log('WARN', 'Thumbnail generation failed', { error: err.message });
-        return null;
+        return null; // Silently fail
     }
 }
 
 function startKeepAlive() {
-    if (!telegramClient) return null;
+    if (keepAliveInterval) clearInterval(keepAliveInterval);
     
-    const interval = setInterval(async () => {
+    keepAliveInterval = setInterval(async () => {
         if (!telegramClient || !telegramClient.connected) {
-            clearInterval(interval);
+            clearInterval(keepAliveInterval);
+            keepAliveInterval = null;
             return;
         }
         
         try {
             await telegramClient.getMe();
-            log('DEBUG', 'Keep-alive ping sent');
         } catch (err) {
-            log('WARN', 'Keep-alive failed', { error: err.message });
+            // Silently ignore keep-alive errors
         }
-    }, KEEP_ALIVE_INTERVAL);
-    
-    return interval;
+    }, 15000);
 }
 
 function cleanWhitespace(text) {
@@ -181,12 +153,8 @@ function convertTelegramToWhatsApp(text, entities) {
 }
 
 async function downloadMedia(client, message) {
-    const downloadId = `${message.id}_${Date.now()}`;
-    pendingDownloads.set(downloadId, { status: 'downloading', startTime: Date.now() });
-    
     try {
         if (message.media?.className === 'MessageMediaWebPage') {
-            pendingDownloads.delete(downloadId);
             return null;
         }
         
@@ -199,15 +167,8 @@ async function downloadMedia(client, message) {
                     fs.mkdirSync(TEMP_DIR, { recursive: true });
                 }
                 
-                log('DEBUG', `Download attempt ${attempt}/3`, { messageId: message.id });
-                
                 await client.downloadMedia(message, { 
-                    outputFile: tempFile,
-                    progressCallback: (received, total) => {
-                        if (received % 100000 === 0) {
-                            log('DEBUG', `Download progress: ${Math.round(received/1024)}KB/${Math.round(total/1024)}KB`, { messageId: message.id });
-                        }
-                    }
+                    outputFile: tempFile
                 });
                 
                 if (!fs.existsSync(tempFile)) {
@@ -222,13 +183,6 @@ async function downloadMedia(client, message) {
                 const buffer = fs.readFileSync(tempFile);
                 fs.unlinkSync(tempFile);
                 
-                log('INFO', `✅ Media downloaded successfully on attempt ${attempt}`, { 
-                    messageId: message.id,
-                    size: stats.size,
-                    type: message.photo ? 'photo' : message.video ? 'video' : 'document'
-                });
-                
-                pendingDownloads.delete(downloadId);
                 return {
                     buffer,
                     size: stats.size,
@@ -239,70 +193,44 @@ async function downloadMedia(client, message) {
                 
             } catch (err) {
                 lastError = err;
-                log('WARN', `Download attempt ${attempt} failed`, { 
-                    messageId: message.id,
-                    error: err.message 
-                });
-                
                 try {
                     const tempFile = path.join(TEMP_DIR, `tg_${message.id}_attempt_${attempt}`);
                     if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
                 } catch (cleanupError) {}
                 
                 if (attempt < 3) {
-                    const delay = attempt * 2000;
-                    await new Promise(resolve => setTimeout(resolve, delay));
+                    await new Promise(resolve => setTimeout(resolve, attempt * 2000));
                 }
             }
         }
         
-        pendingDownloads.delete(downloadId);
-        log('ERROR', '❌ ALL download attempts failed', { 
-            messageId: message.id,
-            lastError: lastError?.message 
-        });
         return null;
         
     } catch (error) {
-        pendingDownloads.delete(downloadId);
-        log('ERROR', 'Media download failed completely', { 
-            messageId: message.id,
-            error: error.message 
-        });
         return null;
     }
 }
 
-async function sendToAllTargets(messageData) {
+async function sendToAllGroups(messageData) {
     try {
-        if (!whatsappSock) {
-            log('ERROR', 'WhatsApp socket not available');
-            return false;
-        }
-        
-        log('INFO', `🚨 SENDING TO ALL ${ALL_TARGETS.length} TARGETS (Channel + ${WHATSAPP_GROUPS.length} Groups)`);
+        if (!whatsappSock) return false;
         
         let successCount = 0;
-        let failedTargets = [];
+        let failedGroups = [];
         
-        // Generate thumbnail once for all channel sends
+        // Generate thumbnail for photos
         let thumbnail = null;
         if (messageData.type === 'media' && messageData.mediaType === 'photo') {
             thumbnail = await generateThumbnail(messageData.buffer);
-            log('DEBUG', 'Thumbnail generated for channel', { hasThumbnail: !!thumbnail });
         }
         
-        // Process targets one by one with delays
-        for (let i = 0; i < ALL_TARGETS.length; i++) {
-            const target = ALL_TARGETS[i];
-            const isChannel = target === CRITICAL_CHANNEL;
+        // Send to each group
+        for (let i = 0; i < WHATSAPP_GROUPS.length; i++) {
+            const target = WHATSAPP_GROUPS[i];
             
             try {
-                log('DEBUG', `Sending to target ${i+1}/${ALL_TARGETS.length}: ${target}${isChannel ? ' (CHANNEL)' : ''}`);
-                
                 if (messageData.type === 'text') {
                     await whatsappSock.sendMessage(target, { text: messageData.content });
-                    log('INFO', '✅ Text sent', { target });
                     successCount++;
                     
                 } else if (messageData.type === 'media') {
@@ -315,7 +243,6 @@ async function sendToAllTargets(messageData) {
                     
                     const fileSizeMB = mediaSize / (1024 * 1024);
                     
-                    // Prepare message options
                     let messageOptions = {};
                     
                     if (fileSizeMB > 100) {
@@ -331,22 +258,13 @@ async function sendToAllTargets(messageData) {
                                 image: mediaBuffer,
                                 caption: mediaCaption
                             };
-                            // Add thumbnail for channel photos
-                            if (isChannel && thumbnail) {
+                            if (thumbnail) {
                                 messageOptions.jpegThumbnail = thumbnail;
-                                log('DEBUG', 'Added thumbnail to channel photo');
                             }
                         } else if (mediaType === 'video') {
                             messageOptions = {
                                 video: mediaBuffer,
                                 caption: mediaCaption
-                            };
-                        } else if (mediaType === 'document') {
-                            messageOptions = {
-                                document: mediaBuffer,
-                                fileName: mediaFileName,
-                                caption: mediaCaption,
-                                mimetype: mediaMimeType
                             };
                         } else {
                             messageOptions = {
@@ -359,31 +277,22 @@ async function sendToAllTargets(messageData) {
                     }
                     
                     await whatsappSock.sendMessage(target, messageOptions);
-                    log('INFO', `✅ Media sent`, { target, type: mediaType, isChannel });
                     successCount++;
                 }
                 
                 // Delay between sends
-                if (i < ALL_TARGETS.length - 1) {
+                if (i < WHATSAPP_GROUPS.length - 1) {
                     await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
                 }
                 
             } catch (err) {
-                log('ERROR', `Failed to send to ${target}`, { error: err.message });
-                failedTargets.push(target);
+                failedGroups.push(target);
             }
         }
         
-        if (failedTargets.length > 0) {
-            log('WARN', `Failed to send to ${failedTargets.length} targets`, { failedTargets });
-            return false;
-        }
-        
-        log('INFO', `✅ Successfully sent to ALL ${ALL_TARGETS.length} targets`);
-        return true;
+        return successCount > 0;
         
     } catch (error) {
-        log('ERROR', 'Send to all failed', { error: error.message });
         return false;
     }
 }
@@ -396,12 +305,11 @@ function initTelegramBot() {
             `🤖 *WhatsApp Forwarder Bot*\n\n` +
             `Send any message here and choose where to forward it.\n\n` +
             `*Options:*\n` +
-            `• 👥 *ALL* - Send to Channel + ${WHATSAPP_GROUPS.length} groups\n` +
+            `• 👥 *ALL GROUPS* - Send to ${WHATSAPP_GROUPS.length} groups\n` +
             `• 📱 *Own Chat* - Send only to your WhatsApp\n` +
             `• ❌ *Cancel* - Don't forward`;
         
         ctx.reply(helpMessage, { parse_mode: 'Markdown' });
-        log('INFO', 'Start command responded', { chatId: ctx.chat.id.toString() });
     });
     
     telegramBot.on('callback_query', async (ctx) => {
@@ -436,8 +344,8 @@ function initTelegramBot() {
             let targetText = '';
             
             if (target === 'all') {
-                success = await sendToAllTargets(messageData);
-                targetText = `Channel + ${WHATSAPP_GROUPS.length} groups`;
+                success = await sendToAllGroups(messageData);
+                targetText = `${WHATSAPP_GROUPS.length} groups`;
             } else if (target === 'own') {
                 // Send only to own number
                 const jid = WHATSAPP_NUMBER.includes('@') ? 
@@ -482,18 +390,17 @@ function initTelegramBot() {
             }
             
         } catch (error) {
-            log('ERROR', 'Callback error', { error: error.message });
+            // Silent fail
         }
     });
     
-    telegramBot.launch();
-    log('INFO', 'Telegram confirmation bot started');
+    telegramBot.launch().catch(() => {});
 }
 
 // ===== MAIN COMMAND =====
 module.exports = {
     name: 'telegram',
-    aliases: ['tg', 'bridge', 'telegrambridge'],
+    aliases: ['tg', 'bridge'],
     description: 'Telegram to WhatsApp bridge',
     usage: 'telegram [on|off|status]',
     category: 'owner',
@@ -510,12 +417,8 @@ module.exports = {
         if (!sub || sub === 'status') {
             let statusText = `🤖 *Telegram Bridge Status*\n\n`;
             statusText += `Active: ${isActive ? '✅' : '❌'}\n`;
-            statusText += `Connection: ${connectionReady ? '✅' : '❌'}\n`;
             statusText += `WhatsApp: ${WHATSAPP_NUMBER}\n`;
-            statusText += `Channel: ${CRITICAL_CHANNEL}\n`;
-            statusText += `Groups: ${WHATSAPP_GROUPS.length}\n`;
-            statusText += `\n*Targets:*\n`;
-            statusText += `• Channel + ${WHATSAPP_GROUPS.length} groups\n\n`;
+            statusText += `Groups: ${WHATSAPP_GROUPS.length}\n\n`;
             statusText += `*Commands:*\n`;
             statusText += `• \`${config.prefix}telegram on\` - Start bridge\n`;
             statusText += `• \`${config.prefix}telegram off\` - Stop bridge\n`;
@@ -536,7 +439,6 @@ module.exports = {
             await reply('🔄 Starting Telegram bridge...');
             
             try {
-                // Initialize Telegram client
                 if (telegramClient) await telegramClient.disconnect();
                 
                 telegramClient = new TelegramClient(new StringSession(""), API_ID, API_HASH, {
@@ -545,20 +447,15 @@ module.exports = {
                 });
                 
                 await telegramClient.start({ botAuthToken: TELEGRAM_BOT_TOKEN });
-                log('INFO', 'Telegram client connected');
                 
-                // Initialize confirmation bot if not already
                 if (!telegramBot) {
                     initTelegramBot();
                 }
                 
-                // Start keep-alive
-                const keepAliveInterval = startKeepAlive();
-                
+                startKeepAlive();
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 connectionReady = true;
                 
-                // Message handler
                 async function messageHandler(event) {
                     try {
                         const msg = event.message;
@@ -571,23 +468,10 @@ module.exports = {
                         }
                         
                         // Skip messages from the bot itself
-                        if (senderId === BOT_ID) {
-                            log('DEBUG', 'Skipping message from bot itself', { senderId });
-                            return;
-                        }
+                        if (senderId === BOT_ID) return;
                         
                         // Skip commands
                         if (msg.text && msg.text.startsWith('/')) return;
-                        
-                        // Skip confirmation messages
-                        if (msg.text && msg.text.includes('📨 New Message')) return;
-                        
-                        log('INFO', '📨 MESSAGE RECEIVED', {
-                            messageId: msg.id.toString(),
-                            senderId: senderId,
-                            hasText: !!msg.text,
-                            hasMedia: !!msg.media
-                        });
                         
                         const chatId = msg.chatId?.value?.toString() || msg.peerId?.userId?.toString();
                         if (!chatId) return;
@@ -604,8 +488,6 @@ module.exports = {
                         };
                         
                         if (msg.media && msg.media.className !== 'MessageMediaWebPage') {
-                            log('DEBUG', '📥 Downloading media', { messageId: msg.id.toString() });
-                            
                             const mediaResult = await downloadMedia(telegramClient, msg);
                             
                             if (mediaResult) {
@@ -643,20 +525,7 @@ module.exports = {
                                     caption: formattedText,
                                     timestamp: Date.now()
                                 };
-                                
-                                log('INFO', '✅ Media downloaded successfully', { 
-                                    type: mediaType, 
-                                    size: mediaResult.size
-                                });
                             } else {
-                                log('ERROR', '❌ Media download failed', { 
-                                    messageId: msg.id.toString() 
-                                });
-                                await telegramBot.telegram.sendMessage(
-                                    parseInt(chatId),
-                                    `❌ Failed to download media. Message cannot be forwarded.`,
-                                    {}
-                                );
                                 return;
                             }
                         }
@@ -692,7 +561,7 @@ module.exports = {
                                 reply_markup: {
                                     inline_keyboard: [
                                         [
-                                            { text: '👥 ALL (Channel + Groups)', callback_data: `confirm_${msg.id}_all` },
+                                            { text: `👥 ALL GROUPS (${WHATSAPP_GROUPS.length})`, callback_data: `confirm_${msg.id}_all` },
                                             { text: '📱 Own Chat', callback_data: `confirm_${msg.id}_own` }
                                         ],
                                         [
@@ -703,26 +572,23 @@ module.exports = {
                             }
                         );
                         
-                        log('INFO', '✅ Confirmation sent', { chatId, messageId: msg.id.toString() });
-                        
                     } catch (err) {
-                        log('ERROR', 'Message handler error', { error: err.message });
+                        // Silent fail - no logs
                     }
                 }
                 
                 telegramClient.addEventHandler(messageHandler, new NewMessage({}));
-                log('INFO', '✅ Message handler registered');
                 
                 isActive = true;
                 
                 await react('✅');
                 await reply(`✅ *Telegram Bridge Active*\n\n` +
-                           `👥 ALL = Channel + ${WHATSAPP_GROUPS.length} groups\n` +
+                           `👥 ALL = ${WHATSAPP_GROUPS.length} groups\n` +
                            `📱 Forward to: ${WHATSAPP_NUMBER}\n\n` +
                            `Send any message to your Telegram bot to forward!`);
                 
             } catch (error) {
-                log('ERROR', 'Failed to start bridge', { error: error.message });
+                logError('Failed to start bridge', error);
                 await react('❌');
                 await reply(`❌ Failed to start: ${error.message}`);
             }
@@ -748,6 +614,10 @@ module.exports = {
                     telegramBot.stop();
                     telegramBot = null;
                 }
+                if (keepAliveInterval) {
+                    clearInterval(keepAliveInterval);
+                    keepAliveInterval = null;
+                }
                 
                 isActive = false;
                 connectionReady = false;
@@ -755,9 +625,9 @@ module.exports = {
                 
                 await react('🔴');
                 await reply('🔴 *Telegram Bridge Stopped*');
-                log('INFO', 'Bridge stopped');
                 
             } catch (error) {
+                logError('Error stopping bridge', error);
                 await react('❌');
                 await reply(`❌ Error stopping: ${error.message}`);
             }
@@ -767,143 +637,5 @@ module.exports = {
         
         // Invalid subcommand
         await reply(`❌ Unknown subcommand: ${sub}\nUse \`${config.prefix}telegram\` for help`);
-    }
-};
-
-// Auto-start function (called from index.js if needed)
-module.exports.autoStart = async function(sock) {
-    if (isActive || autoStartCompleted) {
-        return true;
-    }
-    
-    log('INFO', '🔄 Auto-starting Telegram bridge...');
-    whatsappSock = sock;
-    
-    try {
-        // Initialize Telegram client
-        telegramClient = new TelegramClient(new StringSession(""), API_ID, API_HASH, {
-            connectionRetries: 5,
-            downloadRetries: 3
-        });
-        
-        await telegramClient.start({ botAuthToken: TELEGRAM_BOT_TOKEN });
-        
-        if (!telegramBot) {
-            initTelegramBot();
-        }
-        
-        startKeepAlive();
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        connectionReady = true;
-        
-        // Message handler (same as above)
-        async function messageHandler(event) {
-            try {
-                const msg = event.message;
-                if (!msg) return;
-                
-                let senderId = null;
-                if (msg.fromId) {
-                    if (msg.fromId.userId) senderId = msg.fromId.userId.toString();
-                    else if (msg.fromId.value) senderId = msg.fromId.value.toString();
-                }
-                
-                if (senderId === BOT_ID) return;
-                if (msg.text && msg.text.startsWith('/')) return;
-                if (msg.text && msg.text.includes('📨 New Message')) return;
-                
-                const chatId = msg.chatId?.value?.toString() || msg.peerId?.userId?.toString();
-                if (!chatId) return;
-                
-                const text = msg.text || msg.caption || '';
-                const entities = msg.entities || [];
-                const formattedText = convertTelegramToWhatsApp(text, entities);
-                
-                let messageData = {
-                    type: 'text',
-                    content: formattedText,
-                    timestamp: Date.now()
-                };
-                
-                if (msg.media && msg.media.className !== 'MessageMediaWebPage') {
-                    const mediaResult = await downloadMedia(telegramClient, msg);
-                    
-                    if (mediaResult) {
-                        let fileName = 'file';
-                        let mediaType = 'document';
-                        
-                        if (msg.photo) {
-                            mediaType = 'photo';
-                            fileName = `image_${msg.id}.jpg`;
-                        } else if (msg.video) {
-                            mediaType = 'video';
-                            fileName = `video_${msg.id}.mp4`;
-                        } else if (msg.document) {
-                            mediaType = 'document';
-                            const attr = msg.document.attributes.find(a => a.className === 'DocumentAttributeFilename');
-                            fileName = attr?.fileName || `file_${msg.id}.bin`;
-                        }
-                        
-                        messageData = {
-                            type: 'media',
-                            mediaType,
-                            buffer: mediaResult.buffer,
-                            size: mediaResult.size,
-                            mimeType: mediaResult.mimeType,
-                            fileName,
-                            caption: formattedText,
-                            timestamp: Date.now()
-                        };
-                    }
-                }
-                
-                const pendingKey = `${chatId}_${msg.id}`;
-                pendingMessages.set(pendingKey, messageData);
-                
-                const previewText = formattedText.length > 100 ? 
-                    formattedText.substring(0, 100) + '...' : 
-                    formattedText || '[No text]';
-                
-                const fileSizeInfo = messageData.type === 'media' ? 
-                    ` (${(messageData.size / 1024 / 1024).toFixed(2)}MB)` : '';
-                
-                const confirmationMessage = 
-                    `📨 New Message\n\n` +
-                    `Preview: ${previewText}${fileSizeInfo}\n\n` +
-                    `Forward to?`;
-                
-                await telegramBot.telegram.sendMessage(
-                    parseInt(chatId),
-                    confirmationMessage,
-                    {
-                        reply_markup: {
-                            inline_keyboard: [
-                                [
-                                    { text: '👥 ALL (Channel + Groups)', callback_data: `confirm_${msg.id}_all` },
-                                    { text: '📱 Own Chat', callback_data: `confirm_${msg.id}_own` }
-                                ],
-                                [
-                                    { text: '❌ Cancel', callback_data: `confirm_${msg.id}_cancel` }
-                                ]
-                            ]
-                        }
-                    }
-                );
-                
-            } catch (err) {
-                log('ERROR', 'Auto-start message handler error', { error: err.message });
-            }
-        }
-        
-        telegramClient.addEventHandler(messageHandler, new NewMessage({}));
-        
-        isActive = true;
-        autoStartCompleted = true;
-        log('INFO', '✅ Telegram bridge auto-started successfully');
-        return true;
-        
-    } catch (error) {
-        log('ERROR', 'Auto-start failed', { error: error.message });
-        return false;
     }
 };
