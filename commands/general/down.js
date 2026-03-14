@@ -76,7 +76,10 @@ async function updateProgress(sock, chatId, messageKey, percent, downloaded, tot
 }
 
 async function downloadFile(sock, chatId, messageKey, url, fileName, contentLength, contentType, context) {
-    const { reply, react } = context;
+    // FIXED: Get sender from context
+    const { sender, reply, react } = context;
+    const senderNumber = sender ? sender.split('@')[0] : 'Unknown';
+    
     const downloadId = `${chatId}_${Date.now()}`;
     const safeFileName = fileName.replace(/[^a-zA-Z0-9.-]/g, '_');
     const tempFile = path.join(TEMP_DIR, `download_${Date.now()}_${safeFileName}`);
@@ -88,7 +91,8 @@ async function downloadFile(sock, chatId, messageKey, url, fileName, contentLeng
         progress: 0, 
         status: 'starting',
         url: url.substring(0, 50) + '...',
-        startTime: Date.now()
+        startTime: Date.now(),
+        requestedBy: senderNumber
     });
     
     downloadStats.total++;
@@ -184,7 +188,7 @@ async function downloadFile(sock, chatId, messageKey, url, fileName, contentLeng
                        `📦 *Size:* ${formatFileSize(stats.size)}\n` +
                        `⚡ *Speed:* ${download?.speed || 'N/A'}\n` +
                        `⏱️ *Time:* ${formatTime(Date.now() - startTime)}\n` +
-                       `👤 *Requested by:* @${sender.split('@')[0]}`;
+                       `👤 *Requested by:* @${senderNumber}`;
         
         await sock.sendMessage(chatId, {
             document: fileBuffer,
@@ -245,7 +249,7 @@ module.exports = {
         } = context;
         
         const url = args[0];
-        const senderNumber = sender.split('@')[0];
+        const senderNumber = sender ? sender.split('@')[0] : 'Unknown';
         
         // 1. Show help if no URL
         if (!url) {
@@ -290,13 +294,6 @@ module.exports = {
             if (!isBotAdmin) {
                 await reply('⚠️ *Note:* I am not an admin. Some features may be limited.');
             }
-            
-            // Check if user is allowed to download in this group
-            // You could add database check here later
-            // const groupSettings = database.getGroupSettings(from);
-            // if (!groupSettings.allowDownloads && !isAdmin && !isOwner) {
-            //     return reply('❌ Downloads are disabled in this group.');
-            // }
             
             // Log group download
             console.log(`📥 Group download in ${groupMetadata?.subject || from} by @${senderNumber}`);
@@ -349,7 +346,7 @@ module.exports = {
                 });
             }
 
-            // Start download in background
+            // Start download in background - PASS THE FULL CONTEXT
             downloadFile(sock, from, progressMsg.key, url, fileName, contentLength, contentType, context)
                 .catch(err => {
                     console.error('Background download error:', err);
@@ -415,6 +412,7 @@ module.exports.dlstatus = {
                 status += `   📊 Progress: ${download.progress}%\n`;
                 status += `   📍 Status: ${download.status}\n`;
                 status += `   ⏱️ Elapsed: ${elapsed}\n`;
+                status += `   👤 Requested by: @${download.requestedBy}\n`;
                 if (download.speed) status += `   ⚡ Speed: ${download.speed}\n`;
                 if (download.eta) status += `   ⏳ ETA: ${download.eta}\n`;
                 if (i < activeDownloads.size) status += '\n';
