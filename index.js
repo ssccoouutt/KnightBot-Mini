@@ -83,6 +83,7 @@ function cleanupPuppeteerCache() {
     console.error('⚠️ Failed to cleanup Puppeteer cache:', err.message || err);
   }
 }
+
 // Optimized in-memory store with hard limits (Map-based for better memory management)
 const store = {
   messages: new Map(), // Use Map instead of plain object
@@ -312,6 +313,41 @@ async function startBot() {
       // Initialize anti-call feature
       handler.initializeAntiCall(sock);
 
+      // ===== AUTO-START TELEGRAM BRIDGE =====
+      if (config.autoStartTelegram) {
+        try {
+          // Try to load telegram command
+          const telegramCommandPath = './commands/owner/telegram';
+          const telegramCommand = require(telegramCommandPath);
+          
+          if (telegramCommand && typeof telegramCommand.autoStart === 'function') {
+            console.log('🔄 Auto-starting Telegram bridge...');
+            
+            // Start Telegram bridge in background (don't await to not block)
+            telegramCommand.autoStart(sock).then(success => {
+              if (success) {
+                console.log('✅ Telegram bridge is now active!');
+              } else {
+                console.log('❌ Telegram bridge auto-start failed');
+              }
+            }).catch(err => {
+              console.error('❌ Telegram bridge error:', err.message);
+            });
+          } else {
+            console.log('⚠️ Telegram bridge auto-start function not found');
+          }
+        } catch (err) {
+          // Silently ignore if telegram command doesn't exist
+          // This prevents errors when telegram.js is not yet added
+          if (err.code !== 'MODULE_NOT_FOUND') {
+            console.log('⚠️ Telegram bridge not available:', err.message);
+          }
+        }
+      } else {
+        console.log('⏸️ Telegram bridge auto-start disabled in config');
+      }
+      // ===== END OF AUTO-START =====
+
       // Cleanup old chats (keep only active ones, e.g., last touched <1 day)
       const now = Date.now();
       for (const [jid, chatMsgs] of store.messages.entries()) {
@@ -454,6 +490,7 @@ async function startBot() {
 
   return sock;
 }
+
 // Start the bot
 console.log('🚀 Starting WhatsApp MD Bot...\n');
 console.log(`📦 Bot Name: ${config.botName}`);
@@ -468,6 +505,7 @@ startBot().catch(err => {
   console.error('Error starting bot:', err);
   process.exit(1);
 });
+
 // Handle process termination
 process.on('uncaughtException', (err) => {
   // Handle ENOSPC errors gracefully without crashing
@@ -480,6 +518,7 @@ process.on('uncaughtException', (err) => {
   }
   console.error('Uncaught Exception:', err);
 });
+
 process.on('unhandledRejection', (err) => {
   // Handle ENOSPC errors gracefully
   if (err.code === 'ENOSPC' || err.errno === -28 || err.message?.includes('no space left on device')) {
@@ -497,5 +536,6 @@ process.on('unhandledRejection', (err) => {
   }
   console.error('Unhandled Rejection:', err);
 });
+
 // Export store for use in commands
 module.exports = { store };
