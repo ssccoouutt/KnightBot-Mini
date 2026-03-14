@@ -45,7 +45,10 @@
         "ruhend-scraper": "^9.0.8",
         "sharp": "^0.33.4",
         "yt-search": "^2.13.1",
-        "ytdl-core": "^4.11.5"
+        "ytdl-core": "^4.11.5",
+        
+        "telegram": "^2.26.21",
+        "telegraf": "^4.16.3"
     },
     "devDependencies": {
         "nodemon": "^3.1.0"
