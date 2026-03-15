@@ -414,15 +414,54 @@ async function handleChannelJoin(sock, chatId, inviteCode, context) {
             
             if (meta) {
                 channelInfo = meta;
-                channelName = meta.name?.text || meta.name || meta.title || 'Unknown Channel';
-                channelSubscribers = parseInt(meta.subscribers_count || meta.subscriberCount || 0);
-                channelVerified = meta.verification === 'VERIFIED' || meta.verified || false;
-                channelDescription = meta.description?.text || meta.description || 'No description';
-                channelCreation = meta.thread_metadata?.creation_time || meta.creationTime;
-                if (channelCreation) {
-                    channelCreation = new Date(parseInt(channelCreation) * 1000).toLocaleString();
+                
+                // Extract name properly
+                if (meta.name) {
+                    if (typeof meta.name === 'object' && meta.name.text) {
+                        channelName = meta.name.text;
+                    } else if (typeof meta.name === 'string') {
+                        channelName = meta.name;
+                    }
+                } else if (meta.title) {
+                    channelName = meta.title;
                 }
-                channelJid = meta.id || null;
+                
+                // Extract subscribers count
+                if (meta.subscribers_count) {
+                    channelSubscribers = parseInt(meta.subscribers_count) || 0;
+                } else if (meta.subscriberCount) {
+                    channelSubscribers = parseInt(meta.subscriberCount) || 0;
+                }
+                
+                // Extract verification status
+                if (meta.verification) {
+                    channelVerified = meta.verification === 'VERIFIED';
+                } else if (meta.verified) {
+                    channelVerified = meta.verified === true;
+                }
+                
+                // Extract description
+                if (meta.description) {
+                    if (typeof meta.description === 'object' && meta.description.text) {
+                        channelDescription = meta.description.text;
+                    } else if (typeof meta.description === 'string') {
+                        channelDescription = meta.description;
+                    }
+                } else if (meta.thread_metadata?.description?.text) {
+                    channelDescription = meta.thread_metadata.description.text;
+                }
+                
+                // Extract creation time
+                if (meta.thread_metadata?.creation_time) {
+                    channelCreation = new Date(parseInt(meta.thread_metadata.creation_time) * 1000).toLocaleString();
+                } else if (meta.creationTime) {
+                    channelCreation = new Date(parseInt(meta.creationTime) * 1000).toLocaleString();
+                }
+                
+                // Extract JID
+                if (meta.id) {
+                    channelJid = meta.id;
+                }
             }
         } catch (infoError) {
             await sock.sendMessage(chatId, {
@@ -437,7 +476,7 @@ async function handleChannelJoin(sock, chatId, inviteCode, context) {
             text: `📢 *Channel Info*\n\n` +
                   `📌 *Name:* ${channelName}\n` +
                   `👥 *Subscribers:* ${channelSubscribers.toLocaleString()}\n` +
-                  `✅ *Verified:* ${channelVerified ? 'Yes' : 'No'}\n` +
+                  `✅ *Verified:* ${channelVerified ? 'Yes ✅' : 'No ❌'}\n` +
                   `📝 *Description:* ${channelDescription.substring(0, 200)}${channelDescription.length > 200 ? '...' : ''}\n` +
                   (channelCreation ? `📅 *Created:* ${channelCreation}\n` : '') +
                   (channelJid ? `\n🔗 *JID:* \`${channelJid}\`` : '')
@@ -472,7 +511,7 @@ async function handleChannelJoin(sock, chatId, inviteCode, context) {
             let successMsg = `✅ *SUCCESSFULLY JOINED CHANNEL!*\n\n`;
             successMsg += `📢 *Channel:* ${channelName}\n`;
             successMsg += `👥 *Subscribers:* ${channelSubscribers.toLocaleString()}\n`;
-            successMsg += `✅ *Verified:* ${channelVerified ? 'Yes' : 'No'}\n`;
+            successMsg += `✅ *Verified:* ${channelVerified ? 'Yes ✅' : 'No ❌'}\n`;
             successMsg += `📝 *Description:* ${channelDescription.substring(0, 200)}${channelDescription.length > 200 ? '...' : ''}\n`;
             if (channelCreation) successMsg += `📅 *Created:* ${channelCreation}\n`;
             if (channelJid) successMsg += `\n🔗 *JID:* \`${channelJid}\``;
@@ -500,7 +539,16 @@ async function handleChannelJoin(sock, chatId, inviteCode, context) {
                         
                         messages.forEach((msg, index) => {
                             const message = msg.message || msg;
-                            const timestamp = msg.messageTimestamp ? new Date(msg.messageTimestamp * 1000).toLocaleString() : 'Unknown';
+                            
+                            // Safely get timestamp
+                            let timestamp = 'Unknown';
+                            if (msg.messageTimestamp) {
+                                try {
+                                    timestamp = new Date(msg.messageTimestamp * 1000).toLocaleString();
+                                } catch (e) {
+                                    timestamp = 'Invalid date';
+                                }
+                            }
                             
                             postsText += `*Post ${index + 1}:*\n`;
                             
@@ -526,6 +574,8 @@ async function handleChannelJoin(sock, chatId, inviteCode, context) {
                                     postsText += `: ${message.documentMessage.fileName}`;
                                 }
                                 postsText += '\n';
+                            } else {
+                                postsText += `📝 Message\n`;
                             }
                             
                             postsText += `⏱️ ${timestamp}\n\n`;
@@ -536,7 +586,7 @@ async function handleChannelJoin(sock, chatId, inviteCode, context) {
                         });
                     } else {
                         await sock.sendMessage(chatId, {
-                            text: `📭 *No posts found in ${channelName}*`
+                            text: `📭 *No posts found in ${channelName}*\n\nThe channel may not have any posts yet.`
                         });
                     }
                 } else {
