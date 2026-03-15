@@ -1,5 +1,56 @@
 const config = require('../../config');
 
+/**
+ * Extract invite code from WhatsApp channel link
+ * @param {string} link - Channel link (e.g., https://whatsapp.com/channel/0029VaAbCdEfGhIJkL)
+ * @returns {string|null} - Invite code or null if invalid
+ */
+function getChannelInviteCode(link) {
+  try {
+    // Clean the link
+    let cleanLink = link.trim();
+    
+    // Remove any query parameters or fragments
+    cleanLink = cleanLink.split('?')[0].split('#')[0];
+    
+    // Try to parse as URL first
+    try {
+      const url = new URL(cleanLink);
+      const parts = url.pathname.split('/').filter(Boolean);
+      const code = parts[parts.length - 1];
+      if (code && code.length > 0) {
+        return code;
+      }
+    } catch (urlError) {
+      // If URL parsing fails, try regex extraction
+    }
+    
+    // Regex patterns to extract invite code
+    const patterns = [
+      /(?:whatsapp\.com|wa\.me)\/channel\/([A-Za-z0-9]+)/i,
+      /\/channel\/([A-Za-z0-9]+)/i,
+      /channel\/([A-Za-z0-9]+)/i
+    ];
+    
+    for (const pattern of patterns) {
+      const match = cleanLink.match(pattern);
+      if (match && match[1]) {
+        return match[1];
+      }
+    }
+    
+    // If no pattern matches, check if the link itself is just the code
+    if (/^[A-Za-z0-9]+$/.test(cleanLink)) {
+      return cleanLink;
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error extracting invite code:', error);
+    return null;
+  }
+}
+
 module.exports = {
     name: 'join',
     aliases: ['joinlink', 'joinchat', 'joingroup', 'joinchannel'],
@@ -16,31 +67,40 @@ module.exports = {
             return;
         }
 
-        const input = args[0].trim();
+        const input = args.join(' ').trim();
         await react('⏳');
 
         // Detect link type
         let linkType = 'unknown';
         let code = '';
-        let fullLink = input;
-
-        // Extract code from different link formats
-        if (input.includes('chat.whatsapp.com/')) {
+        
+        // First check if it's a channel link
+        if (input.includes('whatsapp.com/channel/')) {
+            // Channel link
+            code = getChannelInviteCode(input);
+            linkType = 'channel';
+        } 
+        // Then check if it's a group link
+        else if (input.includes('chat.whatsapp.com/')) {
             // Group or Community link
             code = input.split('chat.whatsapp.com/')[1].split('?')[0].split('/')[0].trim();
             linkType = 'group';
-        } else if (input.includes('whatsapp.com/channel/')) {
-            // Channel link
-            code = input.split('whatsapp.com/channel/')[1].split('?')[0].split('/')[0].trim();
-            linkType = 'channel';
-        } else if (input.includes('invite/')) {
+        } 
+        else if (input.includes('invite/')) {
             // Alternative format
             code = input.split('invite/')[1].split('?')[0].split('/')[0].trim();
             linkType = 'group';
-        } else {
-            // Try as direct code
-            code = input;
-            linkType = 'group';
+        } 
+        else {
+            // Try as direct code - check if it matches channel code pattern
+            if (/^[A-Za-z0-9]+$/.test(input) && input.length > 10) {
+                code = input;
+                // Assume it's a channel code if it's long alphanumeric
+                linkType = 'channel';
+            } else {
+                code = input;
+                linkType = 'group';
+            }
         }
 
         if (!code) {
@@ -342,92 +402,79 @@ async function handleGroupJoin(sock, chatId, statusMsg, inviteCode, context) {
     }
 }
 
-async function handleChannelJoin(sock, chatId, statusMsg, channelId, context) {
+async function handleChannelJoin(sock, chatId, statusMsg, inviteCode, context) {
     const { react } = context;
 
     try {
-        // Format channel JID
-        const channelJid = channelId.includes('@newsletter') ? channelId : `${channelId}@newsletter`;
-        
-        // First, try to get channel info using the correct method
+        // First, get channel metadata using the invite code (exactly like newsletter.js)
         let channelInfo = null;
         let channelName = 'Unknown Channel';
-        let channelSubscribers = 'Unknown';
+        let channelSubscribers = 0;
         let channelVerified = false;
         let channelDescription = 'No description';
-        let channelCreation = 'Unknown';
+        let channelCreation = null;
+        let channelJid = null;
 
         try {
-            // Try to get channel metadata
-            if (sock.newsletter && sock.newsletter.metadata) {
-                const metadata = await sock.newsletter.metadata('me', channelJid);
-                if (metadata) {
-                    channelInfo = metadata;
-                    channelName = metadata.name || metadata.title || 'Unknown Channel';
-                    channelSubscribers = metadata.subscriber_count || metadata.followers || 'Unknown';
-                    channelVerified = metadata.verified || false;
-                    channelDescription = metadata.description || metadata.desc || 'No description';
-                    channelCreation = metadata.creation_time ? new Date(metadata.creation_time * 1000).toLocaleString() : 'Unknown';
-                }
-            } else if (sock.newsletterMetadata) {
-                // Alternative method
-                const metadata = await sock.newsletterMetadata('me', [channelJid]);
-                if (metadata && metadata[channelJid]) {
-                    channelInfo = metadata[channelJid];
-                    channelName = channelInfo.name || channelInfo.title || 'Unknown Channel';
-                    channelSubscribers = channelInfo.subscriber_count || channelInfo.followers || 'Unknown';
-                    channelVerified = channelInfo.verified || false;
-                    channelDescription = channelInfo.description || channelInfo.desc || 'No description';
-                    channelCreation = channelInfo.creation_time ? new Date(channelInfo.creation_time * 1000).toLocaleString() : 'Unknown';
-                }
+            // Use newsletterMetadata with 'invite' parameter (same as newsletter.js)
+            const meta = await sock.newsletterMetadata('invite', inviteCode);
+            
+            if (meta) {
+                channelInfo = meta;
+                channelName = meta.name || meta.title || 'Unknown Channel';
+                channelSubscribers = meta.subscriberCount || 0;
+                channelVerified = meta.verified || false;
+                channelDescription = meta.description || 'No description';
+                channelCreation = meta.creationTime ? new Date(meta.creationTime * 1000).toLocaleString() : 'Unknown';
+                channelJid = meta.id || null;
             }
         } catch (infoError) {
             console.log('Could not fetch channel metadata:', infoError.message);
-            // Continue anyway
+            
+            // If we can't get metadata, the channel might not exist
+            await sock.sendMessage(chatId, {
+                text: `❌ *Channel not found*\n\nInvite code \`${inviteCode}\` is invalid or the channel does not exist.`,
+                edit: statusMsg.key
+            });
+            await react('❌');
+            return;
         }
 
         // Update status with channel info
         await sock.sendMessage(chatId, {
             text: `📢 *Channel Info*\n\n` +
-                  `Name: ${channelName}\n` +
-                  `Subscribers: ${channelSubscribers}\n` +
-                  `Verified: ${channelVerified ? 'Yes ✅' : 'No ❌'}\n\n` +
-                  `⏳ Attempting to join...`,
+                  `📌 *Name:* ${channelName}\n` +
+                  `👥 *Subscribers:* ${channelSubscribers.toLocaleString()}\n` +
+                  `✅ *Verified:* ${channelVerified ? 'Yes' : 'No'}\n` +
+                  `📝 *Description:* ${channelDescription.substring(0, 200)}${channelDescription.length > 200 ? '...' : ''}\n` +
+                  (channelCreation ? `📅 *Created:* ${channelCreation}\n` : '') +
+                  (channelJid ? `\n🔗 *JID:* \`${channelJid}\`\n` : '') +
+                  `\n⏳ Attempting to join...`,
             edit: statusMsg.key
         });
 
-        // Try to join the channel using the correct method
+        // Try to follow/join the channel
         let joined = false;
         let joinError = null;
 
         try {
-            // Method 1: newsletterJoin (most common)
-            if (sock.newsletterJoin) {
-                await sock.newsletterJoin(channelJid);
+            // Use newsletterFollow method (most common for joining channels)
+            if (sock.newsletterFollow) {
+                const jidToFollow = channelJid || (channelInfo ? channelInfo.id : `${inviteCode}@newsletter`);
+                await sock.newsletterFollow(jidToFollow);
+                joined = true;
+                console.log(`✅ Joined channel using newsletterFollow: ${channelName}`);
+            }
+            // Try alternative methods if newsletterFollow doesn't exist
+            else if (sock.newsletterJoin) {
+                await sock.newsletterJoin(inviteCode);
                 joined = true;
             }
-            // Method 2: newsletterFollow
-            else if (sock.newsletterFollow) {
-                await sock.newsletterFollow(channelJid);
-                joined = true;
-            }
-            // Method 3: joinNewsletter
-            else if (sock.joinNewsletter) {
-                await sock.joinNewsletter(channelJid);
-                joined = true;
-            }
-            // Method 4: followNewsletter
             else if (sock.followNewsletter) {
-                await sock.followNewsletter(channelJid);
-                joined = true;
-            }
-            // Method 5: Try via newsletter mutations
-            else if (sock.newsletter && sock.newsletter.follow) {
-                await sock.newsletter.follow(channelJid);
+                await sock.followNewsletter(channelJid || `${inviteCode}@newsletter`);
                 joined = true;
             }
             else {
-                // No method found
                 throw new Error('Channel joining not supported in this Baileys version');
             }
         } catch (error) {
@@ -437,6 +484,7 @@ async function handleChannelJoin(sock, chatId, statusMsg, channelId, context) {
             if (error.message?.includes('already-exists') || error.data === 304 ||
                 error.message?.includes('already following') || error.message?.includes('already joined')) {
                 joined = true; // Already joined counts as success
+                console.log(`Already following channel: ${channelName}`);
             } else {
                 throw error; // Re-throw other errors
             }
@@ -446,18 +494,18 @@ async function handleChannelJoin(sock, chatId, statusMsg, channelId, context) {
             // Success message
             let successMsg = `✅ *SUCCESSFULLY JOINED CHANNEL!*\n\n`;
             successMsg += `📢 *Channel:* ${channelName}\n`;
-            successMsg += `👥 *Subscribers:* ${channelSubscribers}\n`;
+            successMsg += `👥 *Subscribers:* ${channelSubscribers.toLocaleString()}\n`;
             successMsg += `✅ *Verified:* ${channelVerified ? 'Yes' : 'No'}\n`;
             successMsg += `📝 *Description:* ${channelDescription.substring(0, 200)}${channelDescription.length > 200 ? '...' : ''}\n`;
-            successMsg += `📅 *Created:* ${channelCreation}\n`;
-            successMsg += `\n🔗 *JID:* \`${channelJid}\``;
+            if (channelCreation) successMsg += `📅 *Created:* ${channelCreation}\n`;
+            if (channelJid) successMsg += `\n🔗 *JID:* \`${channelJid}\``;
 
             await sock.sendMessage(chatId, {
                 text: successMsg,
                 edit: statusMsg.key
             });
 
-            console.log(`📢 Bot joined channel: ${channelName} (${channelJid})`);
+            console.log(`📢 Bot joined channel: ${channelName} (${channelJid || inviteCode})`);
             await react('✅');
         }
 
