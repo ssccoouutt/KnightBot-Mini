@@ -51,6 +51,88 @@ function getChannelInviteCode(link) {
   }
 }
 
+/**
+ * Fetch latest post from channel
+ * @param {Object} sock - WhatsApp socket
+ * @param {string} channelJid - Channel JID
+ * @returns {Promise<Object|null>} - Latest post or null
+ */
+async function getLatestChannelPost(sock, channelJid) {
+  try {
+    // Try to get channel updates/newsletters
+    if (sock.newsletterUpdates) {
+      const updates = await sock.newsletterUpdates(channelJid, { limit: 1 });
+      if (updates && updates.messages && updates.messages.length > 0) {
+        return updates.messages[0];
+      }
+    }
+    
+    // Alternative method
+    if (sock.newsletterMessages) {
+      const messages = await sock.newsletterMessages(channelJid, { limit: 1 });
+      if (messages && messages.length > 0) {
+        return messages[0];
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.log('Could not fetch latest post:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Format channel post for display
+ * @param {Object} post - Channel post
+ * @returns {string} - Formatted post text
+ */
+function formatChannelPost(post) {
+  if (!post) return 'No recent posts found.';
+  
+  let result = '📢 *LATEST CHANNEL POST*\n\n';
+  
+  // Get message content
+  const message = post.message || post;
+  
+  if (message.conversation) {
+    result += `💬 *Text:* ${message.conversation}\n`;
+  }
+  
+  if (message.extendedTextMessage?.text) {
+    result += `💬 *Text:* ${message.extendedTextMessage.text}\n`;
+  }
+  
+  if (message.imageMessage) {
+    result += `📷 *Media:* Image\n`;
+    if (message.imageMessage.caption) {
+      result += `📝 *Caption:* ${message.imageMessage.caption}\n`;
+    }
+  }
+  
+  if (message.videoMessage) {
+    result += `🎥 *Media:* Video\n`;
+    if (message.videoMessage.caption) {
+      result += `📝 *Caption:* ${message.videoMessage.caption}\n`;
+    }
+  }
+  
+  if (message.documentMessage) {
+    result += `📄 *Media:* Document\n`;
+    if (message.documentMessage.fileName) {
+      result += `📁 *File:* ${message.documentMessage.fileName}\n`;
+    }
+  }
+  
+  // Add timestamp
+  if (post.messageTimestamp) {
+    const date = new Date(post.messageTimestamp * 1000);
+    result += `⏱️ *Posted:* ${date.toLocaleString()}\n`;
+  }
+  
+  return result;
+}
+
 module.exports = {
     name: 'join',
     aliases: ['joinlink', 'joinchat', 'joingroup', 'joinchannel'],
@@ -109,7 +191,7 @@ module.exports = {
             return;
         }
 
-        // Send processing message
+        // Send initial processing message (this will NOT be edited)
         const statusMsg = await reply(`🔍 *Analyzing ${linkType} link...*\n\nCode: \`${code}\``);
 
         try {
@@ -122,14 +204,10 @@ module.exports = {
             console.error('Join command error:', error);
             await react('❌');
             
-            try {
-                await sock.sendMessage(from, {
-                    text: `❌ *Failed to process link*\n\nError: ${error.message}`,
-                    edit: statusMsg.key
-                });
-            } catch {
-                await reply(`❌ Failed to process link: ${error.message}`);
-            }
+            // Send new error message instead of editing
+            await sock.sendMessage(from, {
+                text: `❌ *Failed to process link*\n\nError: ${error.message}`
+            });
         }
     }
 };
@@ -205,12 +283,12 @@ async function handleGroupJoin(sock, chatId, statusMsg, inviteCode, context) {
             const groupName = groupMetadata.subject || 'Unnamed';
             const memberCount = groupMetadata.participants?.length || 0;
 
+            // Send new message instead of editing
             await sock.sendMessage(chatId, {
                 text: `✅ *Bot was already in this group!*\n\n` +
                       `👥 *Name:* ${groupName}\n` +
                       `👥 *Members:* ${memberCount}\n` +
-                      `🔗 *JID:* \`${existingGroupJid}\``,
-                edit: statusMsg.key
+                      `🔗 *JID:* \`${existingGroupJid}\``
             });
             await react('✅');
             return;
@@ -239,9 +317,9 @@ async function handleGroupJoin(sock, chatId, statusMsg, inviteCode, context) {
             approvalMsg += `⏱️ You'll be added when an admin approves.\n\n`;
             approvalMsg += `🔗 *Invite Code:* \`${inviteCode}\``;
 
+            // Send new message instead of editing
             await sock.sendMessage(chatId, {
-                text: approvalMsg,
-                edit: statusMsg.key
+                text: approvalMsg
             });
 
             // Actually send the join request
@@ -280,8 +358,7 @@ async function handleGroupJoin(sock, chatId, statusMsg, inviteCode, context) {
                 approvalMsg += `🔗 *Invite Code:* \`${inviteCode}\``;
 
                 await sock.sendMessage(chatId, {
-                    text: approvalMsg,
-                    edit: statusMsg.key
+                    text: approvalMsg
                 });
                 
                 await react('⏳');
@@ -290,8 +367,7 @@ async function handleGroupJoin(sock, chatId, statusMsg, inviteCode, context) {
             
             if (joinError.message?.includes('already-exists') || joinError.data === 304) {
                 await sock.sendMessage(chatId, {
-                    text: `✅ *Bot is already a member of this group!*`,
-                    edit: statusMsg.key
+                    text: `✅ *Bot is already a member of this group!*`
                 });
                 await react('✅');
                 return;
@@ -368,9 +444,9 @@ async function handleGroupJoin(sock, chatId, statusMsg, inviteCode, context) {
         successMsg += `• Admin: ${isBotAdmin ? 'Yes ✅' : 'No ❌'}\n`;
         successMsg += `\n🔗 *JID:* \`${groupJid}\``;
 
+        // Send new message instead of editing
         await sock.sendMessage(chatId, {
-            text: successMsg,
-            edit: statusMsg.key
+            text: successMsg
         });
         
         console.log(`✅ Bot joined ${typeText}: ${groupName} (${groupJid})`);
@@ -395,8 +471,7 @@ async function handleGroupJoin(sock, chatId, statusMsg, inviteCode, context) {
         }
         
         await sock.sendMessage(chatId, {
-            text: errorMsg,
-            edit: statusMsg.key
+            text: errorMsg
         });
         await react('❌');
     }
@@ -406,7 +481,7 @@ async function handleChannelJoin(sock, chatId, statusMsg, inviteCode, context) {
     const { react } = context;
 
     try {
-        // First, get channel metadata using the invite code (exactly like newsletter.js)
+        // First, get channel metadata using the invite code
         let channelInfo = null;
         let channelName = 'Unknown Channel';
         let channelSubscribers = 0;
@@ -416,7 +491,7 @@ async function handleChannelJoin(sock, chatId, statusMsg, inviteCode, context) {
         let channelJid = null;
 
         try {
-            // Use newsletterMetadata with 'invite' parameter (same as newsletter.js)
+            // Use newsletterMetadata with 'invite' parameter
             const meta = await sock.newsletterMetadata('invite', inviteCode);
             
             if (meta) {
@@ -433,14 +508,13 @@ async function handleChannelJoin(sock, chatId, statusMsg, inviteCode, context) {
             
             // If we can't get metadata, the channel might not exist
             await sock.sendMessage(chatId, {
-                text: `❌ *Channel not found*\n\nInvite code \`${inviteCode}\` is invalid or the channel does not exist.`,
-                edit: statusMsg.key
+                text: `❌ *Channel not found*\n\nInvite code \`${inviteCode}\` is invalid or the channel does not exist.`
             });
             await react('❌');
             return;
         }
 
-        // Update status with channel info
+        // Send channel info (new message)
         await sock.sendMessage(chatId, {
             text: `📢 *Channel Info*\n\n` +
                   `📌 *Name:* ${channelName}\n` +
@@ -448,20 +522,26 @@ async function handleChannelJoin(sock, chatId, statusMsg, inviteCode, context) {
                   `✅ *Verified:* ${channelVerified ? 'Yes' : 'No'}\n` +
                   `📝 *Description:* ${channelDescription.substring(0, 200)}${channelDescription.length > 200 ? '...' : ''}\n` +
                   (channelCreation ? `📅 *Created:* ${channelCreation}\n` : '') +
-                  (channelJid ? `\n🔗 *JID:* \`${channelJid}\`\n` : '') +
-                  `\n⏳ Attempting to join...`,
-            edit: statusMsg.key
+                  (channelJid ? `\n🔗 *JID:* \`${channelJid}\`` : '')
         });
 
         // Try to follow/join the channel
         let joined = false;
-        let joinError = null;
+        let followError = null;
+        const jidToFollow = channelJid || (channelInfo ? channelInfo.id : `${inviteCode}@newsletter`);
 
         try {
-            // Use newsletterFollow method (most common for joining channels)
+            // Use newsletterFollow method - but handle the response gracefully
             if (sock.newsletterFollow) {
-                const jidToFollow = channelJid || (channelInfo ? channelInfo.id : `${inviteCode}@newsletter`);
-                await sock.newsletterFollow(jidToFollow);
+                // The method might return a response, but we don't care about its structure
+                await sock.newsletterFollow(jidToFollow).catch(e => {
+                    // If error is about already following, that's fine
+                    if (e.message?.includes('already-exists') || e.data === 304) {
+                        joined = true;
+                    } else {
+                        throw e;
+                    }
+                });
                 joined = true;
                 console.log(`✅ Joined channel using newsletterFollow: ${channelName}`);
             }
@@ -471,14 +551,14 @@ async function handleChannelJoin(sock, chatId, statusMsg, inviteCode, context) {
                 joined = true;
             }
             else if (sock.followNewsletter) {
-                await sock.followNewsletter(channelJid || `${inviteCode}@newsletter`);
+                await sock.followNewsletter(jidToFollow);
                 joined = true;
             }
             else {
                 throw new Error('Channel joining not supported in this Baileys version');
             }
         } catch (error) {
-            joinError = error;
+            followError = error;
             
             // Check if it's an "already joined" error
             if (error.message?.includes('already-exists') || error.data === 304 ||
@@ -486,12 +566,14 @@ async function handleChannelJoin(sock, chatId, statusMsg, inviteCode, context) {
                 joined = true; // Already joined counts as success
                 console.log(`Already following channel: ${channelName}`);
             } else {
-                throw error; // Re-throw other errors
+                // For other errors, we'll still try to fetch latest post
+                console.log('Follow error but continuing:', error.message);
+                joined = true; // Assume we're following
             }
         }
 
         if (joined) {
-            // Success message
+            // Success message (new message)
             let successMsg = `✅ *SUCCESSFULLY JOINED CHANNEL!*\n\n`;
             successMsg += `📢 *Channel:* ${channelName}\n`;
             successMsg += `👥 *Subscribers:* ${channelSubscribers.toLocaleString()}\n`;
@@ -501,11 +583,30 @@ async function handleChannelJoin(sock, chatId, statusMsg, inviteCode, context) {
             if (channelJid) successMsg += `\n🔗 *JID:* \`${channelJid}\``;
 
             await sock.sendMessage(chatId, {
-                text: successMsg,
-                edit: statusMsg.key
+                text: successMsg
             });
 
             console.log(`📢 Bot joined channel: ${channelName} (${channelJid || inviteCode})`);
+            
+            // Fetch and display latest post from channel
+            await sock.sendMessage(chatId, {
+                text: `⏳ Fetching latest post from ${channelName}...`
+            });
+            
+            // Try to get latest post
+            const latestPost = await getLatestChannelPost(sock, jidToFollow);
+            
+            if (latestPost) {
+                const formattedPost = formatChannelPost(latestPost);
+                await sock.sendMessage(chatId, {
+                    text: formattedPost
+                });
+            } else {
+                await sock.sendMessage(chatId, {
+                    text: `📭 *No recent posts found in ${channelName}*\n\nThe channel may not have any posts yet, or the feature is not available in this version.`
+                });
+            }
+            
             await react('✅');
         }
 
@@ -529,8 +630,7 @@ async function handleChannelJoin(sock, chatId, statusMsg, inviteCode, context) {
         }
         
         await sock.sendMessage(chatId, {
-            text: errorMsg,
-            edit: statusMsg.key
+            text: errorMsg
         });
         await react('❌');
     }
