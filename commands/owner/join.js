@@ -28,9 +28,7 @@ module.exports = {
         if (input.includes('chat.whatsapp.com/')) {
             // Group or Community link
             code = input.split('chat.whatsapp.com/')[1].split('?')[0].split('/')[0].trim();
-            
-            // Check if it might be a community (communities use same domain but have different behavior)
-            linkType = 'group_or_community';
+            linkType = 'group';
         } else if (input.includes('whatsapp.com/channel/')) {
             // Channel link
             code = input.split('whatsapp.com/channel/')[1].split('?')[0].split('/')[0].trim();
@@ -38,11 +36,11 @@ module.exports = {
         } else if (input.includes('invite/')) {
             // Alternative format
             code = input.split('invite/')[1].split('?')[0].split('/')[0].trim();
-            linkType = 'group_or_community';
+            linkType = 'group';
         } else {
             // Try as direct code
             code = input;
-            linkType = 'group_or_community';
+            linkType = 'group';
         }
 
         if (!code) {
@@ -52,32 +50,18 @@ module.exports = {
         }
 
         // Send processing message
-        const statusMsg = await reply(`🔍 *Analyzing link...*\n\nLink: \`${fullLink.substring(0, 50)}${fullLink.length > 50 ? '...' : ''}\``);
+        const statusMsg = await reply(`🔍 *Analyzing ${linkType} link...*\n\nCode: \`${code}\``);
 
         try {
-            // First, try to get invite info (works for both groups and communities)
-            let inviteInfo = null;
-            try {
-                inviteInfo = await sock.groupGetInviteInfo(code);
-            } catch (infoError) {
-                console.log('Could not get invite info:', infoError.message);
-                // Continue anyway
-            }
-
-            // Check if it's a channel
             if (linkType === 'channel') {
                 await handleChannelJoin(sock, from, statusMsg, code, context);
-                return;
+            } else {
+                await handleGroupJoin(sock, from, statusMsg, code, context);
             }
-
-            // Handle group/community join
-            await handleGroupOrCommunityJoin(sock, from, statusMsg, code, inviteInfo, context);
-
         } catch (error) {
             console.error('Join command error:', error);
             await react('❌');
             
-            // Try to edit the status message
             try {
                 await sock.sendMessage(from, {
                     text: `❌ *Failed to process link*\n\nError: ${error.message}`,
@@ -90,11 +74,42 @@ module.exports = {
     }
 };
 
-async function handleGroupOrCommunityJoin(sock, chatId, statusMsg, inviteCode, inviteInfo, context) {
+async function handleGroupJoin(sock, chatId, statusMsg, inviteCode, context) {
     const { react } = context;
 
     try {
-        // Check if bot is already in this group/community
+        // First, get invite info to check if it's a request-to-join group
+        let inviteInfo = null;
+        let requiresApproval = false;
+        let isCommunity = false;
+        
+        try {
+            inviteInfo = await sock.groupGetInviteInfo(inviteCode);
+            
+            // Check various indicators that this group requires approval
+            if (inviteInfo) {
+                // Check for approval flags
+                if (inviteInfo.approval_required || inviteInfo.request_approval || 
+                    inviteInfo.join_approval_mode || inviteInfo.approval_mode) {
+                    requiresApproval = true;
+                }
+                
+                // Check if it's a community
+                if (inviteInfo.is_community || inviteInfo.isCommunity) {
+                    isCommunity = true;
+                }
+                
+                // Some groups show pending approval in the invite info
+                if (inviteInfo.pending_approval || inviteInfo.pendingApproval) {
+                    requiresApproval = true;
+                }
+            }
+        } catch (infoError) {
+            console.log('Could not get invite info:', infoError.message);
+            // If we can't get info, it might still be a valid invite
+        }
+
+        // Check if bot is already in this group
         let isAlreadyIn = false;
         let existingGroupJid = null;
         
@@ -110,11 +125,10 @@ async function handleGroupOrCommunityJoin(sock, chatId, statusMsg, inviteCode, i
                 }
             }
             
-            // If not found by invite code but we have invite info, check by subject and size
-            if (!isAlreadyIn && inviteInfo) {
+            // If not found by invite code but we have invite info, check by subject
+            if (!isAlreadyIn && inviteInfo && inviteInfo.subject) {
                 for (const [jid, group] of Object.entries(groups)) {
-                    if (group.subject === inviteInfo.subject && 
-                        group.participants?.length === inviteInfo.size) {
+                    if (group.subject === inviteInfo.subject) {
                         isAlreadyIn = true;
                         existingGroupJid = jid;
                         break;
@@ -126,41 +140,95 @@ async function handleGroupOrCommunityJoin(sock, chatId, statusMsg, inviteCode, i
         }
 
         if (isAlreadyIn && existingGroupJid) {
-            // Bot is already in this group/community
+            // Bot is already in this group
             const groupMetadata = await sock.groupMetadata(existingGroupJid);
             const groupName = groupMetadata.subject || 'Unnamed';
             const memberCount = groupMetadata.participants?.length || 0;
-            const isCommunity = groupMetadata.isCommunity || false;
-            const isCommunityAnnounce = groupMetadata.isCommunityAnnounce || false;
-
-            let typeIcon = isCommunity ? '🏘️' : '👥';
-            let typeText = isCommunity ? 'COMMUNITY' : 'GROUP';
 
             await sock.sendMessage(chatId, {
-                text: `✅ *Bot was already in this ${typeText}!*\n\n` +
-                      `${typeIcon} *Name:* ${groupName}\n` +
+                text: `✅ *Bot was already in this group!*\n\n` +
+                      `👥 *Name:* ${groupName}\n` +
                       `👥 *Members:* ${memberCount}\n` +
-                      `🔗 *JID:* \`${existingGroupJid}\`\n` +
-                      `📊 *Status:* Already joined`,
+                      `🔗 *JID:* \`${existingGroupJid}\``,
                 edit: statusMsg.key
             });
             await react('✅');
             return;
         }
 
-        // Try to join - this will give us the JID on success
-        let groupJid;
-        let joinError = null;
-        let requiresApproval = false;
+        // If we have invite info and it requires approval, show request-to-join info
+        if (inviteInfo && requiresApproval) {
+            const groupName = inviteInfo.subject || 'Unknown Group';
+            const memberCount = inviteInfo.size || inviteInfo.participants?.length || 'Unknown';
+            const groupDesc = inviteInfo.desc || inviteInfo.description || 'No description';
+            const groupOwner = inviteInfo.owner || 'Unknown';
+            
+            // Format owner number
+            let ownerNumber = 'Unknown';
+            if (groupOwner && groupOwner !== 'Unknown') {
+                ownerNumber = groupOwner.split('@')[0];
+            }
 
+            let approvalMsg = `⏳ *REQUEST TO JOIN GROUP*\n\n`;
+            approvalMsg += `👥 *Group:* ${groupName}\n`;
+            approvalMsg += `👥 *Members:* ${memberCount}\n`;
+            approvalMsg += `📝 *Description:* ${groupDesc.substring(0, 200)}${groupDesc.length > 200 ? '...' : ''}\n`;
+            approvalMsg += `👑 *Owner:* ${ownerNumber}\n\n`;
+            approvalMsg += `📋 *This group requires admin approval to join.*\n`;
+            approvalMsg += `✅ Your join request has been sent!\n`;
+            approvalMsg += `⏱️ You'll be added when an admin approves.\n\n`;
+            approvalMsg += `🔗 *Invite Code:* \`${inviteCode}\``;
+
+            await sock.sendMessage(chatId, {
+                text: approvalMsg,
+                edit: statusMsg.key
+            });
+
+            // Actually send the join request
+            try {
+                await sock.groupAcceptInvite(inviteCode);
+                console.log(`⏳ Join request sent for group: ${groupName}`);
+            } catch (joinError) {
+                // If it fails, but we already showed request sent, it's okay
+                console.log('Join request error:', joinError.message);
+            }
+
+            await react('⏳');
+            return;
+        }
+
+        // Try to join the group
+        let groupJid;
         try {
             groupJid = await sock.groupAcceptInvite(inviteCode);
-        } catch (error) {
-            joinError = error;
+        } catch (joinError) {
+            // Check if this is actually a request-to-join that we didn't detect earlier
+            if (joinError.message?.includes('conflict') || joinError.data === 409 ||
+                joinError.message?.includes('pending') || joinError.message?.includes('approval')) {
+                
+                // This is a request-to-join group
+                let approvalMsg = `⏳ *REQUEST TO JOIN GROUP*\n\n`;
+                
+                if (inviteInfo) {
+                    approvalMsg += `👥 *Group:* ${inviteInfo.subject || 'Unknown'}\n`;
+                    approvalMsg += `👥 *Members:* ${inviteInfo.size || 'Unknown'}\n`;
+                }
+                
+                approvalMsg += `\n📋 *This group requires admin approval to join.*\n`;
+                approvalMsg += `✅ Your join request has been sent!\n`;
+                approvalMsg += `⏱️ You'll be added when an admin approves.\n\n`;
+                approvalMsg += `🔗 *Invite Code:* \`${inviteCode}\``;
 
-            // Check for specific error types
-            if (error.message?.includes('already-exists') || error.data === 304) {
-                // Bot already in group - we should have caught this above but just in case
+                await sock.sendMessage(chatId, {
+                    text: approvalMsg,
+                    edit: statusMsg.key
+                });
+                
+                await react('⏳');
+                return;
+            }
+            
+            if (joinError.message?.includes('already-exists') || joinError.data === 304) {
                 await sock.sendMessage(chatId, {
                     text: `✅ *Bot is already a member of this group!*`,
                     edit: statusMsg.key
@@ -168,162 +236,108 @@ async function handleGroupOrCommunityJoin(sock, chatId, statusMsg, inviteCode, i
                 await react('✅');
                 return;
             }
-
-            if (error.message?.includes('conflict') || error.data === 409 || 
-                error.message?.includes('pending') || error.message?.includes('approval')) {
-                requiresApproval = true;
-            } else {
-                // Other error - rethrow
-                throw error;
-            }
+            
+            // Re-throw other errors
+            throw joinError;
         }
 
-        // If join succeeded, groupJid will be set
-        if (groupJid) {
-            // Successfully joined
-            await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for metadata to populate
-            
-            // Get full group metadata
-            const groupMetadata = await sock.groupMetadata(groupJid);
-            
-            // Determine if it's a community or regular group
-            const isCommunity = groupMetadata.isCommunity || false;
-            const isCommunityAnnounce = groupMetadata.isCommunityAnnounce || false;
-            const linkedGroups = groupMetadata.linkedGroups || [];
-            
-            let typeIcon = isCommunity ? '🏘️' : '👥';
-            let typeText = isCommunity ? 'COMMUNITY' : 'GROUP';
-            let typeBadge = isCommunity ? '🏘️ COMMUNITY' : '👥 GROUP';
-            
-            if (isCommunityAnnounce) {
-                typeBadge = '📢 COMMUNITY ANNOUNCEMENT';
-                typeIcon = '📢';
-            }
-
-            // Format creation date
-            const groupName = groupMetadata.subject || 'Unnamed';
-            const memberCount = groupMetadata.participants?.length || 0;
-            const groupDesc = groupMetadata.desc || 'No description';
-            const groupOwner = groupMetadata.owner || 'Unknown';
-            const groupCreation = groupMetadata.creation ? new Date(groupMetadata.creation * 1000).toLocaleString() : 'Unknown';
-            const groupRestrict = groupMetadata.restrict ? 'Yes 🔒' : 'No 🔓';
-            const groupAnnounce = groupMetadata.announce ? 'Yes 🔇' : 'No 💬';
-            const groupJoinApproval = groupMetadata.joinApprovalMode ? 'Yes ✅' : 'No ❌';
-            
-            // Check if bot is admin
-            const botId = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-            const botParticipant = groupMetadata.participants?.find(p => p.id === botId);
-            const isBotAdmin = botParticipant?.admin ? true : false;
-            const botRole = botParticipant?.admin === 'superadmin' ? 'Super Admin' : 
-                           botParticipant?.admin === 'admin' ? 'Admin' : 'Member';
-
-            // Get linked communities/groups if any
-            let linkedInfo = '';
-            if (isCommunity && linkedGroups.length > 0) {
-                linkedInfo = `\n🔗 *Linked Groups:* ${linkedGroups.length}`;
-            }
-
-            // Build success message
-            let successMsg = `✅ *SUCCESSFULLY JOINED ${typeBadge}*\n\n`;
-            successMsg += `${typeIcon} *Name:* ${groupName}\n`;
-            successMsg += `👥 *Members:* ${memberCount}\n`;
-            successMsg += `📝 *Description:* ${groupDesc.substring(0, 200)}${groupDesc.length > 200 ? '...' : ''}\n`;
-            successMsg += `👑 *Owner:* ${groupOwner.split('@')[0]}\n`;
-            successMsg += `📅 *Created:* ${groupCreation}\n`;
-            successMsg += `🔒 *Restricted Mode:* ${groupRestrict}\n`;
-            successMsg += `🔇 *Announcement Mode:* ${groupAnnounce}\n`;
-            successMsg += `✅ *Join Approval:* ${groupJoinApproval}\n`;
-            successMsg += linkedInfo;
-            successMsg += `\n\n🤖 *Bot Status:*\n`;
-            successMsg += `• Role: ${botRole}\n`;
-            successMsg += `• Admin: ${isBotAdmin ? 'Yes ✅' : 'No ❌'}\n`;
-            successMsg += `\n🔗 *JID:* \`${groupJid}\``;
-
-            await sock.sendMessage(chatId, {
-                text: successMsg,
-                edit: statusMsg.key
-            });
-            
-            console.log(`✅ Bot joined ${typeText}: ${groupName} (${groupJid})`);
-            await react('✅');
-            return;
+        // If we get here, join was successful
+        if (!groupJid) {
+            throw new Error('Failed to get group JID after joining');
         }
 
-        // Handle approval required case
-        if (requiresApproval) {
-            let approvalMsg = `⏳ *REQUEST TO JOIN GROUP*\n\n`;
-            
-            if (inviteInfo) {
-                const groupName = inviteInfo.subject || 'Unknown Group';
-                const memberCount = inviteInfo.size || 'Unknown';
-                const groupDesc = inviteInfo.desc || 'No description available';
-                const isCommunity = inviteInfo.isCommunity || false;
-                
-                let typeIcon = isCommunity ? '🏘️' : '👥';
-                let typeText = isCommunity ? 'Community' : 'Group';
-                
-                approvalMsg += `${typeIcon} *${typeText}:* ${groupName}\n`;
-                approvalMsg += `👥 *Members:* ${memberCount}\n`;
-                approvalMsg += `📝 *Description:* ${groupDesc.substring(0, 200)}${groupDesc.length > 200 ? '...' : ''}\n`;
-                approvalMsg += `\n📋 *This ${typeText.toLowerCase()} requires approval to join.*\n`;
-                approvalMsg += `✅ Your request has been sent!\n`;
-                approvalMsg += `⏱️ You'll be added when an admin approves.\n\n`;
-                
-                if (inviteInfo.requestApproval) {
-                    approvalMsg += `*Request Approval Required:* Yes ✅\n`;
-                }
-                
-                if (inviteInfo.approvalRequired) {
-                    approvalMsg += `*Admin Approval Required:* Yes ✅\n`;
-                }
-            } else {
-                approvalMsg += `📋 *This group requires approval to join.*\n`;
-                approvalMsg += `✅ Your request has been sent!\n`;
-                approvalMsg += `⏱️ You'll be added when an admin approves.\n`;
-            }
-            
-            approvalMsg += `\n🔗 *Invite Code:* \`${inviteCode}\``;
-            
-            await sock.sendMessage(chatId, {
-                text: approvalMsg,
-                edit: statusMsg.key
-            });
-            
-            console.log(`⏳ Join request sent for group with code: ${inviteCode}`);
-            await react('⏳');
-            return;
+        // Wait for metadata to populate
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        // Get full group metadata
+        const groupMetadata = await sock.groupMetadata(groupJid);
+        
+        // Determine if it's a community
+        const isCommunityGroup = groupMetadata.isCommunity || false;
+        const isCommunityAnnounce = groupMetadata.isCommunityAnnounce || false;
+        const linkedGroups = groupMetadata.linkedGroups || [];
+        
+        let typeIcon = isCommunityGroup ? '🏘️' : '👥';
+        let typeText = isCommunityGroup ? 'COMMUNITY' : 'GROUP';
+        
+        if (isCommunityAnnounce) {
+            typeText = 'COMMUNITY ANNOUNCEMENT';
+            typeIcon = '📢';
         }
+
+        // Format details
+        const groupName = groupMetadata.subject || 'Unnamed';
+        const memberCount = groupMetadata.participants?.length || 0;
+        const groupDesc = groupMetadata.desc || 'No description';
+        const groupOwner = groupMetadata.owner || 'Unknown';
+        const groupCreation = groupMetadata.creation ? new Date(groupMetadata.creation * 1000).toLocaleString() : 'Unknown';
+        const groupRestrict = groupMetadata.restrict ? 'Yes 🔒' : 'No 🔓';
+        const groupAnnounce = groupMetadata.announce ? 'Yes 🔇' : 'No 💬';
+        const groupJoinApproval = groupMetadata.joinApprovalMode ? 'Yes ✅' : 'No ❌';
+        
+        // Check bot's role
+        const botId = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+        const botParticipant = groupMetadata.participants?.find(p => p.id === botId);
+        const isBotAdmin = botParticipant?.admin ? true : false;
+        const botRole = botParticipant?.admin === 'superadmin' ? 'Super Admin' : 
+                       botParticipant?.admin === 'admin' ? 'Admin' : 'Member';
+
+        // Format owner number
+        let ownerNumber = 'Unknown';
+        if (groupOwner && groupOwner !== 'Unknown') {
+            ownerNumber = groupOwner.split('@')[0];
+        }
+
+        // Build success message
+        let successMsg = `✅ *SUCCESSFULLY JOINED ${typeIcon} ${typeText}*\n\n`;
+        successMsg += `📌 *Name:* ${groupName}\n`;
+        successMsg += `👥 *Members:* ${memberCount}\n`;
+        successMsg += `📝 *Description:* ${groupDesc.substring(0, 200)}${groupDesc.length > 200 ? '...' : ''}\n`;
+        successMsg += `👑 *Owner:* ${ownerNumber}\n`;
+        successMsg += `📅 *Created:* ${groupCreation}\n`;
+        successMsg += `🔒 *Restricted:* ${groupRestrict}\n`;
+        successMsg += `🔇 *Announcement:* ${groupAnnounce}\n`;
+        successMsg += `✅ *Join Approval:* ${groupJoinApproval}\n`;
+        
+        if (linkedGroups.length > 0) {
+            successMsg += `🔗 *Linked Groups:* ${linkedGroups.length}\n`;
+        }
+        
+        successMsg += `\n🤖 *Bot Status:*\n`;
+        successMsg += `• Role: ${botRole}\n`;
+        successMsg += `• Admin: ${isBotAdmin ? 'Yes ✅' : 'No ❌'}\n`;
+        successMsg += `\n🔗 *JID:* \`${groupJid}\``;
+
+        await sock.sendMessage(chatId, {
+            text: successMsg,
+            edit: statusMsg.key
+        });
+        
+        console.log(`✅ Bot joined ${typeText}: ${groupName} (${groupJid})`);
+        await react('✅');
 
     } catch (error) {
-        console.error('Group/Community join error:', error);
+        console.error('Group join error:', error);
         
         // Handle specific error cases
+        let errorMsg = '❌ *Failed to join*\n\n';
+        
         if (error.message?.includes('not-authorized') || error.data === 401) {
-            await sock.sendMessage(chatId, {
-                text: `❌ *Invalid or expired invite link.*\n\nThe invite link may be invalid or the group might not exist.`,
-                edit: statusMsg.key
-            });
+            errorMsg += 'Invalid or expired invite link.';
         } else if (error.message?.includes('forbidden') || error.data === 403) {
-            await sock.sendMessage(chatId, {
-                text: `❌ *Cannot join this group.*\n\nBot may be banned or the group has restrictions.`,
-                edit: statusMsg.key
-            });
+            errorMsg += 'Bot may be banned or group has restrictions.';
         } else if (error.message?.includes('group-full') || error.data === 500) {
-            await sock.sendMessage(chatId, {
-                text: `❌ *Group is full!*\n\nMaximum participant limit reached.`,
-                edit: statusMsg.key
-            });
+            errorMsg += 'Group is full! Maximum participant limit reached.';
         } else if (error.message?.includes('invite-revoked')) {
-            await sock.sendMessage(chatId, {
-                text: `❌ *Invite link has been revoked.*`,
-                edit: statusMsg.key
-            });
+            errorMsg += 'Invite link has been revoked.';
         } else {
-            await sock.sendMessage(chatId, {
-                text: `❌ *Failed to join*\n\nError: ${error.message}`,
-                edit: statusMsg.key
-            });
+            errorMsg += `Error: ${error.message}`;
         }
+        
+        await sock.sendMessage(chatId, {
+            text: errorMsg,
+            edit: statusMsg.key
+        });
         await react('❌');
     }
 }
@@ -335,7 +349,7 @@ async function handleChannelJoin(sock, chatId, statusMsg, channelId, context) {
         // Format channel JID
         const channelJid = channelId.includes('@newsletter') ? channelId : `${channelId}@newsletter`;
         
-        // Try to get channel info first (if supported)
+        // First, try to get channel info using the correct method
         let channelInfo = null;
         let channelName = 'Unknown Channel';
         let channelSubscribers = 'Unknown';
@@ -344,8 +358,19 @@ async function handleChannelJoin(sock, chatId, statusMsg, channelId, context) {
         let channelCreation = 'Unknown';
 
         try {
-            // Try different methods to get channel info
-            if (sock.newsletterMetadata) {
+            // Try to get channel metadata
+            if (sock.newsletter && sock.newsletter.metadata) {
+                const metadata = await sock.newsletter.metadata('me', channelJid);
+                if (metadata) {
+                    channelInfo = metadata;
+                    channelName = metadata.name || metadata.title || 'Unknown Channel';
+                    channelSubscribers = metadata.subscriber_count || metadata.followers || 'Unknown';
+                    channelVerified = metadata.verified || false;
+                    channelDescription = metadata.description || metadata.desc || 'No description';
+                    channelCreation = metadata.creation_time ? new Date(metadata.creation_time * 1000).toLocaleString() : 'Unknown';
+                }
+            } else if (sock.newsletterMetadata) {
+                // Alternative method
                 const metadata = await sock.newsletterMetadata('me', [channelJid]);
                 if (metadata && metadata[channelJid]) {
                     channelInfo = metadata[channelJid];
@@ -357,125 +382,108 @@ async function handleChannelJoin(sock, chatId, statusMsg, channelId, context) {
                 }
             }
         } catch (infoError) {
-            console.log('Could not fetch channel metadata:', infoError);
+            console.log('Could not fetch channel metadata:', infoError.message);
             // Continue anyway
         }
 
-        // Check if already following
-        let alreadyFollowing = false;
-        try {
-            // Try to check if already following (if method exists)
-            if (sock.newsletterFollowing) {
-                const following = await sock.newsletterFollowing();
-                if (following && following.includes(channelJid)) {
-                    alreadyFollowing = true;
-                }
-            }
-        } catch (checkError) {
-            console.log('Could not check following status:', checkError);
-        }
-
-        if (alreadyFollowing) {
-            await sock.sendMessage(chatId, {
-                text: `✅ *Already following this channel!*\n\n` +
-                      `📢 *Channel:* ${channelName}\n` +
-                      `👥 *Subscribers:* ${channelSubscribers}\n` +
-                      `✅ *Verified:* ${channelVerified ? 'Yes' : 'No'}\n` +
-                      `📝 *Description:* ${channelDescription.substring(0, 200)}${channelDescription.length > 200 ? '...' : ''}\n` +
-                      `🔗 *JID:* \`${channelJid}\``,
-                edit: statusMsg.key
-            });
-            await react('✅');
-            return;
-        }
-
-        // Try to follow the channel
-        let followed = false;
-        let followError = null;
-
-        // Try different possible method names
-        const followMethods = [
-            'newsletterFollow',
-            'followNewsletter', 
-            'joinNewsletter',
-            'subscribeNewsletter'
-        ];
-
-        for (const method of followMethods) {
-            if (sock[method] && typeof sock[method] === 'function') {
-                try {
-                    await sock[method](channelJid);
-                    followed = true;
-                    console.log(`✅ Followed channel using method: ${method}`);
-                    break;
-                } catch (err) {
-                    followError = err;
-                    // If it's "already following" error, we're good
-                    if (err.message?.includes('already-exists') || err.data === 304) {
-                        followed = true;
-                        break;
-                    }
-                    // Otherwise try next method
-                }
-            }
-        }
-
-        if (!followed) {
-            // No method succeeded
-            if (followError) {
-                throw followError;
-            } else {
-                throw new Error('Channel joining not supported in this Baileys version');
-            }
-        }
-
-        // Successfully followed
-        let successMsg = `✅ *SUCCESSFULLY JOINED CHANNEL!*\n\n`;
-        successMsg += `📢 *Channel:* ${channelName}\n`;
-        successMsg += `👥 *Subscribers:* ${channelSubscribers}\n`;
-        successMsg += `✅ *Verified:* ${channelVerified ? 'Yes' : 'No'}\n`;
-        successMsg += `📝 *Description:* ${channelDescription.substring(0, 200)}${channelDescription.length > 200 ? '...' : ''}\n`;
-        successMsg += `📅 *Created:* ${channelCreation}\n`;
-        successMsg += `\n🔗 *JID:* \`${channelJid}\``;
-
+        // Update status with channel info
         await sock.sendMessage(chatId, {
-            text: successMsg,
+            text: `📢 *Channel Info*\n\n` +
+                  `Name: ${channelName}\n` +
+                  `Subscribers: ${channelSubscribers}\n` +
+                  `Verified: ${channelVerified ? 'Yes ✅' : 'No ❌'}\n\n` +
+                  `⏳ Attempting to join...`,
             edit: statusMsg.key
         });
 
-        console.log(`📢 Bot joined channel: ${channelName} (${channelJid})`);
-        await react('✅');
+        // Try to join the channel using the correct method
+        let joined = false;
+        let joinError = null;
+
+        try {
+            // Method 1: newsletterJoin (most common)
+            if (sock.newsletterJoin) {
+                await sock.newsletterJoin(channelJid);
+                joined = true;
+            }
+            // Method 2: newsletterFollow
+            else if (sock.newsletterFollow) {
+                await sock.newsletterFollow(channelJid);
+                joined = true;
+            }
+            // Method 3: joinNewsletter
+            else if (sock.joinNewsletter) {
+                await sock.joinNewsletter(channelJid);
+                joined = true;
+            }
+            // Method 4: followNewsletter
+            else if (sock.followNewsletter) {
+                await sock.followNewsletter(channelJid);
+                joined = true;
+            }
+            // Method 5: Try via newsletter mutations
+            else if (sock.newsletter && sock.newsletter.follow) {
+                await sock.newsletter.follow(channelJid);
+                joined = true;
+            }
+            else {
+                // No method found
+                throw new Error('Channel joining not supported in this Baileys version');
+            }
+        } catch (error) {
+            joinError = error;
+            
+            // Check if it's an "already joined" error
+            if (error.message?.includes('already-exists') || error.data === 304 ||
+                error.message?.includes('already following') || error.message?.includes('already joined')) {
+                joined = true; // Already joined counts as success
+            } else {
+                throw error; // Re-throw other errors
+            }
+        }
+
+        if (joined) {
+            // Success message
+            let successMsg = `✅ *SUCCESSFULLY JOINED CHANNEL!*\n\n`;
+            successMsg += `📢 *Channel:* ${channelName}\n`;
+            successMsg += `👥 *Subscribers:* ${channelSubscribers}\n`;
+            successMsg += `✅ *Verified:* ${channelVerified ? 'Yes' : 'No'}\n`;
+            successMsg += `📝 *Description:* ${channelDescription.substring(0, 200)}${channelDescription.length > 200 ? '...' : ''}\n`;
+            successMsg += `📅 *Created:* ${channelCreation}\n`;
+            successMsg += `\n🔗 *JID:* \`${channelJid}\``;
+
+            await sock.sendMessage(chatId, {
+                text: successMsg,
+                edit: statusMsg.key
+            });
+
+            console.log(`📢 Bot joined channel: ${channelName} (${channelJid})`);
+            await react('✅');
+        }
 
     } catch (error) {
         console.error('Channel join error:', error);
 
         // Handle specific error cases
+        let errorMsg = '❌ *Failed to join channel*\n\n';
+        
         if (error.message?.includes('Bad Request') || error.data === 400) {
-            await sock.sendMessage(chatId, {
-                text: `❌ *Invalid channel link*\n\nChannel does not exist or link is incorrect.`,
-                edit: statusMsg.key
-            });
-        } else if (error.message?.includes('not-authorized')) {
-            await sock.sendMessage(chatId, {
-                text: `❌ *Cannot join channel*\n\nBot may be blocked or channel is private.`,
-                edit: statusMsg.key
-            });
-        } else if (error.message?.includes('already-exists') || error.data === 304) {
-            await sock.sendMessage(chatId, {
-                text: `✅ *Already following this channel!*`,
-                edit: statusMsg.key
-            });
+            errorMsg += 'Invalid channel link or channel does not exist.';
+        } else if (error.message?.includes('not-authorized') || error.data === 401) {
+            errorMsg += 'Not authorized to join this channel.';
+        } else if (error.message?.includes('forbidden') || error.data === 403) {
+            errorMsg += 'Bot is blocked from joining this channel.';
         } else if (error.message?.includes('not supported')) {
-            await sock.sendMessage(chatId, {
-                text: `❌ *Channel joining not supported*\n\nYour Baileys version may need an update.`,
-                edit: statusMsg.key
-            });
+            errorMsg += 'Channel joining is not supported in this Baileys version.\n';
+            errorMsg += 'Try updating: `npm install @whiskeysockets/baileys@latest`';
         } else {
-            await sock.sendMessage(chatId, {
-                text: `❌ *Failed to join channel*\n\nError: ${error.message}`,
-                edit: statusMsg.key
-            });
+            errorMsg += `Error: ${error.message}`;
         }
+        
+        await sock.sendMessage(chatId, {
+            text: errorMsg,
+            edit: statusMsg.key
+        });
         await react('❌');
     }
 }
