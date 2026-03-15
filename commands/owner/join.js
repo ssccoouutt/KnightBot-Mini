@@ -410,56 +410,145 @@ async function handleChannelJoin(sock, chatId, inviteCode, context) {
 
         try {
             // Use newsletterMetadata with 'invite' parameter
+            console.log('\n🔍🔍🔍 DEBUG: Fetching channel metadata for code:', inviteCode);
             const meta = await sock.newsletterMetadata('invite', inviteCode);
+            
+            console.log('\n🔥🔥🔥 FULL META OBJECT:');
+            console.log(JSON.stringify(meta, null, 2));
             
             if (meta) {
                 channelInfo = meta;
                 
-                // Extract name from the nested structure
-                if (meta.name && meta.name.text) {
+                // ===== EXTREME DEBUGGING FOR NAME =====
+                console.log('\n🔍🔍🔍 CHECKING NAME PATHS:');
+                console.log('- meta.name:', meta.name);
+                console.log('- meta.name?.text:', meta.name?.text);
+                console.log('- meta.title:', meta.title);
+                console.log('- meta.thread_metadata?.name:', meta.thread_metadata?.name);
+                console.log('- meta.thread_metadata?.name?.text:', meta.thread_metadata?.name?.text);
+                console.log('- meta.subject:', meta.subject);
+                console.log('- meta.thread_metadata?.subject:', meta.thread_metadata?.subject);
+                
+                // ===== EXTREME DEBUGGING FOR SUBSCRIBERS =====
+                console.log('\n🔍🔍🔍 CHECKING SUBSCRIBERS PATHS:');
+                console.log('- meta.subscribers_count:', meta.subscribers_count);
+                console.log('- meta.subscriberCount:', meta.subscriberCount);
+                console.log('- meta.thread_metadata?.subscribers_count:', meta.thread_metadata?.subscribers_count);
+                console.log('- meta.stats?.subscribers:', meta.stats?.subscribers);
+                console.log('- meta.metadata?.subscribers:', meta.metadata?.subscribers);
+                console.log('- meta.viewer_metadata?.subscribers:', meta.viewer_metadata?.subscribers);
+                
+                // ===== EXTREME DEBUGGING FOR DESCRIPTION =====
+                console.log('\n🔍🔍🔍 CHECKING DESCRIPTION PATHS:');
+                console.log('- meta.description:', meta.description);
+                console.log('- meta.description?.text:', meta.description?.text);
+                console.log('- meta.thread_metadata?.description:', meta.thread_metadata?.description);
+                console.log('- meta.thread_metadata?.description?.text:', meta.thread_metadata?.description?.text);
+                console.log('- meta.about:', meta.about);
+                console.log('- meta.desc:', meta.desc);
+                
+                // ===== EXTREME DEBUGGING FOR CREATION TIME =====
+                console.log('\n🔍🔍🔍 CHECKING CREATION TIME PATHS:');
+                console.log('- meta.thread_metadata?.creation_time:', meta.thread_metadata?.creation_time);
+                console.log('- meta.creationTime:', meta.creationTime);
+                console.log('- meta.created:', meta.created);
+                console.log('- meta.timestamp:', meta.timestamp);
+                
+                // ===== EXTREME DEBUGGING FOR VERIFICATION =====
+                console.log('\n🔍🔍🔍 CHECKING VERIFICATION PATHS:');
+                console.log('- meta.verification:', meta.verification);
+                console.log('- meta.verified:', meta.verified);
+                console.log('- meta.isVerified:', meta.isVerified);
+                
+                // ===== EXTREME DEBUGGING FOR JID =====
+                console.log('\n🔍🔍🔍 CHECKING JID PATHS:');
+                console.log('- meta.id:', meta.id);
+                console.log('- meta.jid:', meta.jid);
+                console.log('- meta.thread_metadata?.id:', meta.thread_metadata?.id);
+                
+                // Try to extract name from every possible path
+                if (meta.name?.text) {
                     channelName = meta.name.text;
+                    console.log('✅ Found name in meta.name.text:', channelName);
                 } else if (meta.name && typeof meta.name === 'string') {
                     channelName = meta.name;
+                    console.log('✅ Found name in meta.name (string):', channelName);
                 } else if (meta.title) {
                     channelName = meta.title;
+                    console.log('✅ Found name in meta.title:', channelName);
+                } else if (meta.thread_metadata?.name?.text) {
+                    channelName = meta.thread_metadata.name.text;
+                    console.log('✅ Found name in meta.thread_metadata.name.text:', channelName);
+                } else if (meta.subject) {
+                    channelName = meta.subject;
+                    console.log('✅ Found name in meta.subject:', channelName);
                 }
                 
-                // Extract subscribers count
+                // Try to extract subscribers from every possible path
                 if (meta.subscribers_count) {
                     channelSubscribers = parseInt(meta.subscribers_count) || 0;
+                    console.log('✅ Found subscribers in meta.subscribers_count:', channelSubscribers);
                 } else if (meta.subscriberCount) {
                     channelSubscribers = parseInt(meta.subscriberCount) || 0;
+                    console.log('✅ Found subscribers in meta.subscriberCount:', channelSubscribers);
+                } else if (meta.thread_metadata?.subscribers_count) {
+                    channelSubscribers = parseInt(meta.thread_metadata.subscribers_count) || 0;
+                    console.log('✅ Found subscribers in meta.thread_metadata.subscribers_count:', channelSubscribers);
+                } else if (meta.stats?.subscribers) {
+                    channelSubscribers = parseInt(meta.stats.subscribers) || 0;
+                    console.log('✅ Found subscribers in meta.stats.subscribers:', channelSubscribers);
                 }
                 
-                // Extract verification status
-                if (meta.verification) {
-                    channelVerified = meta.verification === 'VERIFIED';
-                } else if (meta.verified) {
-                    channelVerified = meta.verified === true;
-                }
-                
-                // Extract description from the nested structure
-                if (meta.description && meta.description.text) {
+                // Try to extract description from every possible path
+                if (meta.description?.text) {
                     channelDescription = meta.description.text;
+                    console.log('✅ Found description in meta.description.text');
                 } else if (meta.description && typeof meta.description === 'string') {
                     channelDescription = meta.description;
+                    console.log('✅ Found description in meta.description (string)');
                 } else if (meta.thread_metadata?.description?.text) {
                     channelDescription = meta.thread_metadata.description.text;
+                    console.log('✅ Found description in meta.thread_metadata.description.text');
+                } else if (meta.about) {
+                    channelDescription = meta.about;
+                    console.log('✅ Found description in meta.about');
+                } else if (meta.desc) {
+                    channelDescription = meta.desc;
+                    console.log('✅ Found description in meta.desc');
                 }
                 
-                // Extract creation time
+                // Try to extract creation time from every possible path
                 if (meta.thread_metadata?.creation_time) {
                     channelCreation = new Date(parseInt(meta.thread_metadata.creation_time) * 1000).toLocaleString();
+                    console.log('✅ Found creation in meta.thread_metadata.creation_time:', channelCreation);
                 } else if (meta.creationTime) {
                     channelCreation = new Date(parseInt(meta.creationTime) * 1000).toLocaleString();
+                    console.log('✅ Found creation in meta.creationTime:', channelCreation);
+                } else if (meta.created) {
+                    channelCreation = new Date(parseInt(meta.created) * 1000).toLocaleString();
+                    console.log('✅ Found creation in meta.created:', channelCreation);
                 }
                 
-                // Extract JID
+                // Try to extract verification from every possible path
+                if (meta.verification) {
+                    channelVerified = meta.verification === 'VERIFIED';
+                    console.log('✅ Found verification in meta.verification:', channelVerified);
+                } else if (meta.verified) {
+                    channelVerified = meta.verified === true;
+                    console.log('✅ Found verification in meta.verified:', channelVerified);
+                }
+                
+                // Try to extract JID from every possible path
                 if (meta.id) {
                     channelJid = meta.id;
+                    console.log('✅ Found JID in meta.id:', channelJid);
+                } else if (meta.jid) {
+                    channelJid = meta.jid;
+                    console.log('✅ Found JID in meta.jid:', channelJid);
                 }
             }
         } catch (infoError) {
+            console.error('❌ Metadata error:', infoError);
             await sock.sendMessage(chatId, {
                 text: `❌ *Channel not found*\n\nInvite code \`${inviteCode}\` is invalid or the channel does not exist.`
             });
@@ -478,12 +567,13 @@ async function handleChannelJoin(sock, chatId, inviteCode, context) {
                   (channelJid ? `\n🔗 *JID:* \`${channelJid}\`` : '')
         });
 
-        // Follow the channel using newsletterFollow (works based on your logs)
+        // Follow the channel
         const jidToFollow = channelJid || (channelInfo ? channelInfo.id : `${inviteCode}@newsletter`);
         let followed = false;
 
         try {
             if (sock.newsletterFollow) {
+                console.log('\n🔍 Attempting to follow channel with JID:', jidToFollow);
                 await sock.newsletterFollow(jidToFollow);
                 followed = true;
                 console.log(`✅ Successfully followed channel: ${channelName}`);
@@ -491,12 +581,14 @@ async function handleChannelJoin(sock, chatId, inviteCode, context) {
                 throw new Error('newsletterFollow method not available');
             }
         } catch (followError) {
+            console.log('\n❌ Follow error:', followError.message);
+            console.log('Follow error data:', followError.data);
+            
             // Check if already following (error code 304)
             if (followError.data === 304 || followError.message?.includes('already-exists')) {
                 followed = true;
                 console.log(`ℹ️ Already following channel: ${channelName}`);
             } else {
-                // Based on your logs, the channel was joined despite the error
                 console.log(`⚠️ Follow warning: ${followError.message} - but channel was joined successfully`);
                 followed = true;
             }
@@ -524,54 +616,88 @@ async function handleChannelJoin(sock, chatId, inviteCode, context) {
             });
             
             try {
+                console.log('\n🔍🔍🔍 FETCHING LATEST POSTS...');
+                console.log('Using JID:', jidToFollow);
+                
                 if (sock.newsletterFetchMessages) {
+                    console.log('Method newsletterFetchMessages exists, calling...');
                     const messages = await sock.newsletterFetchMessages({
                         jid: jidToFollow,
                         count: 3
                     });
                     
-                    if (messages && messages.length > 0) {
+                    console.log('\n🔥🔥🔥 FULL MESSAGES RESPONSE:');
+                    console.log(JSON.stringify(messages, null, 2));
+                    
+                    console.log('\nMessages type:', typeof messages);
+                    console.log('Is array:', Array.isArray(messages));
+                    console.log('Messages length:', messages?.length);
+                    
+                    // Check if messages exists and has items
+                    if (messages && Array.isArray(messages) && messages.length > 0) {
+                        console.log(`✅ Found ${messages.length} posts`);
+                        
                         let postsText = `📢 *LATEST POSTS FROM ${channelName}*\n\n`;
                         
                         messages.forEach((msg, index) => {
+                            console.log(`\n--- Processing post ${index + 1} ---`);
+                            console.log('Raw message:', JSON.stringify(msg, null, 2));
+                            
+                            // Safely access message
+                            if (!msg) {
+                                console.log('⚠️ Message is null/undefined');
+                                return;
+                            }
+                            
                             const message = msg.message || msg;
                             
-                            // Safely get timestamp
+                            // Safely get timestamp with fallback
                             let timestamp = 'Unknown';
                             if (msg.messageTimestamp) {
                                 try {
-                                    timestamp = new Date(msg.messageTimestamp * 1000).toLocaleString();
+                                    const ts = parseInt(msg.messageTimestamp);
+                                    if (!isNaN(ts)) {
+                                        timestamp = new Date(ts * 1000).toLocaleString();
+                                        console.log('✅ Timestamp parsed:', timestamp);
+                                    }
                                 } catch (e) {
-                                    timestamp = 'Invalid date';
+                                    console.log('❌ Timestamp parse error:', e.message);
                                 }
                             }
                             
                             postsText += `*Post ${index + 1}:*\n`;
                             
-                            if (message.conversation) {
+                            // Safely check message content
+                            if (message && message.conversation) {
                                 postsText += `💬 ${message.conversation}\n`;
-                            } else if (message.extendedTextMessage?.text) {
+                                console.log('✅ Found conversation:', message.conversation.substring(0, 50));
+                            } else if (message && message.extendedTextMessage?.text) {
                                 postsText += `💬 ${message.extendedTextMessage.text}\n`;
-                            } else if (message.imageMessage) {
+                                console.log('✅ Found extended text');
+                            } else if (message && message.imageMessage) {
                                 postsText += `📷 Image`;
                                 if (message.imageMessage.caption) {
                                     postsText += `: ${message.imageMessage.caption}`;
                                 }
                                 postsText += '\n';
-                            } else if (message.videoMessage) {
+                                console.log('✅ Found image');
+                            } else if (message && message.videoMessage) {
                                 postsText += `🎥 Video`;
                                 if (message.videoMessage.caption) {
                                     postsText += `: ${message.videoMessage.caption}`;
                                 }
                                 postsText += '\n';
-                            } else if (message.documentMessage) {
+                                console.log('✅ Found video');
+                            } else if (message && message.documentMessage) {
                                 postsText += `📄 Document`;
                                 if (message.documentMessage.fileName) {
                                     postsText += `: ${message.documentMessage.fileName}`;
                                 }
                                 postsText += '\n';
+                                console.log('✅ Found document');
                             } else {
                                 postsText += `📝 Message\n`;
+                                console.log('⚠️ Unknown message type');
                             }
                             
                             postsText += `⏱️ ${timestamp}\n\n`;
@@ -580,20 +706,29 @@ async function handleChannelJoin(sock, chatId, inviteCode, context) {
                         await sock.sendMessage(chatId, {
                             text: postsText
                         });
+                        console.log('✅ Posts sent to WhatsApp');
                     } else {
+                        console.log('⚠️ No messages found or invalid format');
                         await sock.sendMessage(chatId, {
                             text: `📭 *No posts found in ${channelName}*\n\nThe channel may not have any posts yet.`
                         });
                     }
                 } else {
+                    console.log('❌ newsletterFetchMessages method not available');
+                    console.log('Available newsletter methods:', Object.keys(sock).filter(k => k.includes('newsletter')));
                     await sock.sendMessage(chatId, {
                         text: `⚠️ *Cannot fetch posts*\n\nMethod newsletterFetchMessages not available.`
                     });
                 }
             } catch (postError) {
-                console.log('Error fetching posts:', postError.message);
+                console.log('\n❌❌❌ POST FETCHING ERROR:');
+                console.log('Error message:', postError.message);
+                console.log('Error stack:', postError.stack);
+                console.log('Full error:', JSON.stringify(postError, Object.getOwnPropertyNames(postError), 2));
+                
+                // Don't show error to user, just show friendly message
                 await sock.sendMessage(chatId, {
-                    text: `⚠️ *Could not fetch posts*\n\nError: ${postError.message}`
+                    text: `📭 *No posts available*\n\nUnable to fetch posts at this time.`
                 });
             }
             
@@ -601,7 +736,7 @@ async function handleChannelJoin(sock, chatId, inviteCode, context) {
         }
 
     } catch (error) {
-        console.error('Channel join error:', error);
+        console.error('❌❌❌ CHANNEL JOIN OUTER ERROR:', error);
         
         let errorMsg = '❌ *Failed to join channel*\n\n';
         
