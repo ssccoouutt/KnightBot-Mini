@@ -415,13 +415,11 @@ async function handleChannelJoin(sock, chatId, inviteCode, context) {
             if (meta) {
                 channelInfo = meta;
                 
-                // Extract name properly
-                if (meta.name) {
-                    if (typeof meta.name === 'object' && meta.name.text) {
-                        channelName = meta.name.text;
-                    } else if (typeof meta.name === 'string') {
-                        channelName = meta.name;
-                    }
+                // Extract name from the nested structure
+                if (meta.name && meta.name.text) {
+                    channelName = meta.name.text;
+                } else if (meta.name && typeof meta.name === 'string') {
+                    channelName = meta.name;
                 } else if (meta.title) {
                     channelName = meta.title;
                 }
@@ -440,13 +438,11 @@ async function handleChannelJoin(sock, chatId, inviteCode, context) {
                     channelVerified = meta.verified === true;
                 }
                 
-                // Extract description
-                if (meta.description) {
-                    if (typeof meta.description === 'object' && meta.description.text) {
-                        channelDescription = meta.description.text;
-                    } else if (typeof meta.description === 'string') {
-                        channelDescription = meta.description;
-                    }
+                // Extract description from the nested structure
+                if (meta.description && meta.description.text) {
+                    channelDescription = meta.description.text;
+                } else if (meta.description && typeof meta.description === 'string') {
+                    channelDescription = meta.description;
                 } else if (meta.thread_metadata?.description?.text) {
                     channelDescription = meta.thread_metadata.description.text;
                 }
@@ -502,7 +498,7 @@ async function handleChannelJoin(sock, chatId, inviteCode, context) {
             } else {
                 // Based on your logs, the channel was joined despite the error
                 console.log(`⚠️ Follow warning: ${followError.message} - but channel was joined successfully`);
-                followed = true; // Assume it worked since your logs show it did
+                followed = true;
             }
         }
 
