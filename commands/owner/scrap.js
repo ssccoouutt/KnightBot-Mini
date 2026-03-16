@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const phoneNumber = require('awesome-phonenumber');
 const config = require('../../config');
 
 module.exports = {
@@ -25,6 +26,7 @@ module.exports = {
         try {
             let groupJid = null;
             let groupMetadata = null;
+            let temporarilyJoined = false;
 
             // Check if input is a group link
             if (input.includes('chat.whatsapp.com/')) {
@@ -36,14 +38,11 @@ module.exports = {
                 try {
                     // Try to join the group temporarily
                     groupJid = await sock.groupAcceptInvite(inviteCode);
+                    temporarilyJoined = true;
                     await reply(`✅ *Temporarily joined group*\n\nFetching member list...`);
                     
                     // Get group metadata
                     groupMetadata = await sock.groupMetadata(groupJid);
-                    
-                    // Leave the group after scraping
-                    await reply(`📤 *Leaving group* (temporary join only)...`);
-                    await sock.groupLeave(groupJid);
                     
                 } catch (joinError) {
                     console.log('Could not join group:', joinError.message);
@@ -95,7 +94,7 @@ module.exports = {
             const tempDir = path.join(process.cwd(), 'temp');
             if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
             
-            // Create text file with phone numbers
+            // Create text file with phone numbers (formatted with +)
             const numbersFile = path.join(tempDir, `members_${timestamp}.txt`);
             
             let fileContent = `========================================\n`;
@@ -113,36 +112,93 @@ module.exports = {
             fileContent += `ALL PHONE NUMBERS (${memberCount}):\n`;
             fileContent += `----------------------------------------\n`;
             
-            // Extract phone numbers (one per line)
+            // Extract and format phone numbers (with +)
             participants.forEach((p, index) => {
-                const number = p.id.split('@')[0];
+                const rawNumber = p.id.split('@')[0];
+                // Try to format with country code
+                let formattedNumber = rawNumber;
+                try {
+                    // Assume it's a valid phone number, format it
+                    const pn = phoneNumber(rawNumber);
+                    if (pn.isValid()) {
+                        formattedNumber = pn.getNumber('international'); // Returns +1234567890
+                    } else {
+                        formattedNumber = '+' + rawNumber;
+                    }
+                } catch (e) {
+                    formattedNumber = '+' + rawNumber;
+                }
+                
                 const isAdmin = p.admin ? ` [${p.admin}]` : '';
-                fileContent += `${number}${isAdmin}\n`;
+                fileContent += `${formattedNumber}${isAdmin}\n`;
             });
             
             fileContent += `\n========================================\n`;
             fileContent += `ADMIN LIST (${admins.length}):\n`;
             fileContent += `----------------------------------------\n`;
             admins.forEach((p, index) => {
-                const number = p.id.split('@')[0];
+                const rawNumber = p.id.split('@')[0];
+                let formattedNumber = rawNumber;
+                try {
+                    const pn = phoneNumber(rawNumber);
+                    if (pn.isValid()) {
+                        formattedNumber = pn.getNumber('international');
+                    } else {
+                        formattedNumber = '+' + rawNumber;
+                    }
+                } catch (e) {
+                    formattedNumber = '+' + rawNumber;
+                }
                 const role = p.admin === 'superadmin' ? 'SUPER ADMIN' : 'ADMIN';
-                fileContent += `${index + 1}. ${number} - ${role}\n`;
+                fileContent += `${index + 1}. ${formattedNumber} - ${role}\n`;
             });
             
             fileContent += `\n========================================\n`;
             fileContent += `REGULAR MEMBERS (${regularMembers.length}):\n`;
             fileContent += `----------------------------------------\n`;
             regularMembers.forEach((p, index) => {
-                const number = p.id.split('@')[0];
-                fileContent += `${index + 1}. ${number}\n`;
+                const rawNumber = p.id.split('@')[0];
+                let formattedNumber = rawNumber;
+                try {
+                    const pn = phoneNumber(rawNumber);
+                    if (pn.isValid()) {
+                        formattedNumber = pn.getNumber('international');
+                    } else {
+                        formattedNumber = '+' + rawNumber;
+                    }
+                } catch (e) {
+                    formattedNumber = '+' + rawNumber;
+                }
+                fileContent += `${index + 1}. ${formattedNumber}\n`;
             });
             
             fs.writeFileSync(numbersFile, fileContent);
 
-            // Create a clean list with just numbers (one per line)
+            // Create a clean list with just numbers (one per line, formatted)
             const cleanNumbersFile = path.join(tempDir, `numbers_${timestamp}.txt`);
-            const cleanNumbers = participants.map(p => p.id.split('@')[0]).join('\n');
+            const cleanNumbers = participants.map(p => {
+                const rawNumber = p.id.split('@')[0];
+                try {
+                    const pn = phoneNumber(rawNumber);
+                    if (pn.isValid()) {
+                        return pn.getNumber('international');
+                    }
+                    return '+' + rawNumber;
+                } catch (e) {
+                    return '+' + rawNumber;
+                }
+            }).join('\n');
             fs.writeFileSync(cleanNumbersFile, cleanNumbers);
+
+            // Leave the group if we temporarily joined
+            if (temporarilyJoined) {
+                await reply(`📤 *Leaving group* (temporary join only)...`);
+                try {
+                    await sock.groupLeave(groupJid);
+                } catch (leaveError) {
+                    console.log('Error leaving group:', leaveError.message);
+                }
+            }
 
             // Send the files
             const stats = fs.statSync(numbersFile);
@@ -159,7 +215,7 @@ module.exports = {
                         `👑 *Admins:* ${admins.length}\n` +
                         `👤 *Regular:* ${regularMembers.length}\n` +
                         `📁 *File:* ${fileSizeKB}KB\n\n` +
-                        `✅ Full list attached!`
+                        `✅ Full list attached with formatted numbers (+923...)`
             });
 
             // Send clean numbers file
@@ -168,15 +224,26 @@ module.exports = {
                 fileName: `phone_numbers_${timestamp}.txt`,
                 mimetype: 'text/plain',
                 caption: `📱 *Phone Numbers Only*\n\n` +
-                        `${memberCount} numbers extracted (one per line)`
+                        `${memberCount} numbers extracted (one per line, formatted with +)`
             });
 
             // Send preview
             let preview = `📋 *PREVIEW (First 10 numbers)*\n\n`;
             participants.slice(0, 10).forEach((p, i) => {
-                const number = p.id.split('@')[0];
+                const rawNumber = p.id.split('@')[0];
+                let formattedNumber = rawNumber;
+                try {
+                    const pn = phoneNumber(rawNumber);
+                    if (pn.isValid()) {
+                        formattedNumber = pn.getNumber('international');
+                    } else {
+                        formattedNumber = '+' + rawNumber;
+                    }
+                } catch (e) {
+                    formattedNumber = '+' + rawNumber;
+                }
                 const role = p.admin ? ` (${p.admin})` : '';
-                preview += `${i + 1}. ${number}${role}\n`;
+                preview += `${i + 1}. ${formattedNumber}${role}\n`;
             });
             if (participants.length > 10) {
                 preview += `... and ${participants.length - 10} more\n`;
