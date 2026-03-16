@@ -74,7 +74,7 @@ module.exports = {
       
       // Validate JID format (should end with @newsletter)
       if (!newsletterJid.endsWith('@newsletter')) {
-        return extra.reply('❌ Invalid newsletter JID format!\n\nNewsletter JID must end with `@newsletter`\nExample: `120363161513685998@newsletter`');
+        return extra.reply('❌ Invalid newsletter JID format!\n\nNewsletter JID must end with `@newsletter`\nExample: `120363304414452603@newsletter`');
       }
       
       // Update config.js
