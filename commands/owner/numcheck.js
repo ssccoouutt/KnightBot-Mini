@@ -35,71 +35,94 @@ module.exports = {
 
             // Format the JID
             const jid = cleanNumber + '@s.whatsapp.net';
-
-            // Check if number exists on WhatsApp
             const presenceStart = Date.now();
+            
             let onWhatsApp = false;
-            let whatsappInfo = null;
-
-            try {
-                // Try to check if user exists on WhatsApp
-                const result = await sock.onWhatsApp(jid);
-                if (result && result.length > 0) {
-                    onWhatsApp = result[0].exists;
-                    if (result[0].jid) {
-                        whatsappInfo = result[0];
-                    }
-                }
-            } catch (checkError) {
-                console.log('onWhatsApp check error:', checkError.message);
-                // Continue anyway
-            }
-
-            // Try to get presence (online status)
             let presence = null;
             let lastSeen = null;
             let isOnline = false;
+            let profilePic = null;
+            let isBusiness = false;
+            let businessInfo = null;
+
+            try {
+                // First check if number exists on WhatsApp
+                const result = await sock.onWhatsApp(jid);
+                if (result && result.length > 0) {
+                    onWhatsApp = result[0].exists;
+                }
+            } catch (checkError) {
+                console.log('onWhatsApp check error:', checkError.message);
+            }
 
             if (onWhatsApp) {
+                // Subscribe to presence updates (this is key for online/last seen)
                 try {
-                    // Request presence update
                     await sock.presenceSubscribe(jid);
                     
-                    // Wait a bit for presence data
-                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    // Wait for presence data to arrive
+                    await new Promise(resolve => setTimeout(resolve, 3000));
                     
-                    // Get presence from store if available
+                    // Check store for presence data
                     if (sock.store && sock.store.presences) {
                         const userPresence = sock.store.presences[jid];
                         if (userPresence) {
                             presence = userPresence;
+                            
+                            // Check online status
                             if (presence.lastKnownPresence === 'available') {
                                 isOnline = true;
-                            }
-                            if (presence.lastSeen) {
-                                lastSeen = new Date(presence.lastSeen * 1000).toLocaleString();
+                                lastSeen = 'Currently Online';
+                            } else if (presence.lastKnownPresence === 'composing') {
+                                isOnline = true;
+                                lastSeen = 'Currently Typing';
+                            } else if (presence.lastKnownPresence === 'recording') {
+                                isOnline = true;
+                                lastSeen = 'Currently Recording';
+                            } else {
+                                isOnline = false;
+                                // Get last seen timestamp if available
+                                if (presence.lastSeen) {
+                                    const lastSeenDate = new Date(presence.lastSeen * 1000);
+                                    const now = new Date();
+                                    const diffMs = now - lastSeenDate;
+                                    const diffMins = Math.floor(diffMs / 60000);
+                                    const diffHours = Math.floor(diffMins / 60);
+                                    const diffDays = Math.floor(diffHours / 24);
+                                    
+                                    if (diffMins < 1) {
+                                        lastSeen = 'Just now';
+                                    } else if (diffMins < 60) {
+                                        lastSeen = `${diffMins} minute${diffMins > 1 ? 's' : ''} ago`;
+                                    } else if (diffHours < 24) {
+                                        lastSeen = `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`;
+                                    } else {
+                                        lastSeen = `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
+                                    }
+                                } else {
+                                    lastSeen = 'Last seen unavailable';
+                                }
                             }
                         }
                     }
+                    
+                    // Unsubscribe after getting data
+                    setTimeout(() => {
+                        sock.presenceUnsubscribe(jid).catch(() => {});
+                    }, 5000);
+                    
                 } catch (presenceError) {
-                    console.log('Presence check error:', presenceError.message);
+                    console.log('Presence error:', presenceError.message);
                 }
-            }
 
-            // Try to get profile picture
-            let profilePic = null;
-            if (onWhatsApp) {
+                // Get profile picture
                 try {
                     profilePic = await sock.profilePictureUrl(jid, 'image');
                 } catch (ppError) {
                     // No profile picture
                 }
-            }
 
-            // Try to get business profile if exists
-            let isBusiness = false;
-            let businessInfo = null;
-            if (onWhatsApp) {
+                // Check if business account
                 try {
                     const bizProfile = await sock.getBusinessProfile(jid);
                     if (bizProfile) {
@@ -111,21 +134,14 @@ module.exports = {
                 }
             }
 
-            // Calculate response time
             const responseTime = Date.now() - presenceStart;
 
-            // Format the response - FIXED: Removed getNumberType()
+            // Format the response
             const formattedNumber = pn.getNumber('international') || `+${cleanNumber}`;
             const nationalNumber = pn.getNumber('national') || cleanNumber;
             const countryCode = pn.getCountryCode() || 'Unknown';
             const regionCode = pn.getRegionCode() || 'Unknown';
             const possible = pn.isPossible() ? 'Yes' : 'No';
-
-            // Determine number type manually
-            let numberType = 'Unknown';
-            if (cleanNumber.length > 15) numberType = 'Possible Toll-Free';
-            else if (cleanNumber.length < 10) numberType = 'Possible Local';
-            else numberType = 'Mobile/Unknown';
 
             let resultText = `📱 *NUMBER INFORMATION*\n\n`;
             resultText += `━━━━━━━━━━━━━━━━━━━━━\n\n`;
@@ -134,7 +150,6 @@ module.exports = {
             resultText += `*📞 Number:* ${formattedNumber}\n`;
             resultText += `*🏷️ National:* ${nationalNumber}\n`;
             resultText += `*🌍 Country:* ${regionCode} (${countryCode})\n`;
-            resultText += `*📋 Type:* ${numberType}\n`;
             resultText += `*✅ Valid Format:* ${isValidPhone ? 'Yes' : 'No'}\n`;
             resultText += `*🔢 Possible:* ${possible}\n\n`;
             
@@ -145,16 +160,27 @@ module.exports = {
             resultText += `• *Registered:* ${onWhatsApp ? '✅ YES' : '❌ NO'}\n`;
             
             if (onWhatsApp) {
-                resultText += `• *Online:* ${isOnline ? '🟢 Online Now' : '⚫ Offline'}\n`;
+                // Online/Offline status with emoji
+                if (isOnline) {
+                    resultText += `• *Status:* 🟢 **ONLINE NOW**\n`;
+                } else {
+                    resultText += `• *Status:* ⚫ **OFFLINE**\n`;
+                }
+                
+                // Last seen with human readable format
                 if (lastSeen) {
                     resultText += `• *Last Seen:* ${lastSeen}\n`;
                 }
+                
                 resultText += `• *Business:* ${isBusiness ? '✅ Yes' : '❌ No'}\n`;
                 if (profilePic) {
                     resultText += `• *Profile Picture:* ✅ Available\n`;
                 } else {
                     resultText += `• *Profile Picture:* ❌ Not set\n`;
                 }
+                
+                // Show JID format info
+                resultText += `\n*📌 Note:* Due to WhatsApp privacy updates, users may appear as @lid instead of phone numbers in groups [citation:7].\n`;
                 resultText += `• *JID:* \`${jid}\`\n`;
             }
             
@@ -192,8 +218,7 @@ module.exports = {
                 });
             }
 
-            // Log the check
-            console.log(`📱 Number check: ${formattedNumber} - WhatsApp: ${onWhatsApp ? 'Yes' : 'No'}`);
+            console.log(`📱 Number check: ${formattedNumber} - WhatsApp: ${onWhatsApp ? 'Yes' : 'No'} - Online: ${isOnline ? 'Yes' : 'No'}`);
 
         } catch (error) {
             console.error('Number check error:', error);
