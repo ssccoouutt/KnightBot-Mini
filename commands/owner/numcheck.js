@@ -114,13 +114,18 @@ module.exports = {
             // Calculate response time
             const responseTime = Date.now() - presenceStart;
 
-            // Format the response
+            // Format the response - FIXED: Removed getNumberType()
             const formattedNumber = pn.getNumber('international') || `+${cleanNumber}`;
             const nationalNumber = pn.getNumber('national') || cleanNumber;
             const countryCode = pn.getCountryCode() || 'Unknown';
             const regionCode = pn.getRegionCode() || 'Unknown';
-            const numberType = pn.getNumberType() || 'Unknown';
             const possible = pn.isPossible() ? 'Yes' : 'No';
+
+            // Determine number type manually
+            let numberType = 'Unknown';
+            if (cleanNumber.length > 15) numberType = 'Possible Toll-Free';
+            else if (cleanNumber.length < 10) numberType = 'Possible Local';
+            else numberType = 'Mobile/Unknown';
 
             let resultText = `📱 *NUMBER INFORMATION*\n\n`;
             resultText += `━━━━━━━━━━━━━━━━━━━━━\n\n`;
