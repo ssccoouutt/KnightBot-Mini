@@ -68,7 +68,7 @@ module.exports = {
           `Usage:\n` +
           `  .setnewsletter <newsletter JID>\n` +
           `  Or reply to a newsletter message with .setnewsletter\n\n` +
-          `Example: .setnewsletter 120363161513685998@newsletter`
+          `Example: .setnewsletter 120363304414452603@newsletter`
         );
       }
       
