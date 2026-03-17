@@ -9,10 +9,9 @@ module.exports = {
     name: 'weather',
     aliases: ['wth', 'temp', 'climate', 'forecast'],
     description: 'Get current weather information for any city',
-    usage: 'weather <city> [country code]\n' +
-           'weather search <city> - Search with suggestions',
-    category: 'utility',  // Changed from 'owner' to 'utility'
-    ownerOnly: false,      // Added: anyone can use
+    usage: 'weather <city> [country code]',
+    category: 'utility',
+    ownerOnly: false,
 
     async execute(sock, msg, args, context) {
         const { from, reply, react } = context;
@@ -72,8 +71,8 @@ module.exports = {
                 return;
             }
 
-            // Format and send weather info
-            const weatherMessage = formatWeatherMessage(weatherData);
+            // Format and send weather info with local time
+            const weatherMessage = await formatWeatherMessage(weatherData);
             
             // Add weather condition emoji as reaction
             const weatherEmoji = getWeatherEmoji(weatherData.weather[0].main);
@@ -157,22 +156,53 @@ async function getCitySuggestions(query) {
     return commonCities[firstChar] || [];
 }
 
-function formatWeatherMessage(data) {
+async function formatWeatherMessage(data) {
     const main = data.main;
     const weather = data.weather[0];
     const wind = data.wind;
     const sys = data.sys;
     
-    // Convert timestamp to readable time
-    const sunrise = new Date(sys.sunrise * 1000).toLocaleTimeString('en-US', {
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: true
+    // Get timezone offset in seconds (from API)
+    const timezoneOffset = data.timezone || 0; // seconds from UTC
+    
+    // Create current time in city's timezone
+    const now = new Date();
+    const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000); // Convert to UTC
+    const cityTime = new Date(utcTime + (timezoneOffset * 1000));
+    
+    // Format date in city's timezone
+    const cityDate = cityTime.toLocaleDateString('en-US', { 
+        weekday: 'long', 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric',
+        timeZone: 'UTC' // Use UTC as base since we already applied offset
     });
-    const sunset = new Date(sys.sunset * 1000).toLocaleTimeString('en-US', {
-        hour: '2-digit',
+    
+    // Format time in city's timezone
+    const cityTimeString = cityTime.toLocaleTimeString('en-US', { 
+        hour: '2-digit', 
         minute: '2-digit',
-        hour12: true
+        hour12: true,
+        timeZone: 'UTC'
+    });
+
+    // Convert sunrise/sunset timestamps to city's local time
+    const sunrise = new Date((sys.sunrise + timezoneOffset) * 1000);
+    const sunset = new Date((sys.sunset + timezoneOffset) * 1000);
+    
+    const sunriseTime = sunrise.toLocaleTimeString('en-US', { 
+        hour: '2-digit', 
+        minute: '2-digit',
+        hour12: true,
+        timeZone: 'UTC'
+    });
+    
+    const sunsetTime = sunset.toLocaleTimeString('en-US', { 
+        hour: '2-digit', 
+        minute: '2-digit',
+        hour12: true,
+        timeZone: 'UTC'
     });
 
     // Get weather emoji
@@ -180,17 +210,8 @@ function formatWeatherMessage(data) {
 
     // Build the message
     let message = `🌍 *Weather for ${data.name}, ${sys.country}*\n`;
-    message += `📅 ${new Date().toLocaleDateString('en-US', { 
-        weekday: 'long', 
-        year: 'numeric', 
-        month: 'long', 
-        day: 'numeric' 
-    })}\n`;
-    message += `⏰ ${new Date().toLocaleTimeString('en-US', { 
-        hour: '2-digit', 
-        minute: '2-digit',
-        hour12: true 
-    })}\n\n`;
+    message += `📅 ${cityDate}\n`;
+    message += `⏰ ${cityTimeString} (Local Time)\n\n`;
 
     message += `${weatherEmoji} *${weather.main}* - ${weather.description}\n\n`;
 
@@ -210,14 +231,19 @@ function formatWeatherMessage(data) {
         message += `📈 *Pressure:* ${main.pressure} hPa\n`;
     }
 
-    message += `\n🌅 *Sunrise:* ${sunrise}\n`;
-    message += `🌇 *Sunset:* ${sunset}\n`;
+    message += `\n🌅 *Sunrise:* ${sunriseTime}\n`;
+    message += `🌇 *Sunset:* ${sunsetTime}\n`;
 
     // Add visibility if available
     if (data.visibility) {
         const visibilityKm = (data.visibility / 1000).toFixed(1);
         message += `👁️ *Visibility:* ${visibilityKm} km\n`;
     }
+
+    // Add timezone info
+    const timezoneHours = timezoneOffset / 3600;
+    const timezoneStr = timezoneHours > 0 ? `UTC+${timezoneHours}` : `UTC${timezoneHours}`;
+    message += `\n📍 *Timezone:* ${timezoneStr}\n`;
 
     message += `\n_Data from OpenWeatherMap_`;
     
