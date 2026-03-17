@@ -471,11 +471,17 @@ const handleMessage = async (sock, msg) => {
     // Return early for non-group messages with no recognizable content
     if (!content || actualMessageTypes.length === 0) return;
     
+    // ============================================
+    // BUTTON RESPONSE HANDLING - MODIFIED SECTION
+    // ============================================
+    
     // 🔹 Button response should also check unwrapped content
     const btn = content.buttonsResponseMessage || msg.message?.buttonsResponseMessage;
     if (btn) {
       const buttonId = btn.selectedButtonId;
       const displayText = btn.selectedDisplayText;
+      
+      console.log(`🔘 Button clicked: ${displayText} (${buttonId})`);
       
       // Handle button clicks by routing to commands
       if (buttonId === 'btn_menu') {
@@ -533,6 +539,33 @@ const handleMessage = async (sock, msg) => {
         }
         return;
       }
+      
+      // ===== NEW: Handle ALL other button responses =====
+      // Send acknowledgment based on what they selected
+      await sock.sendMessage(from, { 
+        text: `✅ You selected: *${displayText}*`,
+        contextInfo: {
+          isForwarded: true,
+          forwardingScore: 1,
+          externalAdReply: {
+            title: 'Button Response',
+            body: 'Thank you for your selection!',
+            mediaType: 1,
+            renderLargerThumbnail: false,
+            showAdAttribution: true,
+            sourceUrl: 'https://github.com/yourbot',
+            sourceType: 'bot'
+          }
+        }
+      }, { quoted: msg });
+      
+      // Add a reaction
+      await sock.sendMessage(from, {
+        react: { text: '👍', key: msg.key }
+      });
+      
+      return; // Stop processing here
+      // ===== END OF NEW CODE =====
     }
     
     // Get message body from unwrapped content
