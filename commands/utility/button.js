@@ -21,8 +21,8 @@ console.log(`   ✅ getButtonArgs: ${typeof getButtonArgs}`);
 
 module.exports = {
     name: 'button',
-    aliases: ['buttons', 'interactive', 'cta', 'btn'],
-    description: 'Send interactive button messages',
+    aliases: ['buttons', 'interactive', 'cta', 'btn', 'ai'],
+    description: 'Send interactive button messages and control AI mode',
     usage: 'button [type] [parameters]',
     category: 'utility',
     ownerOnly: false,
@@ -76,7 +76,11 @@ module.exports = {
                     break;
                     
                 case 'list':
-                    await handleListButtons(sock, from, args.slice(1).join(' '), msg, reply);
+                    await handleRealListButton(sock, from, args.slice(1).join(' '), msg, reply);
+                    break;
+                    
+                case 'ai':
+                    await handleAIMode(sock, from, args.slice(1).join(' '), msg, reply);
                     break;
                     
                 case 'combo':
@@ -116,7 +120,7 @@ module.exports = {
 };
 
 async function showHelp(sock, chatId, reply) {
-    const helpText = `🔘 *Button Commands*\n\n` +
+    const helpText = `🔘 *Button & AI Commands*\n\n` +
                     `*1. Native Buttons (Quick Reply)*\n` +
                     `\`.button native Question | Option1,Option2,Option3\`\n` +
                     `Example: \`.button native Do you like pizza? | Yes,No,Maybe\`\n\n` +
@@ -137,14 +141,20 @@ async function showHelp(sock, chatId, reply) {
                     `\`.button location Title | Description | Button Text | lat,long\`\n` +
                     `Example: \`.button location Store | Visit us | View Map | 40.7128,-74.0060\`\n\n` +
                     
-                    `*6. List Buttons*\n` +
-                    `\`.button list Title | Description | Option1,Option2,Option3\`\n` +
-                    `Example: \`.button list Menu | Choose food | Pizza,Burger,Pasta\`\n\n` +
+                    `*6. List Button (Dropdown)*\n` +
+                    `\`.button list Title | Button Text | Option1,Option2,Option3\`\n` +
+                    `Example: \`.button list Food Menu | Choose Cuisine | Pizza,Burger,Pasta\`\n\n` +
                     
-                    `*7. Combo (Multiple Buttons)*\n` +
+                    `*7. AI Mode Control*\n` +
+                    `\`.button ai on\` - Enable AI mode\n` +
+                    `\`.button ai off\` - Disable AI mode\n` +
+                    `\`.button ai status\` - Check AI mode status\n` +
+                    `Example: \`.button ai on\`\n\n` +
+                    
+                    `*8. Combo (Multiple Buttons)*\n` +
                     `\`.button combo\`\n\n` +
                     
-                    `*8. Validate Payload*\n` +
+                    `*9. Validate Payload*\n` +
                     `\`.button validate your payload here\``;
 
     await reply(helpText);
@@ -162,7 +172,6 @@ async function handleNativeButtons(sock, chatId, text, quotedMsg, reply) {
     const question = parts[0];
     const options = parts[1].split(',').map(o => o.trim());
 
-    // Create buttons array - using format from example
     const buttons = options.map(opt => ({
         id: `btn_${Date.now()}_${Math.random().toString(36).substring(7)}`,
         text: opt
@@ -191,14 +200,12 @@ async function handleUrlButton(sock, chatId, text, quotedMsg, reply) {
 
     const [title, description, buttonText, url] = parts;
 
-    // Validate URL
     try {
         new URL(url);
     } catch {
         return reply('❌ Invalid URL format');
     }
 
-    // Create URL button using cta_url format
     const buttons = [{
         name: 'cta_url',
         buttonParamsJson: JSON.stringify({
@@ -230,7 +237,6 @@ async function handleCallButton(sock, chatId, text, quotedMsg, reply) {
     const [title, description, buttonText, phone] = parts;
     const cleanPhone = phone.replace(/\D/g, '');
 
-    // Create call button
     const buttons = [{
         name: 'cta_call',
         buttonParamsJson: JSON.stringify({
@@ -261,7 +267,6 @@ async function handleCopyButton(sock, chatId, text, quotedMsg, reply) {
 
     const [title, description, buttonText, copyText] = parts;
 
-    // Create copy button
     const buttons = [{
         name: 'cta_copy',
         buttonParamsJson: JSON.stringify({
@@ -297,7 +302,6 @@ async function handleLocationButton(sock, chatId, text, quotedMsg, reply) {
         return reply('❌ Invalid coordinates. Use format: lat,long');
     }
 
-    // Create location button
     const buttons = [{
         name: 'cta_location',
         buttonParamsJson: JSON.stringify({
@@ -318,41 +322,203 @@ async function handleLocationButton(sock, chatId, text, quotedMsg, reply) {
     console.log('✅ Location button sent');
 }
 
-// 6. List Buttons
-async function handleListButtons(sock, chatId, text, quotedMsg, reply) {
-    console.log('\n📝 List Buttons:');
+// 6. REAL List Button (Dropdown) using sendInteractiveMessage
+async function handleRealListButton(sock, chatId, text, quotedMsg, reply) {
+    console.log('\n📝 REAL List Button (Dropdown):');
     
     const parts = text.split('|').map(p => p.trim());
     if (parts.length < 3) {
-        return reply('❌ Format: `button list Title | Description | Option1,Option2,Option3`');
+        return reply('❌ Format: `button list Title | Button Text | Option1,Option2,Option3`');
     }
 
-    const [title, description, optionsText] = parts;
+    const [title, buttonText, optionsText] = parts;
     const options = optionsText.split(',').map(o => o.trim());
 
-    // Create multiple quick reply buttons
-    const buttons = options.map(opt => ({
-        id: `opt_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-        text: opt
-    }));
+    // Create sections for the list
+    const sections = [{
+        title: title,
+        rows: options.map((opt, index) => ({
+            title: opt,
+            description: `Select ${opt}`,
+            rowId: `list_${Date.now()}_${index}`
+        }))
+    }];
 
+    // Use sendInteractiveMessage for list button
     const payload = {
-        text: `${title}\n\n${description}`,
-        footer: 'Select an option',
-        buttons: buttons
+        body: `📋 *${title}*\n\nPlease select an option from the list below:`,
+        footer: 'Choose wisely!',
+        title: title,
+        buttonText: buttonText,
+        sections: sections
     };
 
-    console.log('📦 Payload:', JSON.stringify(payload, null, 2));
+    console.log('📦 List Payload:', JSON.stringify(payload, null, 2));
     
-    await sendButtons(sock, chatId, payload, { quoted: quotedMsg });
-    console.log('✅ List buttons sent');
+    // Try sendInteractiveMessage first
+    if (sendInteractiveMessage) {
+        await sendInteractiveMessage(sock, chatId, {
+            type: 'list',
+            ...payload
+        }, { quoted: quotedMsg });
+        console.log('✅ Real list button sent via sendInteractiveMessage');
+    } else {
+        // Fallback to sendButtons if sendInteractiveMessage not available
+        console.log('⚠️ sendInteractiveMessage not available, using fallback');
+        const fallbackButtons = options.map(opt => ({
+            id: `opt_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+            text: opt
+        }));
+        
+        await sendButtons(sock, chatId, {
+            text: `${title}\n\nPlease select an option:`,
+            buttons: fallbackButtons
+        }, { quoted: quotedMsg });
+        console.log('✅ Fallback buttons sent');
+    }
 }
 
-// 7. Combo Buttons (Multiple Types)
+// 7. AI Mode Control
+async function handleAIMode(sock, chatId, text, quotedMsg, reply) {
+    console.log('\n📝 AI Mode Control:');
+    
+    const mode = text.toLowerCase().trim();
+    console.log(`Mode: "${mode}"`);
+
+    // Store AI mode state (in memory - you might want to use a database)
+    if (!global.aiMode) global.aiMode = new Map();
+    
+    const userId = chatId;
+    let currentStatus = global.aiMode.get(userId) || false;
+
+    if (mode === 'on' || mode === 'enable' || mode === 'true' || mode === '1') {
+        global.aiMode.set(userId, true);
+        
+        // Send confirmation with interactive buttons
+        const buttons = [
+            {
+                id: 'ai_help',
+                text: '❓ Help'
+            },
+            {
+                id: 'ai_off',
+                text: '🔕 Disable'
+            },
+            {
+                name: 'cta_url',
+                buttonParamsJson: JSON.stringify({
+                    display_text: '📚 Commands',
+                    url: 'https://example.com/ai-commands'
+                })
+            }
+        ];
+
+        await sendButtons(sock, chatId, {
+            text: '✨ *AI Mode ENABLED*\n\n' +
+                  'You can now ask me questions, get translations, summaries, and more!\n\n' +
+                  '*Example queries:*\n' +
+                  '• "What is the capital of France?"\n' +
+                  '• "Summarize this article"\n' +
+                  '• "Translate hello to Spanish"\n' +
+                  '• "Explain quantum physics"',
+            footer: 'AI Assistant Active',
+            buttons: buttons
+        }, { quoted: quotedMsg });
+        
+        console.log('✅ AI Mode enabled');
+        
+    } else if (mode === 'off' || mode === 'disable' || mode === 'false' || mode === '0') {
+        global.aiMode.set(userId, false);
+        
+        // Send confirmation with option to re-enable
+        await sendButtons(sock, chatId, {
+            text: '🔕 *AI Mode DISABLED*\n\nAI assistance has been turned off. You can re-enable anytime.',
+            footer: 'AI Assistant Inactive',
+            buttons: [{
+                id: 'ai_on',
+                text: '✨ Enable AI'
+            }]
+        }, { quoted: quotedMsg });
+        
+        console.log('✅ AI Mode disabled');
+        
+    } else if (mode === 'status' || mode === '') {
+        // Show current status
+        const status = global.aiMode.get(userId) ? 'ENABLED ✅' : 'DISABLED ❌';
+        const statusColor = global.aiMode.get(userId) ? '🟢' : '⚫';
+        
+        const buttons = global.aiMode.get(userId) ? [
+            {
+                id: 'ai_off',
+                text: '🔕 Disable AI'
+            },
+            {
+                id: 'ai_help',
+                text: '❓ Help'
+            }
+        ] : [
+            {
+                id: 'ai_on',
+                text: '✨ Enable AI'
+            }
+        ];
+
+        await sendButtons(sock, chatId, {
+            text: `🤖 *AI Mode Status*\n\n` +
+                  `${statusColor} Current Status: *${status}*\n\n` +
+                  `*What AI can do:*\n` +
+                  `• Answer questions\n` +
+                  `• Translate text\n` +
+                  `• Summarize content\n` +
+                  `• Explain concepts\n` +
+                  `• Generate ideas\n\n` +
+                  `Use \`.button ai on\` to enable.`,
+            footer: 'AI Assistant',
+            buttons: buttons
+        }, { quoted: quotedMsg });
+        
+        console.log('✅ AI status shown');
+        
+    } else {
+        // If in AI mode, treat as query to AI
+        if (global.aiMode.get(userId)) {
+            await handleAIQuery(sock, chatId, text, quotedMsg, reply);
+        } else {
+            await reply(`❌ Unknown AI command. Use \`.button ai on\` to enable AI mode, or \`.button ai status\` to check status.`);
+        }
+    }
+}
+
+// Handle AI queries when AI mode is enabled
+async function handleAIQuery(sock, chatId, query, quotedMsg, reply) {
+    console.log(`📝 AI Query: "${query}"`);
+    
+    // Simulate AI response (replace with actual AI API call)
+    const response = `🤖 *AI Response*\n\n` +
+                     `You asked: "${query}"\n\n` +
+                     `This is a demo response. In production, this would call an actual AI API like OpenAI, Gemini, or Claude.\n\n` +
+                     `To disable AI mode: \`.button ai off\``;
+
+    await sendButtons(sock, chatId, {
+        text: response,
+        footer: 'AI Assistant',
+        buttons: [
+            {
+                id: 'ai_off',
+                text: '🔕 Disable AI'
+            },
+            {
+                id: 'ai_help',
+                text: '❓ Help'
+            }
+        ]
+    }, { quoted: quotedMsg });
+}
+
+// 8. Combo Buttons (Multiple Types)
 async function handleComboButtons(sock, chatId, quotedMsg, reply) {
     console.log('\n📝 Combo Buttons:');
     
-    // Mix of quick reply and CTA buttons
     const buttons = [
         {
             id: `yes_${Date.now()}`,
@@ -390,17 +556,15 @@ async function handleComboButtons(sock, chatId, quotedMsg, reply) {
     console.log('✅ Combo buttons sent');
 }
 
-// 8. Validate Payload
+// 9. Validate Payload
 async function validatePayload(sock, chatId, text, quotedMsg, reply) {
     console.log('\n📝 Validating payload:');
     
     try {
-        // Try to parse as JSON
         let payload;
         try {
             payload = JSON.parse(text);
         } catch {
-            // If not JSON, create a test payload
             payload = {
                 text: text || 'Test message',
                 buttons: [
@@ -412,7 +576,6 @@ async function validatePayload(sock, chatId, text, quotedMsg, reply) {
         
         console.log('📦 Payload to validate:', JSON.stringify(payload, null, 2));
         
-        // Validate using the library's validation function
         if (validateSendButtonsPayload) {
             const isValid = validateSendButtonsPayload(payload);
             
