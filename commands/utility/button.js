@@ -19,6 +19,9 @@ console.log(`   ✅ sendInteractiveMessage: ${typeof sendInteractiveMessage}`);
 console.log(`   ✅ getButtonType: ${typeof getButtonType}`);
 console.log(`   ✅ getButtonArgs: ${typeof getButtonArgs}`);
 
+// Store AI mode state
+if (!global.aiMode) global.aiMode = new Map();
+
 module.exports = {
     name: 'button',
     aliases: ['buttons', 'interactive', 'cta', 'btn', 'ai'],
@@ -47,8 +50,6 @@ module.exports = {
         await react('⏳');
 
         try {
-            let result;
-            
             switch (subCommand) {
                 case 'native':
                 case 'quick':
@@ -76,7 +77,7 @@ module.exports = {
                     break;
                     
                 case 'list':
-                    await handleRealListButton(sock, from, args.slice(1).join(' '), msg, reply);
+                    await handleListButton(sock, from, args.slice(1).join(' '), msg, reply);
                     break;
                     
                 case 'ai':
@@ -322,9 +323,9 @@ async function handleLocationButton(sock, chatId, text, quotedMsg, reply) {
     console.log('✅ Location button sent');
 }
 
-// 6. REAL List Button (Dropdown) using sendInteractiveMessage
-async function handleRealListButton(sock, chatId, text, quotedMsg, reply) {
-    console.log('\n📝 REAL List Button (Dropdown):');
+// 6. List Button (Using sendButtons with list_reply)
+async function handleListButton(sock, chatId, text, quotedMsg, reply) {
+    console.log('\n📝 List Button:');
     
     const parts = text.split('|').map(p => p.trim());
     if (parts.length < 3) {
@@ -334,48 +335,33 @@ async function handleRealListButton(sock, chatId, text, quotedMsg, reply) {
     const [title, buttonText, optionsText] = parts;
     const options = optionsText.split(',').map(o => o.trim());
 
-    // Create sections for the list
-    const sections = [{
-        title: title,
-        rows: options.map((opt, index) => ({
-            title: opt,
-            description: `Select ${opt}`,
-            rowId: `list_${Date.now()}_${index}`
-        }))
+    // Create a list button using the list_reply type
+    const buttons = [{
+        name: 'list_reply',
+        buttonParamsJson: JSON.stringify({
+            display_text: buttonText,
+            title: title,
+            sections: [{
+                title: title,
+                rows: options.map((opt, index) => ({
+                    id: `opt_${Date.now()}_${index}`,
+                    title: opt,
+                    description: `Select ${opt}`
+                }))
+            }]
+        })
     }];
 
-    // Use sendInteractiveMessage for list button
     const payload = {
-        body: `📋 *${title}*\n\nPlease select an option from the list below:`,
+        text: `📋 *${title}*\n\nPlease select an option from the list below:`,
         footer: 'Choose wisely!',
-        title: title,
-        buttonText: buttonText,
-        sections: sections
+        buttons: buttons
     };
 
-    console.log('📦 List Payload:', JSON.stringify(payload, null, 2));
+    console.log('📦 Payload:', JSON.stringify(payload, null, 2));
     
-    // Try sendInteractiveMessage first
-    if (sendInteractiveMessage) {
-        await sendInteractiveMessage(sock, chatId, {
-            type: 'list',
-            ...payload
-        }, { quoted: quotedMsg });
-        console.log('✅ Real list button sent via sendInteractiveMessage');
-    } else {
-        // Fallback to sendButtons if sendInteractiveMessage not available
-        console.log('⚠️ sendInteractiveMessage not available, using fallback');
-        const fallbackButtons = options.map(opt => ({
-            id: `opt_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-            text: opt
-        }));
-        
-        await sendButtons(sock, chatId, {
-            text: `${title}\n\nPlease select an option:`,
-            buttons: fallbackButtons
-        }, { quoted: quotedMsg });
-        console.log('✅ Fallback buttons sent');
-    }
+    await sendButtons(sock, chatId, payload, { quoted: quotedMsg });
+    console.log('✅ List button sent');
 }
 
 // 7. AI Mode Control
@@ -385,16 +371,12 @@ async function handleAIMode(sock, chatId, text, quotedMsg, reply) {
     const mode = text.toLowerCase().trim();
     console.log(`Mode: "${mode}"`);
 
-    // Store AI mode state (in memory - you might want to use a database)
-    if (!global.aiMode) global.aiMode = new Map();
-    
     const userId = chatId;
     let currentStatus = global.aiMode.get(userId) || false;
 
     if (mode === 'on' || mode === 'enable' || mode === 'true' || mode === '1') {
         global.aiMode.set(userId, true);
         
-        // Send confirmation with interactive buttons
         const buttons = [
             {
                 id: 'ai_help',
@@ -403,13 +385,6 @@ async function handleAIMode(sock, chatId, text, quotedMsg, reply) {
             {
                 id: 'ai_off',
                 text: '🔕 Disable'
-            },
-            {
-                name: 'cta_url',
-                buttonParamsJson: JSON.stringify({
-                    display_text: '📚 Commands',
-                    url: 'https://example.com/ai-commands'
-                })
             }
         ];
 
@@ -430,7 +405,6 @@ async function handleAIMode(sock, chatId, text, quotedMsg, reply) {
     } else if (mode === 'off' || mode === 'disable' || mode === 'false' || mode === '0') {
         global.aiMode.set(userId, false);
         
-        // Send confirmation with option to re-enable
         await sendButtons(sock, chatId, {
             text: '🔕 *AI Mode DISABLED*\n\nAI assistance has been turned off. You can re-enable anytime.',
             footer: 'AI Assistant Inactive',
@@ -443,7 +417,6 @@ async function handleAIMode(sock, chatId, text, quotedMsg, reply) {
         console.log('✅ AI Mode disabled');
         
     } else if (mode === 'status' || mode === '') {
-        // Show current status
         const status = global.aiMode.get(userId) ? 'ENABLED ✅' : 'DISABLED ❌';
         const statusColor = global.aiMode.get(userId) ? '🟢' : '⚫';
         
