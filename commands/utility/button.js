@@ -109,11 +109,6 @@ module.exports = {
                 error.errors.forEach(e => errorMsg += `• ${e}\n`);
             }
             
-            if (error.example) {
-                errorMsg += `\n*Example Format:*\n`;
-                errorMsg += '```\n' + JSON.stringify(error.example, null, 2) + '\n```';
-            }
-            
             await reply(errorMsg);
             await react('❌');
         }
@@ -123,445 +118,176 @@ module.exports = {
 async function showHelp(sock, chatId, reply) {
     const helpText = `🔘 *Button & AI Commands*\n\n` +
                     `*1. Native Buttons (Quick Reply)*\n` +
-                    `\`.button native Question | Option1,Option2,Option3\`\n` +
-                    `Example: \`.button native Do you like pizza? | Yes,No,Maybe\`\n\n` +
-                    
+                    `\`.button native Question | Option1,Option2\`\n\n` +
                     `*2. URL Button*\n` +
-                    `\`.button url Title | Description | Button Text | URL\`\n` +
-                    `Example: \`.button url Special Offer | 50% off! | Shop Now | https://google.com\`\n\n` +
-                    
+                    `\`.button url Title | Desc | Btn Text | URL\`\n\n` +
                     `*3. Call Button*\n` +
-                    `\`.button call Title | Description | Button Text | Phone\`\n` +
-                    `Example: \`.button call Support | Need help? | Call Now | +1234567890\`\n\n` +
-                    
+                    `\`.button call Title | Desc | Btn Text | Phone\`\n\n` +
                     `*4. Copy Button*\n` +
-                    `\`.button copy Title | Description | Button Text | Text to copy\`\n` +
-                    `Example: \`.button copy Coupon | Save 20% | Copy Code | SAVE20\`\n\n` +
-                    
+                    `\`.button copy Title | Desc | Btn Text | Code\`\n\n` +
                     `*5. Location Button*\n` +
-                    `\`.button location Title | Description | Button Text | lat,long\`\n` +
-                    `Example: \`.button location Store | Visit us | View Map | 40.7128,-74.0060\`\n\n` +
-                    
+                    `\`.button location Title | Desc | Btn Text | lat,long\`\n\n` +
                     `*6. List Button (Dropdown)*\n` +
-                    `\`.button list Title | Button Text | Option1,Option2,Option3\`\n` +
-                    `Example: \`.button list Food Menu | Choose Cuisine | Pizza,Burger,Pasta\`\n\n` +
-                    
-                    `*7. AI Mode Control*\n` +
-                    `\`.button ai on\` - Enable AI mode\n` +
-                    `\`.button ai off\` - Disable AI mode\n` +
-                    `\`.button ai status\` - Check AI mode status\n` +
-                    `Example: \`.button ai on\`\n\n` +
-                    
-                    `*8. Combo (Multiple Buttons)*\n` +
-                    `\`.button combo\`\n\n` +
-                    
-                    `*9. Validate Payload*\n` +
-                    `\`.button validate your payload here\``;
+                    `\`.button list Title | Btn Text | Option1,Option2\`\n\n` +
+                    `*7. AI Mode*\n` +
+                    `\`.button ai on/off/status\`\n\n` +
+                    `*8. Combo*\n` +
+                    `\`.button combo\``;
 
     await reply(helpText);
 }
 
-// 1. Native Buttons (Quick Reply)
+// 1. Native Buttons
 async function handleNativeButtons(sock, chatId, text, quotedMsg, reply) {
-    console.log('\n📝 Native Buttons:');
-    
     const parts = text.split('|').map(p => p.trim());
-    if (parts.length < 2) {
-        return reply('❌ Format: `button native Question | Option1,Option2,Option3`');
-    }
+    if (parts.length < 2) return reply('❌ Format: `button native Question | Option1,Option2`');
 
-    const question = parts[0];
-    const options = parts[1].split(',').map(o => o.trim());
-
-    const buttons = options.map(opt => ({
-        id: `btn_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-        text: opt
+    const buttons = parts[1].split(',').map(opt => ({
+        id: `btn_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+        text: opt.trim()
     }));
 
-    const payload = {
-        text: question,
-        footer: 'Choose an option',
+    await sendButtons(sock, chatId, {
+        text: parts[0],
+        footer: 'Select an option',
         buttons: buttons
-    };
-
-    console.log('📦 Payload:', JSON.stringify(payload, null, 2));
-    
-    await sendButtons(sock, chatId, payload, { quoted: quotedMsg });
-    console.log('✅ Native buttons sent');
+    }, { quoted: quotedMsg });
 }
 
 // 2. URL Button
 async function handleUrlButton(sock, chatId, text, quotedMsg, reply) {
-    console.log('\n📝 URL Button:');
-    
     const parts = text.split('|').map(p => p.trim());
-    if (parts.length < 4) {
-        return reply('❌ Format: `button url Title | Description | Button Text | URL`');
-    }
+    if (parts.length < 4) return reply('❌ Format: `Title | Desc | Btn | URL`');
+    const [title, desc, btn, url] = parts;
 
-    const [title, description, buttonText, url] = parts;
-
-    try {
-        new URL(url);
-    } catch {
-        return reply('❌ Invalid URL format');
-    }
-
-    const buttons = [{
-        name: 'cta_url',
-        buttonParamsJson: JSON.stringify({
-            display_text: buttonText,
-            url: url
-        })
-    }];
-
-    const payload = {
-        text: `${title}\n\n${description}`,
-        buttons: buttons
-    };
-
-    console.log('📦 Payload:', JSON.stringify(payload, null, 2));
-    
-    await sendButtons(sock, chatId, payload, { quoted: quotedMsg });
-    console.log('✅ URL button sent');
+    await sendButtons(sock, chatId, {
+        text: `${title}\n\n${desc}`,
+        buttons: [{
+            name: 'cta_url',
+            buttonParamsJson: JSON.stringify({ display_text: btn, url: url })
+        }]
+    }, { quoted: quotedMsg });
 }
 
 // 3. Call Button
 async function handleCallButton(sock, chatId, text, quotedMsg, reply) {
-    console.log('\n📝 Call Button:');
-    
     const parts = text.split('|').map(p => p.trim());
-    if (parts.length < 4) {
-        return reply('❌ Format: `button call Title | Description | Button Text | Phone`');
-    }
+    if (parts.length < 4) return reply('❌ Format: `Title | Desc | Btn | Phone`');
+    const [title, desc, btn, phone] = parts;
 
-    const [title, description, buttonText, phone] = parts;
-    const cleanPhone = phone.replace(/\D/g, '');
-
-    const buttons = [{
-        name: 'cta_call',
-        buttonParamsJson: JSON.stringify({
-            display_text: buttonText,
-            phone_number: cleanPhone
-        })
-    }];
-
-    const payload = {
-        text: `${title}\n\n${description}`,
-        buttons: buttons
-    };
-
-    console.log('📦 Payload:', JSON.stringify(payload, null, 2));
-    
-    await sendButtons(sock, chatId, payload, { quoted: quotedMsg });
-    console.log('✅ Call button sent');
+    await sendButtons(sock, chatId, {
+        text: `${title}\n\n${desc}`,
+        buttons: [{
+            name: 'cta_call',
+            buttonParamsJson: JSON.stringify({ display_text: btn, phone_number: phone.replace(/\D/g, '') })
+        }]
+    }, { quoted: quotedMsg });
 }
 
 // 4. Copy Button
 async function handleCopyButton(sock, chatId, text, quotedMsg, reply) {
-    console.log('\n📝 Copy Button:');
-    
     const parts = text.split('|').map(p => p.trim());
-    if (parts.length < 4) {
-        return reply('❌ Format: `button copy Title | Description | Button Text | Text to copy`');
-    }
+    if (parts.length < 4) return reply('❌ Format: `Title | Desc | Btn | Code`');
+    const [title, desc, btn, code] = parts;
 
-    const [title, description, buttonText, copyText] = parts;
-
-    const buttons = [{
-        name: 'cta_copy',
-        buttonParamsJson: JSON.stringify({
-            display_text: buttonText,
-            copy_code: copyText
-        })
-    }];
-
-    const payload = {
-        text: `${title}\n\n${description}`,
-        buttons: buttons
-    };
-
-    console.log('📦 Payload:', JSON.stringify(payload, null, 2));
-    
-    await sendButtons(sock, chatId, payload, { quoted: quotedMsg });
-    console.log('✅ Copy button sent');
+    await sendButtons(sock, chatId, {
+        text: `${title}\n\n${desc}`,
+        buttons: [{
+            name: 'cta_copy',
+            buttonParamsJson: JSON.stringify({ display_text: btn, copy_code: code })
+        }]
+    }, { quoted: quotedMsg });
 }
 
 // 5. Location Button
 async function handleLocationButton(sock, chatId, text, quotedMsg, reply) {
-    console.log('\n📝 Location Button:');
-    
     const parts = text.split('|').map(p => p.trim());
-    if (parts.length < 4) {
-        return reply('❌ Format: `button location Title | Description | Button Text | lat,long`');
-    }
+    if (parts.length < 4) return reply('❌ Format: `Title | Desc | Btn | lat,long`');
+    const [title, desc, btn, coords] = parts;
+    const [lat, long] = coords.split(',').map(c => parseFloat(c.trim()));
 
-    const [title, description, buttonText, coordinates] = parts;
-    const [lat, long] = coordinates.split(',').map(c => parseFloat(c.trim()));
-
-    if (isNaN(lat) || isNaN(long)) {
-        return reply('❌ Invalid coordinates. Use format: lat,long');
-    }
-
-    const buttons = [{
-        name: 'cta_location',
-        buttonParamsJson: JSON.stringify({
-            display_text: buttonText,
-            latitude: lat,
-            longitude: long
-        })
-    }];
-
-    const payload = {
-        text: `${title}\n\n${description}`,
-        buttons: buttons
-    };
-
-    console.log('📦 Payload:', JSON.stringify(payload, null, 2));
-    
-    await sendButtons(sock, chatId, payload, { quoted: quotedMsg });
-    console.log('✅ Location button sent');
+    await sendButtons(sock, chatId, {
+        text: `${title}\n\n${desc}`,
+        buttons: [{
+            name: 'cta_location',
+            buttonParamsJson: JSON.stringify({ display_text: btn, latitude: lat, longitude: long })
+        }]
+    }, { quoted: quotedMsg });
 }
 
-// 6. List Button (Using sendButtons with list_reply)
+// 6. List Button (FIXED: Uses sendInteractiveMessage)
 async function handleListButton(sock, chatId, text, quotedMsg, reply) {
-    console.log('\n📝 List Button:');
+    console.log('\n📝 List Button Processing:');
     
     const parts = text.split('|').map(p => p.trim());
     if (parts.length < 3) {
-        return reply('❌ Format: `button list Title | Button Text | Option1,Option2,Option3`');
+        return reply('❌ Format: `button list Title | Button Text | Option1,Option2`');
     }
 
     const [title, buttonText, optionsText] = parts;
     const options = optionsText.split(',').map(o => o.trim());
 
-    // Create a list button using the list_reply type
-    const buttons = [{
-        name: 'list_reply',
-        buttonParamsJson: JSON.stringify({
-            display_text: buttonText,
-            title: title,
-            sections: [{
-                title: title,
-                rows: options.map((opt, index) => ({
-                    id: `opt_${Date.now()}_${index}`,
-                    title: opt,
-                    description: `Select ${opt}`
-                }))
-            }]
-        })
-    }];
-
     const payload = {
-        text: `📋 *${title}*\n\nPlease select an option from the list below:`,
-        footer: 'Choose wisely!',
-        buttons: buttons
+        title: title,
+        body: `📋 *${title}*\n\nPlease select an option from the list below:`,
+        footer: 'Gifted-Btns Interactive Menu',
+        buttonText: buttonText,
+        sections: [{
+            title: "Available Options",
+            rows: options.map((opt, index) => ({
+                title: opt,
+                description: `Select ${opt}`,
+                id: `list_opt_${Date.now()}_${index}`
+            }))
+        }]
     };
 
-    console.log('📦 Payload:', JSON.stringify(payload, null, 2));
-    
-    await sendButtons(sock, chatId, payload, { quoted: quotedMsg });
-    console.log('✅ List button sent');
+    console.log('📦 Interactive Payload:', JSON.stringify(payload, null, 2));
+    await sendInteractiveMessage(sock, chatId, payload, { quoted: quotedMsg });
+    console.log('✅ List button sent successfully');
 }
 
 // 7. AI Mode Control
 async function handleAIMode(sock, chatId, text, quotedMsg, reply) {
-    console.log('\n📝 AI Mode Control:');
-    
     const mode = text.toLowerCase().trim();
-    console.log(`Mode: "${mode}"`);
-
     const userId = chatId;
-    let currentStatus = global.aiMode.get(userId) || false;
 
-    if (mode === 'on' || mode === 'enable' || mode === 'true' || mode === '1') {
+    if (mode === 'on') {
         global.aiMode.set(userId, true);
-        
-        const buttons = [
-            {
-                id: 'ai_help',
-                text: '❓ Help'
-            },
-            {
-                id: 'ai_off',
-                text: '🔕 Disable'
-            }
-        ];
-
         await sendButtons(sock, chatId, {
-            text: '✨ *AI Mode ENABLED*\n\n' +
-                  'You can now ask me questions, get translations, summaries, and more!\n\n' +
-                  '*Example queries:*\n' +
-                  '• "What is the capital of France?"\n' +
-                  '• "Summarize this article"\n' +
-                  '• "Translate hello to Spanish"\n' +
-                  '• "Explain quantum physics"',
-            footer: 'AI Assistant Active',
-            buttons: buttons
+            text: '✨ *AI Mode ENABLED*',
+            buttons: [{ id: 'ai_off', text: '🔕 Disable' }]
         }, { quoted: quotedMsg });
-        
-        console.log('✅ AI Mode enabled');
-        
-    } else if (mode === 'off' || mode === 'disable' || mode === 'false' || mode === '0') {
+    } else if (mode === 'off') {
         global.aiMode.set(userId, false);
-        
-        await sendButtons(sock, chatId, {
-            text: '🔕 *AI Mode DISABLED*\n\nAI assistance has been turned off. You can re-enable anytime.',
-            footer: 'AI Assistant Inactive',
-            buttons: [{
-                id: 'ai_on',
-                text: '✨ Enable AI'
-            }]
-        }, { quoted: quotedMsg });
-        
-        console.log('✅ AI Mode disabled');
-        
-    } else if (mode === 'status' || mode === '') {
-        const status = global.aiMode.get(userId) ? 'ENABLED ✅' : 'DISABLED ❌';
-        const statusColor = global.aiMode.get(userId) ? '🟢' : '⚫';
-        
-        const buttons = global.aiMode.get(userId) ? [
-            {
-                id: 'ai_off',
-                text: '🔕 Disable AI'
-            },
-            {
-                id: 'ai_help',
-                text: '❓ Help'
-            }
-        ] : [
-            {
-                id: 'ai_on',
-                text: '✨ Enable AI'
-            }
-        ];
-
-        await sendButtons(sock, chatId, {
-            text: `🤖 *AI Mode Status*\n\n` +
-                  `${statusColor} Current Status: *${status}*\n\n` +
-                  `*What AI can do:*\n` +
-                  `• Answer questions\n` +
-                  `• Translate text\n` +
-                  `• Summarize content\n` +
-                  `• Explain concepts\n` +
-                  `• Generate ideas\n\n` +
-                  `Use \`.button ai on\` to enable.`,
-            footer: 'AI Assistant',
-            buttons: buttons
-        }, { quoted: quotedMsg });
-        
-        console.log('✅ AI status shown');
-        
+        await reply('🔕 *AI Mode DISABLED*');
     } else {
-        // If in AI mode, treat as query to AI
-        if (global.aiMode.get(userId)) {
-            await handleAIQuery(sock, chatId, text, quotedMsg, reply);
-        } else {
-            await reply(`❌ Unknown AI command. Use \`.button ai on\` to enable AI mode, or \`.button ai status\` to check status.`);
-        }
+        const status = global.aiMode.get(userId) ? 'ENABLED ✅' : 'DISABLED ❌';
+        await reply(`🤖 *AI Mode Status:* ${status}`);
     }
 }
 
-// Handle AI queries when AI mode is enabled
-async function handleAIQuery(sock, chatId, query, quotedMsg, reply) {
-    console.log(`📝 AI Query: "${query}"`);
-    
-    // Simulate AI response (replace with actual AI API call)
-    const response = `🤖 *AI Response*\n\n` +
-                     `You asked: "${query}"\n\n` +
-                     `This is a demo response. In production, this would call an actual AI API like OpenAI, Gemini, or Claude.\n\n` +
-                     `To disable AI mode: \`.button ai off\``;
-
-    await sendButtons(sock, chatId, {
-        text: response,
-        footer: 'AI Assistant',
-        buttons: [
-            {
-                id: 'ai_off',
-                text: '🔕 Disable AI'
-            },
-            {
-                id: 'ai_help',
-                text: '❓ Help'
-            }
-        ]
-    }, { quoted: quotedMsg });
-}
-
-// 8. Combo Buttons (Multiple Types)
+// 8. Combo Buttons
 async function handleComboButtons(sock, chatId, quotedMsg, reply) {
-    console.log('\n📝 Combo Buttons:');
-    
     const buttons = [
-        {
-            id: `yes_${Date.now()}`,
-            text: '✅ Yes'
-        },
-        {
-            id: `no_${Date.now()}`,
-            text: '❌ No'
-        },
-        {
-            name: 'cta_url',
-            buttonParamsJson: JSON.stringify({
-                display_text: '🌐 Google',
-                url: 'https://google.com'
-            })
-        },
-        {
-            name: 'cta_copy',
-            buttonParamsJson: JSON.stringify({
-                display_text: '📋 Copy',
-                copy_code: 'DEMO123'
-            })
-        }
+        { id: 'c1', text: '✅ Yes' },
+        { name: 'cta_url', buttonParamsJson: JSON.stringify({ display_text: '🌐 Google', url: 'https://google.com' }) }
     ];
 
-    const payload = {
-        text: '🔘 *All Button Types Demo*\n\nTry different button types:',
-        footer: 'Combo Demo',
+    await sendButtons(sock, chatId, {
+        text: '🔘 *Combo Demo*',
+        footer: 'Multiple types',
         buttons: buttons
-    };
-
-    console.log('📦 Payload:', JSON.stringify(payload, null, 2));
-    
-    await sendButtons(sock, chatId, payload, { quoted: quotedMsg });
-    console.log('✅ Combo buttons sent');
+    }, { quoted: quotedMsg });
 }
 
 // 9. Validate Payload
 async function validatePayload(sock, chatId, text, quotedMsg, reply) {
-    console.log('\n📝 Validating payload:');
-    
     try {
-        let payload;
-        try {
-            payload = JSON.parse(text);
-        } catch {
-            payload = {
-                text: text || 'Test message',
-                buttons: [
-                    { id: 'btn1', text: 'Option 1' },
-                    { id: 'btn2', text: 'Option 2' }
-                ]
-            };
-        }
-        
-        console.log('📦 Payload to validate:', JSON.stringify(payload, null, 2));
-        
-        if (validateSendButtonsPayload) {
-            const isValid = validateSendButtonsPayload(payload);
-            
-            let resultMsg = `✅ *Payload Validation Result*\n\n`;
-            resultMsg += `*Valid:* ${isValid ? '✅ Yes' : '❌ No'}\n`;
-            resultMsg += `*Payload:*\n\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``;
-            
-            await reply(resultMsg);
-        } else {
-            await reply('❌ Validation function not available');
-        }
-        
-    } catch (error) {
-        await reply(`❌ Validation error: ${error.message}`);
+        const payload = JSON.parse(text);
+        const isValid = validateSendButtonsPayload(payload);
+        await reply(`Validation Result: ${isValid ? '✅ Valid' : '❌ Invalid'}`);
+    } catch (e) {
+        await reply('❌ Provide valid JSON to validate.');
     }
 }
