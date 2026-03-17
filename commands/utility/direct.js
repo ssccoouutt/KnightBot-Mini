@@ -76,7 +76,7 @@ async function sendResultWithButton(sock, chatId, originalInput, downloadLink, q
     const sessionId = `drive_${Date.now()}`;
 
     const messageText = `✅ *Google Drive Direct Link*\n\n` +
-                       `🔗 *Original:* \`${originalInput.substring(0, 50)}${originalInput.length > 50 ? '...' : ''}\`\n\n` +
+                       `🔗 *Original:* \${originalInput.substring(0, 50)}${originalInput.length > 50 ? '...' : ''}\\n\n` +
                        `📥 *Download Link:*\n${downloadLink}\n\n` +
                        `_Click the button below to copy the link._`;
 
@@ -84,7 +84,7 @@ async function sendResultWithButton(sock, chatId, originalInput, downloadLink, q
     const buttons = [{
         name: 'cta_copy',
         buttonParamsJson: JSON.stringify({
-            display_text: '📋 Copy Link',
+            display_text: 'Copy Link',
             copy_code: downloadLink
         })
     }];
