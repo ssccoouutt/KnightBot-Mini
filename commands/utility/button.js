@@ -1,10 +1,11 @@
 const config = require('../../config');
+const { sendButtons } = require('gifted-btns');
 
 module.exports = {
     name: 'button',
     aliases: ['buttons', 'interactive', 'quickreply', 'cta'],
     description: 'Send interactive button messages (Yes/No, Call-to-Action, etc.)',
-    usage: 'button <title> | <description> | <button1>,<button2>,<button3>\n' +
+    usage: 'button <title> | <description> | <footer> | <button1>,<button2>,<button3>\n' +
            'button cta <title> | <description> | <button text> | <url>\n' +
            'button call <title> | <description> | <button text> | <phone number>',
     category: 'utility',
@@ -24,17 +25,17 @@ module.exports = {
         if (subCommand === 'cta' && args.length >= 4) {
             // Format: button cta Title | Description | Button Text | URL
             const fullText = args.slice(1).join(' ');
-            await handleCTASend(sock, from, fullText, reply, react);
+            await handleCTASend(sock, from, fullText, msg, reply, react);
         }
         else if (subCommand === 'call' && args.length >= 4) {
             // Format: button call Title | Description | Button Text | Phone
             const fullText = args.slice(1).join(' ');
-            await handleCallButton(sock, from, fullText, reply, react);
+            await handleCallButton(sock, from, fullText, msg, reply, react);
         }
         else {
             // Default: quick reply buttons
             const fullText = args.join(' ');
-            await handleQuickReply(sock, from, fullText, reply, react);
+            await handleQuickReply(sock, from, fullText, msg, reply, react);
         }
     }
 };
@@ -43,8 +44,8 @@ async function showHelp(sock, chatId, reply, config) {
     await reply(`🔘 *Interactive Button Messages*\n\n` +
                 `Send messages with buttons for quick replies or actions.\n\n` +
                 `*Quick Reply Buttons:*\n` +
-                `\`${config.prefix}button Title | Description | Button1,Button2,Button3\`\n` +
-                `Example: \`${config.prefix}button Order Confirmation | Would you like to confirm? | Confirm,Cancel\`\n\n` +
+                `\`${config.prefix}button Title | Description | Footer | Button1,Button2,Button3\`\n` +
+                `Example: \`${config.prefix}button Order Confirmation | Would you like to confirm? | Thank you | Confirm,Cancel\`\n\n` +
                 
                 `*Call-to-Action Button (URL):*\n` +
                 `\`${config.prefix}button cta Title | Description | Button Text | URL\`\n` +
@@ -55,22 +56,23 @@ async function showHelp(sock, chatId, reply, config) {
                 `Example: \`${config.prefix}button call Customer Support | Need help? | Call Now | +1234567890\``);
 }
 
-async function handleQuickReply(sock, chatId, text, reply, react) {
+async function handleQuickReply(sock, chatId, text, quotedMsg, reply, react) {
     await react('⏳');
 
     try {
-        // Parse the format: Title | Description | Button1,Button2,Button3
+        // Parse the format: Title | Description | Footer | Button1,Button2,Button3
         const parts = text.split('|').map(p => p.trim());
         
-        if (parts.length < 3) {
-            await reply(`❌ Invalid format!\n\nUse: \`button Title | Description | Button1,Button2,Button3\``);
+        if (parts.length < 4) {
+            await reply(`❌ Invalid format!\n\nUse: \`button Title | Description | Footer | Button1,Button2,Button3\``);
             await react('❌');
             return;
         }
 
         const title = parts[0];
         const description = parts[1];
-        const buttonsText = parts[2].split(',').map(b => b.trim());
+        const footer = parts[2];
+        const buttonsText = parts[3].split(',').map(b => b.trim());
 
         if (buttonsText.length < 1 || buttonsText.length > 3) {
             await reply(`❌ You can only have 1-3 buttons.`);
@@ -78,23 +80,22 @@ async function handleQuickReply(sock, chatId, text, reply, react) {
             return;
         }
 
-        // Create button message using List Message format (more compatible)
-        const sections = [{
-            title: title,
-            rows: buttonsText.map((btnText, index) => ({
-                title: btnText,
-                description: `Option ${index + 1}`,
-                rowId: `btn_${index}_${Date.now()}`
-            }))
-        }];
+        // Create quick reply buttons
+        const buttons = buttonsText.map(btnText => ({
+            name: 'quick_reply',
+            buttonParamsJson: JSON.stringify({
+                display_text: btnText,
+                id: `btn_${Date.now()}_${Math.random().toString(36).substring(7)}`
+            })
+        }));
 
-        // Send as list message (which is widely supported)
-        await sock.sendMessage(chatId, {
+        // Send buttons using gifted-btns
+        await sendButtons(sock, chatId, {
+            title: title,
             text: description,
-            footer: title,
-            buttonText: 'Select Option',
-            sections: sections
-        });
+            footer: footer,
+            buttons: buttons
+        }, { quoted: quotedMsg });
 
         await react('✅');
 
@@ -105,7 +106,7 @@ async function handleQuickReply(sock, chatId, text, reply, react) {
     }
 }
 
-async function handleCTASend(sock, chatId, text, reply, react) {
+async function handleCTASend(sock, chatId, text, quotedMsg, reply, react) {
     await react('⏳');
 
     try {
@@ -132,23 +133,21 @@ async function handleCTASend(sock, chatId, text, reply, react) {
             return;
         }
 
-        // Send as a simple message with a link preview
-        const messageText = `${title}\n\n${description}\n\nClick the link below:\n${url}`;
-        
-        await sock.sendMessage(chatId, {
-            text: messageText,
-            contextInfo: {
-                externalAdReply: {
-                    title: buttonText,
-                    body: description,
-                    thumbnailUrl: 'https://whatsapp.com/favicon.ico',
-                    mediaType: 1,
-                    renderLargerThumbnail: false,
-                    sourceUrl: url,
-                    sourceId: 'cta_button'
-                }
-            }
-        });
+        // Create CTA URL button
+        const button = {
+            name: 'cta_url',
+            buttonParamsJson: JSON.stringify({
+                display_text: buttonText,
+                url: url
+            })
+        };
+
+        // Send button using gifted-btns
+        await sendButtons(sock, chatId, {
+            title: title,
+            text: description,
+            buttons: [button]
+        }, { quoted: quotedMsg });
 
         await react('✅');
 
@@ -159,7 +158,7 @@ async function handleCTASend(sock, chatId, text, reply, react) {
     }
 }
 
-async function handleCallButton(sock, chatId, text, reply, react) {
+async function handleCallButton(sock, chatId, text, quotedMsg, reply, react) {
     await react('⏳');
 
     try {
@@ -186,26 +185,21 @@ async function handleCallButton(sock, chatId, text, reply, react) {
             return;
         }
 
-        // Format phone number for tel: link
-        const telLink = `tel:+${phoneNumber}`;
+        // Create call button
+        const button = {
+            name: 'cta_call',
+            buttonParamsJson: JSON.stringify({
+                display_text: buttonText,
+                phone_number: phoneNumber
+            })
+        };
 
-        // Send as a simple message with call link
-        const messageText = `${title}\n\n${description}\n\n📞 *${buttonText}*\nTap the link to call: ${telLink}`;
-        
-        await sock.sendMessage(chatId, {
-            text: messageText,
-            contextInfo: {
-                externalAdReply: {
-                    title: buttonText,
-                    body: `Call ${phoneNumber}`,
-                    thumbnailUrl: 'https://whatsapp.com/favicon.ico',
-                    mediaType: 1,
-                    renderLargerThumbnail: false,
-                    sourceUrl: telLink,
-                    sourceId: 'call_button'
-                }
-            }
-        });
+        // Send button using gifted-btns
+        await sendButtons(sock, chatId, {
+            title: title,
+            text: description,
+            buttons: [button]
+        }, { quoted: quotedMsg });
 
         await react('✅');
 
