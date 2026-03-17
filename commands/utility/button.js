@@ -79,7 +79,7 @@ module.exports = {
 };
 
 async function showHelp(sock, chatId, reply) {
-    const helpText = `🔘 *Button & AI Commands (FIXED)*\n\n` +
+    const helpText = `🔘 *Button & AI Commands (FINAL FIX)*\n\n` +
                     `*1. Native Buttons*\n` +
                     `\`.button native Question | Option1,Option2\`\n\n` +
                     `*2. URL Button*\n` +
@@ -109,7 +109,7 @@ async function handleNativeButtons(sock, chatId, text, quotedMsg, reply) {
         text: parts[0],
         footer: 'Choose an option',
         buttons: buttons,
-        aimode: global.aiMode.get(chatId) || false // FIXED: aimode passed in payload
+        aimode: global.aiMode.get(chatId) || false
     }, { quoted: quotedMsg });
 }
 
@@ -158,22 +158,23 @@ async function handleCopyButton(sock, chatId, text, quotedMsg, reply) {
     }, { quoted: quotedMsg });
 }
 
-// 5. Location Button (FIXED)
+// 5. Location Button (FIXED: Using sendInteractiveMessage)
 async function handleLocationButton(sock, chatId, text, quotedMsg, reply) {
     const parts = text.split('|').map(p => p.trim());
     if (parts.length < 3) return reply('❌ Format: `button location Title | Description | Button Text`');
 
-    await sendButtons(sock, chatId, {
+    // FIXED: Using sendInteractiveMessage for advanced native flow buttons
+    await sendInteractiveMessage(sock, chatId, {
         text: `${parts[0]}\n\n${parts[1]}`,
-        buttons: [{
-            name: 'send_location', // FIXED: Correct name
-            buttonParamsJson: JSON.stringify({ display_text: parts[2] }) // FIXED: Only display_text needed
+        interactiveButtons: [{
+            name: 'send_location',
+            buttonParamsJson: JSON.stringify({ display_text: parts[2] })
         }],
         aimode: global.aiMode.get(chatId) || false
     }, { quoted: quotedMsg });
 }
 
-// 6. List Button (FIXED)
+// 6. List Button (FIXED: Using sendInteractiveMessage)
 async function handleListButton(sock, chatId, text, quotedMsg, reply) {
     const parts = text.split('|').map(p => p.trim());
     if (parts.length < 3) return reply('❌ Format: `button list Title | Button Text | Option1,Option2`');
@@ -181,10 +182,11 @@ async function handleListButton(sock, chatId, text, quotedMsg, reply) {
     const options = parts[2].split(',').map(o => o.trim());
     const rows = options.map((opt, i) => ({ id: `opt_${i}`, title: opt }));
 
-    await sendButtons(sock, chatId, {
+    // FIXED: Using sendInteractiveMessage for advanced native flow buttons
+    await sendInteractiveMessage(sock, chatId, {
         text: parts[0],
-        buttons: [{
-            name: 'single_select', // FIXED: Correct name for list menu
+        interactiveButtons: [{
+            name: 'single_select',
             buttonParamsJson: JSON.stringify({
                 title: parts[1],
                 sections: [{ title: 'Options', rows: rows }]
@@ -194,7 +196,7 @@ async function handleListButton(sock, chatId, text, quotedMsg, reply) {
     }, { quoted: quotedMsg });
 }
 
-// 7. AI Mode Control (FIXED)
+// 7. AI Mode Control
 async function handleAIMode(sock, chatId, text, quotedMsg, reply) {
     const mode = text.toLowerCase().trim();
     if (mode === 'on') {
@@ -203,7 +205,7 @@ async function handleAIMode(sock, chatId, text, quotedMsg, reply) {
             text: '✨ *AI Mode ENABLED*',
             footer: 'AI Assistant Active',
             buttons: [{ id: 'ai_off', text: '🔕 Disable' }],
-            aimode: true // FIXED: Passed in payload
+            aimode: true
         }, { quoted: quotedMsg });
     } else if (mode === 'off') {
         global.aiMode.set(chatId, false);
