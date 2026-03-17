@@ -4,7 +4,7 @@ module.exports = {
     name: 'button',
     aliases: ['buttons', 'interactive', 'quickreply', 'cta'],
     description: 'Send interactive button messages (Yes/No, Call-to-Action, etc.)',
-    usage: 'button <title> | <description> | <footer> | <button1>,<button2>,<button3>\n' +
+    usage: 'button <title> | <description> | <button1>,<button2>,<button3>\n' +
            'button cta <title> | <description> | <button text> | <url>\n' +
            'button call <title> | <description> | <button text> | <phone number>',
     category: 'utility',
@@ -21,12 +21,12 @@ module.exports = {
         // Parse subcommands
         const subCommand = args[0].toLowerCase();
 
-        if (subCommand === 'cta' && args.length >= 5) {
+        if (subCommand === 'cta' && args.length >= 4) {
             // Format: button cta Title | Description | Button Text | URL
             const fullText = args.slice(1).join(' ');
             await handleCTASend(sock, from, fullText, reply, react);
         }
-        else if (subCommand === 'call' && args.length >= 5) {
+        else if (subCommand === 'call' && args.length >= 4) {
             // Format: button call Title | Description | Button Text | Phone
             const fullText = args.slice(1).join(' ');
             await handleCallButton(sock, from, fullText, reply, react);
@@ -43,15 +43,15 @@ async function showHelp(sock, chatId, reply, config) {
     await reply(`🔘 *Interactive Button Messages*\n\n` +
                 `Send messages with buttons for quick replies or actions.\n\n` +
                 `*Quick Reply Buttons:*\n` +
-                `\`${config.prefix}button Title | Description | Footer | Yes,No,Maybe\`\n` +
-                `Example: \`${config.prefix}button Order Confirmation | Would you like to confirm? | Thank you | Confirm,Cancel\`\n\n` +
+                `\`${config.prefix}button Title | Description | Button1,Button2,Button3\`\n` +
+                `Example: \`${config.prefix}button Order Confirmation | Would you like to confirm? | Confirm,Cancel\`\n\n` +
                 
                 `*Call-to-Action Button (URL):*\n` +
-                `\`${config.prefix}button cta Title | Description | Button Text | https://example.com\`\n` +
+                `\`${config.prefix}button cta Title | Description | Button Text | URL\`\n` +
                 `Example: \`${config.prefix}button cta Special Offer | 50% off today! | Shop Now | https://example.com/sale\`\n\n` +
                 
                 `*Call-to-Action Button (Phone):*\n` +
-                `\`${config.prefix}button call Title | Description | Button Text | +1234567890\`\n` +
+                `\`${config.prefix}button call Title | Description | Button Text | Phone\`\n` +
                 `Example: \`${config.prefix}button call Customer Support | Need help? | Call Now | +1234567890\``);
 }
 
@@ -59,19 +59,18 @@ async function handleQuickReply(sock, chatId, text, reply, react) {
     await react('⏳');
 
     try {
-        // Parse the format: Title | Description | Footer | Button1,Button2,Button3
+        // Parse the format: Title | Description | Button1,Button2,Button3
         const parts = text.split('|').map(p => p.trim());
         
-        if (parts.length < 4) {
-            await reply(`❌ Invalid format!\n\nUse: \`button Title | Description | Footer | Button1,Button2,Button3\``);
+        if (parts.length < 3) {
+            await reply(`❌ Invalid format!\n\nUse: \`button Title | Description | Button1,Button2,Button3\``);
             await react('❌');
             return;
         }
 
         const title = parts[0];
         const description = parts[1];
-        const footer = parts[2];
-        const buttonsText = parts[3].split(',').map(b => b.trim());
+        const buttonsText = parts[2].split(',').map(b => b.trim());
 
         if (buttonsText.length < 1 || buttonsText.length > 3) {
             await reply(`❌ You can only have 1-3 buttons.`);
@@ -79,29 +78,22 @@ async function handleQuickReply(sock, chatId, text, reply, react) {
             return;
         }
 
-        // Create buttons array
-        const buttons = buttonsText.map((btnText, index) => ({
-            buttonId: `btn_${index}_${Date.now()}`,
-            buttonText: { displayText: btnText },
-            type: 1 // Quick reply button type
-        }));
+        // Create button message using List Message format (more compatible)
+        const sections = [{
+            title: title,
+            rows: buttonsText.map((btnText, index) => ({
+                title: btnText,
+                description: `Option ${index + 1}`,
+                rowId: `btn_${index}_${Date.now()}`
+            }))
+        }];
 
-        // Prepare the interactive message
-        const interactiveMessage = {
-            body: { text: description },
-            footer: { text: footer },
-            header: { 
-                type: 'text',
-                text: title
-            },
-            nativeFlowMessage: {
-                buttons: buttons
-            }
-        };
-
-        // Send the interactive message
+        // Send as list message (which is widely supported)
         await sock.sendMessage(chatId, {
-            interactive: interactiveMessage
+            text: description,
+            footer: title,
+            buttonText: 'Select Option',
+            sections: sections
         });
 
         await react('✅');
@@ -140,29 +132,22 @@ async function handleCTASend(sock, chatId, text, reply, react) {
             return;
         }
 
-        // Create URL button
-        const button = {
-            buttonId: `cta_${Date.now()}`,
-            buttonText: { displayText: buttonText },
-            type: 2, // URL button type
-            url: url
-        };
-
-        // Prepare the interactive message
-        const interactiveMessage = {
-            body: { text: description },
-            header: { 
-                type: 'text',
-                text: title
-            },
-            nativeFlowMessage: {
-                buttons: [button]
-            }
-        };
-
-        // Send the interactive message
+        // Send as a simple message with a link preview
+        const messageText = `${title}\n\n${description}\n\nClick the link below:\n${url}`;
+        
         await sock.sendMessage(chatId, {
-            interactive: interactiveMessage
+            text: messageText,
+            contextInfo: {
+                externalAdReply: {
+                    title: buttonText,
+                    body: description,
+                    thumbnailUrl: 'https://whatsapp.com/favicon.ico',
+                    mediaType: 1,
+                    renderLargerThumbnail: false,
+                    sourceUrl: url,
+                    sourceId: 'cta_button'
+                }
+            }
         });
 
         await react('✅');
@@ -201,29 +186,25 @@ async function handleCallButton(sock, chatId, text, reply, react) {
             return;
         }
 
-        // Create call button
-        const button = {
-            buttonId: `call_${Date.now()}`,
-            buttonText: { displayText: buttonText },
-            type: 3, // Phone number button type
-            phoneNumber: phoneNumber
-        };
+        // Format phone number for tel: link
+        const telLink = `tel:+${phoneNumber}`;
 
-        // Prepare the interactive message
-        const interactiveMessage = {
-            body: { text: description },
-            header: { 
-                type: 'text',
-                text: title
-            },
-            nativeFlowMessage: {
-                buttons: [button]
-            }
-        };
-
-        // Send the interactive message
+        // Send as a simple message with call link
+        const messageText = `${title}\n\n${description}\n\n📞 *${buttonText}*\nTap the link to call: ${telLink}`;
+        
         await sock.sendMessage(chatId, {
-            interactive: interactiveMessage
+            text: messageText,
+            contextInfo: {
+                externalAdReply: {
+                    title: buttonText,
+                    body: `Call ${phoneNumber}`,
+                    thumbnailUrl: 'https://whatsapp.com/favicon.ico',
+                    mediaType: 1,
+                    renderLargerThumbnail: false,
+                    sourceUrl: telLink,
+                    sourceId: 'call_button'
+                }
+            }
         });
 
         await react('✅');
