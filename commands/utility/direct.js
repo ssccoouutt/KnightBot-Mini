@@ -1,9 +1,12 @@
 const config = require('../../config');
+const giftedBtns = require('gifted-btns');
+
+const { sendButtons } = giftedBtns;
 
 module.exports = {
     name: 'direct',
-    aliases: [], // No aliases as requested
-    description: 'Convert Google Drive links to direct download links',
+    aliases: [],
+    description: 'Convert Google Drive links to direct download links with copy button',
     usage: 'direct <Google Drive link or file ID>',
     category: 'utility',
     ownerOnly: false,
@@ -23,12 +26,7 @@ module.exports = {
             const result = convertToDriveDownloadLink(userInput);
 
             if (result) {
-                const response = `✅ *Google Drive Direct Link*\n\n` +
-                                `🔗 *Original:* \`${userInput.substring(0, 50)}${userInput.length > 50 ? '...' : ''}\`\n\n` +
-                                `📥 *Download Link:*\n${result}\n\n` +
-                                `_This link will automatically download the file when opened in browser._`;
-
-                await reply(response);
+                await sendResultWithButton(sock, from, userInput, result, msg, reply);
                 await react('✅');
             } else {
                 await showError(sock, from, userInput, reply);
@@ -45,7 +43,7 @@ module.exports = {
 
 async function showHelp(sock, chatId, reply) {
     const helpText = `📁 *Google Drive Direct Link Converter*\n\n` +
-                    `Convert any Google Drive sharing link to a direct download link.\n\n` +
+                    `Convert any Google Drive sharing link to a direct download link with copy button.\n\n` +
                     `*Usage:*\n` +
                     `\`direct <Google Drive link or file ID>\`\n\n` +
                     `*Supported Formats:*\n` +
@@ -72,6 +70,34 @@ async function showError(sock, chatId, input, reply) {
                      `• \`1Hy1Ty1xyjI5kKBYeqEJ87avPpRWxn0rM\``;
 
     await reply(errorText);
+}
+
+async function sendResultWithButton(sock, chatId, originalInput, downloadLink, quotedMsg, reply) {
+    const sessionId = `drive_${Date.now()}`;
+
+    const messageText = `✅ *Google Drive Direct Link*\n\n` +
+                       `🔗 *Original:* \`${originalInput.substring(0, 50)}${originalInput.length > 50 ? '...' : ''}\`\n\n` +
+                       `📥 *Download Link:*\n${downloadLink}\n\n` +
+                       `_Click the button below to copy the link._`;
+
+    // Create copy button
+    const buttons = [{
+        name: 'cta_copy',
+        buttonParamsJson: JSON.stringify({
+            display_text: '📋 Copy Link',
+            copy_code: downloadLink
+        })
+    }];
+
+    // Send with aimode: true HARCODED - always true regardless of AI mode toggle
+    await sendButtons(sock, chatId, {
+        text: messageText,
+        footer: 'Google Drive Downloader',
+        buttons: buttons,
+        aimode: true  // 👈 HARDCODED TRUE - ALWAYS ON
+    }, { quoted: quotedMsg });
+
+    console.log(`📋 Direct link sent - Session: ${sessionId} - AI Mode: true (hardcoded)`);
 }
 
 /**
@@ -116,7 +142,6 @@ function convertToDriveDownloadLink(input) {
     if (!fileId) return null;
     
     // Construct the direct download link
-    // Using the format that forces download and bypasses the virus scan warning
     const downloadLink = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
     return downloadLink;
 }
