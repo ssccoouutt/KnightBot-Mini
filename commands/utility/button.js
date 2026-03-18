@@ -165,19 +165,26 @@ module.exports = {
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, react } = context;
         
-        // Get the message text (the button click)
+        // Check if this is actually a button click (has quoted message)
+        const quotedMessageId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
+        const isButtonClick = quotedMessageId && session.pendingMessages?.some(p => p.messageId === quotedMessageId);
+        
+        if (!isButtonClick) {
+            // This is a regular message during the session, not a button click
+            console.log(`💬 Regular message during button session - ignoring`);
+            // Let it pass through to be handled by other commands
+            return false;
+        }
+        
+        // Get the message text
         const text = msg.message?.conversation || 
                     msg.message?.extendedTextMessage?.text || 
                     '';
         
-        // Extract button info from the message
-        const quotedMessageId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
-        const displayText = text;
-        
-        console.log(`🔘 Button clicked: ${displayText} (quoting: ${quotedMessageId})`);
+        console.log(`🔘 Button click detected: ${text} (quoting: ${quotedMessageId})`);
         
         // Get random response based on button
-        const response = getRandomResponse(quotedMessageId || '', displayText);
+        const response = getRandomResponse(quotedMessageId, text);
         
         // Send response
         const sentMsg = await reply(response);
