@@ -760,53 +760,85 @@ const handleMessage = async (sock, msg) => {
       // Silently ignore if tictactoe command doesn't exist or has errors
     }
     
-    // ===== SMART SESSION CHECK - ONLY HANDLE REPLIES TO BOT'S SESSION MESSAGES =====
+    // ===== IMPROVED SESSION DETECTION =====
     const activeSession = sessionManager.getSession(sender, from);
     if (activeSession) {
-        // Check if this message is a reply to the bot's last session message
-        const isReplyToBot = msg.message?.extendedTextMessage?.contextInfo?.stanzaId && 
-                             msg.message.extendedTextMessage.contextInfo.participant === sock.user.id;
+      // Check if this message is likely a response to the bot's session
+      let isSessionResponse = false;
+      let responseReason = '';
+      
+      // Method 1: Check if it's a direct reply to bot's message
+      const isReplyToBot = msg.message?.extendedTextMessage?.contextInfo?.stanzaId && 
+                           msg.message.extendedTextMessage.contextInfo.participant === sock.user.id;
+      
+      if (isReplyToBot) {
+        isSessionResponse = true;
+        responseReason = 'direct reply';
+      }
+      
+      // Method 2: In private chat, any non-command message is likely a response
+      else if (!isGroup && !body.startsWith(config.prefix)) {
+        isSessionResponse = true;
+        responseReason = 'private chat message';
+      }
+      
+      // Method 3: In group, check if message mentions the bot
+      else if (isGroup) {
+        const mentionsBot = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.includes(sock.user.id) || false;
+        const quotedBot = msg.message?.extendedTextMessage?.contextInfo?.participant === sock.user.id;
         
-        if (isReplyToBot) {
-            // User replied to bot's message - treat as session input
-            console.log(`💬 Session reply from ${sender} in ${from}: ${activeSession.command} (step ${activeSession.step})`);
-            
-            // Get the command that owns this session
-            const sessionCommand = commands.get(activeSession.command);
-            
-            if (sessionCommand && typeof sessionCommand.handleSession === 'function') {
-                // Command has a session handler - let it process the input
-                const handled = await sessionCommand.handleSession(sock, msg, activeSession, {
-                    from,
-                    sender,
-                    isGroup,
-                    groupMetadata,
-                    isOwner: isOwner(sender),
-                    isAdmin: await isAdmin(sock, sender, from, groupMetadata),
-                    isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
-                    isMod: isMod(sender),
-                    reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
-                    react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
-                });
-                
-                if (handled) {
-                    // Session handler processed the message
-                    return;
-                } else {
-                    // Session handler didn't process - maybe clear it
-                    sessionManager.clearSession(sender, from);
-                }
-            } else {
-                // Command doesn't have session handler - clear session
-                console.log(`⚠️ Command ${activeSession.command} has no session handler, clearing session`);
-                sessionManager.clearSession(sender, from);
-            }
-        } else {
-            // Not a reply to bot - let it pass through normally
-            console.log(`💬 User has active session but message is not a reply - letting through`);
+        if (mentionsBot || quotedBot) {
+          isSessionResponse = true;
+          responseReason = mentionsBot ? 'mentions bot' : 'quotes bot';
         }
+        
+        // Method 4: If session is in progress (step > 1), treat all non-command messages as responses
+        // This helps when user forgets to mention bot after first response
+        else if (activeSession.step > 1 && !body.startsWith(config.prefix)) {
+          isSessionResponse = true;
+          responseReason = 'session continuation';
+        }
+      }
+      
+      if (isSessionResponse) {
+        console.log(`💬 Session response detected (${responseReason}) for ${activeSession.command} (step ${activeSession.step})`);
+        
+        // Get the command that owns this session
+        const sessionCommand = commands.get(activeSession.command);
+        
+        if (sessionCommand && typeof sessionCommand.handleSession === 'function') {
+          // Command has a session handler - let it process the input
+          const handled = await sessionCommand.handleSession(sock, msg, activeSession, {
+            from,
+            sender,
+            isGroup,
+            groupMetadata,
+            isOwner: isOwner(sender),
+            isAdmin: await isAdmin(sock, sender, from, groupMetadata),
+            isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
+            isMod: isMod(sender),
+            reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+            react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
+          });
+          
+          if (handled) {
+            // Session handler processed the message
+            return;
+          } else {
+            // Session handler didn't process - maybe clear it
+            sessionManager.clearSession(sender, from);
+          }
+        } else {
+          // Command doesn't have session handler - clear session
+          console.log(`⚠️ Command ${activeSession.command} has no session handler, clearing session`);
+          sessionManager.clearSession(sender, from);
+        }
+      } else {
+        // Not a session response - let it pass through normally
+        console.log(`💬 User has active session but message is not a response - letting through`);
+      }
     }
-    // ===== END SMART SESSION CHECK =====
+    // ===== END IMPROVED SESSION DETECTION =====
     
     // Check if message starts with prefix
     if (!body.startsWith(config.prefix)) return;
