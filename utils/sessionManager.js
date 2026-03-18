@@ -1,5 +1,6 @@
 /**
  * Session Manager - Handles multi-step conversations
+ * Stores temporary user sessions for commands that need multiple inputs
  */
 
 // Session store (in-memory)
@@ -90,18 +91,27 @@ function addPendingMessage(userId, chatId, messageId, command) {
  * Find session by replied message ID
  */
 function findSessionByRepliedMessage(messageId, userId) {
+    console.log(`🔍 Searching for session with pending message: ${messageId} for user ${userId}`);
+    
     for (const [key, session] of sessions.entries()) {
         // Only check sessions belonging to this user
         if (session.userId !== userId) continue;
         
-        const found = session.pendingMessages.find(p => p.messageId === messageId);
-        if (found) {
-            return {
-                session,
-                pendingInfo: found
-            };
+        console.log(`   Checking session ${session.command} with ${session.pendingMessages?.length || 0} pending messages`);
+        
+        if (session.pendingMessages && Array.isArray(session.pendingMessages)) {
+            const found = session.pendingMessages.find(p => p && p.messageId === messageId);
+            if (found) {
+                console.log(`✅ Found match in session: ${session.command}`);
+                return {
+                    session,
+                    pendingInfo: found
+                };
+            }
         }
     }
+    
+    console.log(`❌ No session found for message ID ${messageId}`);
     return null;
 }
 
@@ -187,6 +197,32 @@ function hasActiveSession(userId, chatId) {
     return getLatestSession(userId, chatId) !== null;
 }
 
+/**
+ * Check if a specific session is still active (not expired)
+ */
+function isSessionActive(userId, chatId) {
+    const key = getSessionKey(userId, chatId);
+    const session = sessions.get(key);
+    
+    if (!session) return false;
+    
+    // Check if expired
+    if (Date.now() - session.lastActivity > SESSION_TIMEOUT) {
+        sessions.delete(key);
+        
+        // Clean up latest session if this was it
+        const latestKey = getLatestSessionKey(userId, chatId);
+        const latest = latestSessionMap.get(latestKey);
+        if (latest && latest.sessionKey === key) {
+            latestSessionMap.delete(latestKey);
+        }
+        
+        return false;
+    }
+    
+    return true;
+}
+
 module.exports = {
     createSession,
     addPendingMessage,
@@ -195,5 +231,6 @@ module.exports = {
     getUserSessions,
     updateSession,
     clearSession,
-    hasActiveSession
+    hasActiveSession,
+    isSessionActive
 };
