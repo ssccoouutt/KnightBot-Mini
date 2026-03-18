@@ -766,11 +766,21 @@ const handleMessage = async (sock, msg) => {
     
     if (quotedMessageId) {
         // This is a reply to some message - find which session it belongs to
-        const sessionInfo = sessionManager.findSessionByRepliedMessage(quotedMessageId);
+        // IMPORTANT: Pass the sender ID to ensure only the user who started the session can reply
+        const sessionInfo = sessionManager.findSessionByRepliedMessage(quotedMessageId, sender);
         
         if (sessionInfo) {
             const { session, pendingInfo } = sessionInfo;
-            console.log(`💬 Reply detected for command: ${pendingInfo.command} (step ${session.step})`);
+            console.log(`💬 Reply detected for user ${sender} - command: ${pendingInfo.command} (step ${session.step})`);
+            
+            // Verify this is the correct user (already done in findSessionByRepliedMessage, but double-check)
+            if (session.userId !== sender) {
+                console.log(`⚠️ User ${sender} tried to reply to someone else's session - blocking`);
+                await sock.sendMessage(from, { 
+                    text: `❌ This reply belongs to another user's session. Please start your own session with \`.${pendingInfo.command}\`.`
+                }, { quoted: msg });
+                return;
+            }
             
             // Get the command that owns this session
             const sessionCommand = commands.get(pendingInfo.command);
@@ -793,13 +803,16 @@ const handleMessage = async (sock, msg) => {
                     return; // Session handled
                 }
             }
+        } else {
+            // Reply to a bot message but no session found (maybe expired)
+            console.log(`💬 Reply to bot message but no active session found for user ${sender}`);
         }
     }
     
     // If not a reply, check for active session (fallback for older messages)
     const activeSession = sessionManager.getSession(sender, from);
     if (activeSession) {
-        console.log(`💬 User has active session but message is not a reply - letting through`);
+        console.log(`💬 User ${sender} has active session but message is not a reply - letting through`);
     }
     // ===== END SESSION DETECTION =====
     
