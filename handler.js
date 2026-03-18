@@ -10,6 +10,7 @@ const { jidDecode, jidEncode } = require('@whiskeysockets/baileys');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const sessionManager = require('./utils/sessionManager'); // ADD THIS LINE
 
 // Group metadata cache to prevent rate limiting
 const groupMetadataCache = new Map();
@@ -755,13 +756,25 @@ const handleMessage = async (sock, msg) => {
       // Silently ignore if tictactoe command doesn't exist or has errors
     }
     
-    
     // Check if message starts with prefix
     if (!body.startsWith(config.prefix)) return;
     
     // Parse command
     const args = body.slice(config.prefix.length).trim().split(/\s+/);
     const commandName = args.shift().toLowerCase();
+    
+    // ===== SESSION CHECK - BLOCK NEW COMMANDS DURING ACTIVE SESSION =====
+    if (sessionManager.hasActiveSession(sender, from)) {
+      const session = sessionManager.getSession(sender, from);
+      await sock.sendMessage(from, { 
+        text: `⚠️ *Cannot run command*\n\n` +
+              `You have an active *${session.command}* session in this chat.\n\n` +
+              `• Type \`.cancel\` to end the session\n` +
+              `• Complete your current session first`
+      }, { quoted: msg });
+      return;
+    }
+    // ===== END SESSION CHECK =====
     
     // Get command
     const command = commands.get(commandName);
