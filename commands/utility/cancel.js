@@ -12,7 +12,8 @@ module.exports = {
     async execute(sock, msg, args, context) {
         const { from, sender, reply, react } = context;
         
-        const session = sessionManager.getSession(sender, from);
+        // Use getLatestSession (not getSession)
+        const session = sessionManager.getLatestSession(sender, from);
         
         if (session) {
             const commandName = session.command;
