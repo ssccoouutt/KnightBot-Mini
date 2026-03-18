@@ -51,7 +51,7 @@ module.exports = {
                 
             case 2:
                 // Validate age
-                const userAge = parseInt(text);  // Changed variable name from 'age' to 'userAge'
+                const userAge = parseInt(text);
                 if (isNaN(userAge) || userAge < 1 || userAge > 120) {
                     await reply('❌ Please enter a valid age (1-120).');
                     return true; // Keep session alive
