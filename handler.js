@@ -761,17 +761,37 @@ const handleMessage = async (sock, msg) => {
     }
     
     // ===== UNIVERSAL SESSION DETECTION =====
-    // Check if this message is a reply to any bot message
+    // This runs for EVERY message from users
+
+    // Get the quoted message ID if this is a reply
     const quotedMessageId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
-    
+
+    // Check if this is a BUTTON CLICK (special type of reply)
+    const isButtonClick = msg.message?.buttonsResponseMessage || 
+                          msg.message?.listResponseMessage || 
+                          msg.message?.interactiveResponseMessage;
+
     if (quotedMessageId) {
-        // This is a REPLY - find which session it belongs to
+        // This is a REPLY to some message
+        console.log(`🔍 Checking reply to message ID: ${quotedMessageId}`);
+        
+        // Find which session has this message ID in its pendingMessages
         const sessionInfo = sessionManager.findSessionByRepliedMessage(quotedMessageId, sender);
         
         if (sessionInfo) {
-            // Found a specific session this reply belongs to
+            // Found a session - this reply belongs to it
             const { session, pendingInfo } = sessionInfo;
-            console.log(`💬 REPLY routed to specific session: ${pendingInfo.command} (step ${session.step})`);
+            
+            // Check if this session is still active (not expired)
+            const isActive = sessionManager.isSessionActive(session.userId, session.chatId);
+            
+            if (!isActive) {
+                // Session expired - ignore completely
+                console.log(`⚠️ Reply to expired session - ignoring`);
+                return; // Don't process further
+            }
+            
+            console.log(`💬 REPLY routed to CORRECT session: ${pendingInfo.command} (step ${session.step})`);
             
             // Get the command that owns this session
             const sessionCommand = commands.get(pendingInfo.command);
@@ -786,6 +806,7 @@ const handleMessage = async (sock, msg) => {
                     isAdmin: await isAdmin(sock, sender, from, groupMetadata),
                     isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
                     isMod: isMod(sender),
+                    isButtonClick, // Pass this info to the command
                     reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
                     react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
                 });
@@ -794,14 +815,20 @@ const handleMessage = async (sock, msg) => {
                     return; // Message handled by session
                 }
             }
+        } else {
+            // Reply to a bot message but no session found (expired or different bot)
+            console.log(`⚠️ Reply to message ID ${quotedMessageId} but no active session found - ignoring completely`);
+            return; // IMPORTANT: Don't process further, don't route to latest session
         }
     }
-    
-    // If not a reply (or reply didn't match any session), check if user has ANY active sessions
+
+    // If we get here, it's NOT a reply to any bot message
+
+    // Check if this is a command
     const isCommand = body.startsWith(config.prefix);
-    
+
     if (!isCommand) {
-        // This is a DIRECT MESSAGE (non-command)
+        // This is a DIRECT MESSAGE (non-command, not a reply)
         // Get the user's LATEST active session
         const latestSession = sessionManager.getLatestSession(sender, from);
         
@@ -820,6 +847,7 @@ const handleMessage = async (sock, msg) => {
                     isAdmin: await isAdmin(sock, sender, from, groupMetadata),
                     isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
                     isMod: isMod(sender),
+                    isButtonClick: false,
                     reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
                     react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
                 });
