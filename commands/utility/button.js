@@ -1,31 +1,99 @@
 const config = require('../../config');
 const util = require('util');
+const sessionManager = require('../../utils/sessionManager');
 
 // Import gifted-btns
 const giftedBtns = require('gifted-btns');
 
-// Available functions from debug output
+// Available functions
 const { 
     sendButtons, 
-    sendInteractiveMessage,
-    getButtonType,
-    getButtonArgs,
-    validateSendButtonsPayload 
+    sendInteractiveMessage
 } = giftedBtns;
 
 // Store AI mode state
 if (!global.aiMode) global.aiMode = new Map();
 
+// Random response collections
+const buttonResponses = {
+    yes: [
+        "✅ Great choice!",
+        "👍 Awesome!",
+        "🎉 Excellent decision!",
+        "💯 Perfect!",
+        "✨ You made a great choice!"
+    ],
+    no: [
+        "❌ Maybe next time!",
+        "👎 That's too bad!",
+        "😕 Oh well!",
+        "🤔 Are you sure?",
+        "💔 Maybe later!"
+    ],
+    pizza: [
+        "🍕 Pizza is always a good choice!",
+        "🇮🇹 Classic Italian! Buon appetito!",
+        "🧀 Extra cheese coming right up!",
+        "🍅 Margherita or Pepperoni?",
+        "🔥 Hot and fresh pizza on the way!"
+    ],
+    burger: [
+        "🍔 Who doesn't love a good burger?",
+        "🥩 Medium rare or well done?",
+        "🍟 Don't forget the fries!",
+        "🧀 Cheeseburger paradise!",
+        "🇺🇸 All-American classic!"
+    ],
+    pasta: [
+        "🍝 Mamma mia! Great choice!",
+        "🇮🇹 Al dente perfection!",
+        "🧀 Extra parmesan?",
+        "🍅 Carbonara or Bolognese?",
+        "🍷 Perfect with red wine!"
+    ],
+    help: [
+        "❓ How can I help you?",
+        "🆘 What do you need assistance with?",
+        "📋 Type `.menu` to see all commands",
+        "💬 Just ask me anything!",
+        "🤖 I'm here to help!"
+    ],
+    default: [
+        "✅ Got it!",
+        "👍 Thanks!",
+        "😊 Great!",
+        "✨ Excellent!",
+        "🎉 Perfect!"
+    ]
+};
+
+function getRandomResponse(buttonId, displayText) {
+    const parts = buttonId.split('_');
+    const key = parts[parts.length - 1].toLowerCase();
+    const text = displayText.toLowerCase();
+    
+    let category = 'default';
+    if (key === 'yes' || text.includes('yes')) category = 'yes';
+    else if (key === 'no' || text.includes('no')) category = 'no';
+    else if (key === 'help' || text.includes('help')) category = 'help';
+    else if (key === 'pizza' || text.includes('pizza')) category = 'pizza';
+    else if (key === 'burger' || text.includes('burger')) category = 'burger';
+    else if (key === 'pasta' || text.includes('pasta')) category = 'pasta';
+    
+    const responses = buttonResponses[category];
+    return responses[Math.floor(Math.random() * responses.length)];
+}
+
 module.exports = {
     name: 'button',
     aliases: [],
-    description: 'Send interactive button messages and control AI mode',
+    description: 'Send interactive button messages',
     usage: 'button [type] [parameters]',
     category: 'utility',
     ownerOnly: false,
 
     async execute(sock, msg, args, context) {
-        const { from, reply, react } = context;
+        const { from, sender, reply, react } = context;
 
         if (args.length === 0) {
             await showHelp(sock, from, reply);
@@ -36,197 +104,321 @@ module.exports = {
         await react('⏳');
 
         try {
+            let sentMsg;
+            
             switch (subCommand) {
                 case 'native':
                 case 'quick':
-                    await handleNativeButtons(sock, from, args.slice(1).join(' '), msg, reply);
+                    sentMsg = await handleNativeButtons(sock, from, sender, args.slice(1).join(' '), msg, reply);
                     break;
                 case 'url':
                 case 'cta_url':
-                    await handleUrlButton(sock, from, args.slice(1).join(' '), msg, reply);
+                    sentMsg = await handleUrlButton(sock, from, sender, args.slice(1).join(' '), msg, reply);
                     break;
                 case 'call':
                 case 'cta_call':
-                    await handleCallButton(sock, from, args.slice(1).join(' '), msg, reply);
+                    sentMsg = await handleCallButton(sock, from, sender, args.slice(1).join(' '), msg, reply);
                     break;
                 case 'copy':
                 case 'cta_copy':
-                    await handleCopyButton(sock, from, args.slice(1).join(' '), msg, reply);
+                    sentMsg = await handleCopyButton(sock, from, sender, args.slice(1).join(' '), msg, reply);
                     break;
                 case 'location':
                 case 'cta_location':
-                    await handleLocationButton(sock, from, args.slice(1).join(' '), msg, reply);
+                    sentMsg = await handleLocationButton(sock, from, sender, args.slice(1).join(' '), msg, reply);
                     break;
                 case 'list':
-                    await handleListButton(sock, from, args.slice(1).join(' '), msg, reply);
+                    sentMsg = await handleListButton(sock, from, sender, args.slice(1).join(' '), msg, reply);
                     break;
                 case 'ai':
-                    await handleAIMode(sock, from, args.slice(1).join(' '), msg, reply);
+                    sentMsg = await handleAIMode(sock, from, sender, args.slice(1).join(' '), msg, reply);
                     break;
                 case 'combo':
-                    await handleComboButtons(sock, from, msg, reply);
+                    sentMsg = await handleComboButtons(sock, from, sender, msg, reply);
                     break;
                 default:
                     await showHelp(sock, from, reply);
             }
+            
+            // Store the message ID in session if we have one
+            if (sentMsg && sentMsg.key) {
+                sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'button');
+            }
+            
             await react('✅');
         } catch (error) {
             console.error('❌ ERROR:', error);
-            await reply(`❌ *Button Error*\n\n*Message:* ${error.message}`);
+            await reply(`❌ *Button Error*\n\n${error.message}`);
             await react('❌');
         }
+    },
+    
+    // Handle button responses (called by session manager)
+    async handleSession(sock, msg, session, context) {
+        const { from, sender, reply, react } = context;
+        
+        // Get the message text (the button click)
+        const text = msg.message?.conversation || 
+                    msg.message?.extendedTextMessage?.text || 
+                    '';
+        
+        // Extract button info from the message
+        const buttonId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId || 'unknown';
+        const displayText = text;
+        
+        console.log(`🔘 Button clicked: ${displayText} (${buttonId})`);
+        
+        // Get random response based on button
+        const response = getRandomResponse(buttonId, displayText);
+        
+        // Send response
+        const sentMsg = await reply(response);
+        
+        // Store this response in session for potential follow-up
+        if (sentMsg && sentMsg.key) {
+            sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'button');
+        }
+        
+        return true; // Session handled
     }
 };
 
 async function showHelp(sock, chatId, reply) {
-    const helpText = `🔘 *Button & AI Commands (FINAL FIX)*\n\n` +
+    const helpText = `🔘 *Button Commands*\n\n` +
                     `*1. Native Buttons*\n` +
-                    `\`.button native Question | Option1,Option2\`\n\n` +
+                    `\`.button native Question | Option1,Option2\`\n` +
+                    `Example: \`.button native Do you like pizza? | Yes,No\`\n\n` +
+                    
                     `*2. URL Button*\n` +
-                    `\`.button url Title | Description | Button Text | URL\`\n\n` +
+                    `\`.button url Title | Description | Button Text | URL\`\n` +
+                    `Example: \`.button url Special Offer | 50% off! | Shop Now | https://google.com\`\n\n` +
+                    
                     `*3. Call Button*\n` +
-                    `\`.button call Title | Description | Button Text | Phone\`\n\n` +
+                    `\`.button call Title | Description | Button Text | Phone\`\n` +
+                    `Example: \`.button call Support | Need help? | Call Now | +1234567890\`\n\n` +
+                    
                     `*4. Copy Button*\n` +
-                    `\`.button copy Title | Description | Button Text | Text\`\n\n` +
-                    `*5. Location Button (FIXED)*\n` +
-                    `\`.button location Title | Description | Button Text\`\n\n` +
-                    `*6. List Button (FIXED)*\n` +
-                    `\`.button list Title | Button Text | Option1,Option2\`\n\n` +
-                    `*7. AI Mode (FIXED)*\n` +
-                    `\`.button ai on/off/status\``;
+                    `\`.button copy Title | Description | Button Text | Text\`\n` +
+                    `Example: \`.button copy Coupon | Save 20% | Copy Code | SAVE20\`\n\n` +
+                    
+                    `*5. Location Button*\n` +
+                    `\`.button location Title | Description | Button Text\`\n` +
+                    `Example: \`.button location Store | Visit us | Get Directions\`\n\n` +
+                    
+                    `*6. List Button*\n` +
+                    `\`.button list Title | Button Text | Option1,Option2\`\n` +
+                    `Example: \`.button list Food Menu | Choose Food | Pizza,Burger,Pasta\`\n\n` +
+                    
+                    `*7. AI Mode*\n` +
+                    `\`.button ai on/off/status\`\n\n` +
+                    
+                    `*8. Combo Buttons*\n` +
+                    `\`.button combo\``;
     await reply(helpText);
 }
 
-// 1. Native Buttons
-async function handleNativeButtons(sock, chatId, text, quotedMsg, reply) {
+async function handleNativeButtons(sock, chatId, sender, text, quotedMsg, reply) {
     const parts = text.split('|').map(p => p.trim());
-    if (parts.length < 2) return reply('❌ Format: `button native Question | Option1,Option2`');
+    if (parts.length < 2) {
+        await reply('❌ Format: `button native Question | Option1,Option2`');
+        return null;
+    }
 
+    const question = parts[0];
     const options = parts[1].split(',').map(o => o.trim());
-    const buttons = options.map(opt => ({ id: `btn_${Date.now()}`, text: opt }));
+    const sessionId = `native_${Date.now()}`;
+    
+    const buttons = options.map(opt => ({ 
+        id: `${sessionId}_${opt.toLowerCase()}`, 
+        text: opt 
+    }));
 
-    await sendButtons(sock, chatId, {
-        text: parts[0],
+    return await sendButtons(sock, chatId, {
+        text: question,
         footer: 'Choose an option',
         buttons: buttons,
         aimode: global.aiMode.get(chatId) || false
     }, { quoted: quotedMsg });
 }
 
-// 2. URL Button
-async function handleUrlButton(sock, chatId, text, quotedMsg, reply) {
+async function handleUrlButton(sock, chatId, sender, text, quotedMsg, reply) {
     const parts = text.split('|').map(p => p.trim());
-    if (parts.length < 4) return reply('❌ Format: `button url Title | Description | Button Text | URL`');
+    if (parts.length < 4) {
+        await reply('❌ Format: `button url Title | Description | Button Text | URL`');
+        return null;
+    }
 
-    await sendButtons(sock, chatId, {
-        text: `${parts[0]}\n\n${parts[1]}`,
+    const [title, description, buttonText, url] = parts;
+
+    return await sendButtons(sock, chatId, {
+        text: `${title}\n\n${description}`,
         buttons: [{
             name: 'cta_url',
-            buttonParamsJson: JSON.stringify({ display_text: parts[2], url: parts[3] })
-        }],
-        aimode: global.aiMode.get(chatId) || false
-    }, { quoted: quotedMsg });
-}
-
-// 3. Call Button
-async function handleCallButton(sock, chatId, text, quotedMsg, reply) {
-    const parts = text.split('|').map(p => p.trim());
-    if (parts.length < 4) return reply('❌ Format: `button call Title | Description | Button Text | Phone`');
-
-    await sendButtons(sock, chatId, {
-        text: `${parts[0]}\n\n${parts[1]}`,
-        buttons: [{
-            name: 'cta_call',
-            buttonParamsJson: JSON.stringify({ display_text: parts[2], phone_number: parts[3].replace(/\D/g, '') })
-        }],
-        aimode: global.aiMode.get(chatId) || false
-    }, { quoted: quotedMsg });
-}
-
-// 4. Copy Button
-async function handleCopyButton(sock, chatId, text, quotedMsg, reply) {
-    const parts = text.split('|').map(p => p.trim());
-    if (parts.length < 4) return reply('❌ Format: `button copy Title | Description | Button Text | Text`');
-
-    await sendButtons(sock, chatId, {
-        text: `${parts[0]}\n\n${parts[1]}`,
-        buttons: [{
-            name: 'cta_copy',
-            buttonParamsJson: JSON.stringify({ display_text: parts[2], copy_code: parts[3] })
-        }],
-        aimode: global.aiMode.get(chatId) || false
-    }, { quoted: quotedMsg });
-}
-
-// 5. Location Button (FIXED: Using sendInteractiveMessage)
-async function handleLocationButton(sock, chatId, text, quotedMsg, reply) {
-    const parts = text.split('|').map(p => p.trim());
-    if (parts.length < 3) return reply('❌ Format: `button location Title | Description | Button Text`');
-
-    // FIXED: Using sendInteractiveMessage for advanced native flow buttons
-    await sendInteractiveMessage(sock, chatId, {
-        text: `${parts[0]}\n\n${parts[1]}`,
-        interactiveButtons: [{
-            name: 'send_location',
-            buttonParamsJson: JSON.stringify({ display_text: parts[2] })
-        }],
-        aimode: global.aiMode.get(chatId) || false
-    }, { quoted: quotedMsg });
-}
-
-// 6. List Button (FIXED: Using sendInteractiveMessage)
-async function handleListButton(sock, chatId, text, quotedMsg, reply) {
-    const parts = text.split('|').map(p => p.trim());
-    if (parts.length < 3) return reply('❌ Format: `button list Title | Button Text | Option1,Option2`');
-
-    const options = parts[2].split(',').map(o => o.trim());
-    const rows = options.map((opt, i) => ({ id: `opt_${i}`, title: opt }));
-
-    // FIXED: Using sendInteractiveMessage for advanced native flow buttons
-    await sendInteractiveMessage(sock, chatId, {
-        text: parts[0],
-        interactiveButtons: [{
-            name: 'single_select',
-            buttonParamsJson: JSON.stringify({
-                title: parts[1],
-                sections: [{ title: 'Options', rows: rows }]
+            buttonParamsJson: JSON.stringify({ 
+                display_text: buttonText, 
+                url: url 
             })
         }],
         aimode: global.aiMode.get(chatId) || false
     }, { quoted: quotedMsg });
 }
 
-// 7. AI Mode Control
-async function handleAIMode(sock, chatId, text, quotedMsg, reply) {
+async function handleCallButton(sock, chatId, sender, text, quotedMsg, reply) {
+    const parts = text.split('|').map(p => p.trim());
+    if (parts.length < 4) {
+        await reply('❌ Format: `button call Title | Description | Button Text | Phone`');
+        return null;
+    }
+
+    const [title, description, buttonText, phone] = parts;
+
+    return await sendButtons(sock, chatId, {
+        text: `${title}\n\n${description}`,
+        buttons: [{
+            name: 'cta_call',
+            buttonParamsJson: JSON.stringify({ 
+                display_text: buttonText, 
+                phone_number: phone.replace(/\D/g, '') 
+            })
+        }],
+        aimode: global.aiMode.get(chatId) || false
+    }, { quoted: quotedMsg });
+}
+
+async function handleCopyButton(sock, chatId, sender, text, quotedMsg, reply) {
+    const parts = text.split('|').map(p => p.trim());
+    if (parts.length < 4) {
+        await reply('❌ Format: `button copy Title | Description | Button Text | Text`');
+        return null;
+    }
+
+    const [title, description, buttonText, copyText] = parts;
+
+    return await sendButtons(sock, chatId, {
+        text: `${title}\n\n${description}`,
+        buttons: [{
+            name: 'cta_copy',
+            buttonParamsJson: JSON.stringify({ 
+                display_text: buttonText, 
+                copy_code: copyText 
+            })
+        }],
+        aimode: global.aiMode.get(chatId) || false
+    }, { quoted: quotedMsg });
+}
+
+async function handleLocationButton(sock, chatId, sender, text, quotedMsg, reply) {
+    const parts = text.split('|').map(p => p.trim());
+    if (parts.length < 3) {
+        await reply('❌ Format: `button location Title | Description | Button Text`');
+        return null;
+    }
+
+    const [title, description, buttonText] = parts;
+
+    return await sendInteractiveMessage(sock, chatId, {
+        text: `${title}\n\n${description}`,
+        interactiveButtons: [{
+            name: 'send_location',
+            buttonParamsJson: JSON.stringify({ 
+                display_text: buttonText 
+            })
+        }],
+        aimode: global.aiMode.get(chatId) || false
+    }, { quoted: quotedMsg });
+}
+
+async function handleListButton(sock, chatId, sender, text, quotedMsg, reply) {
+    const parts = text.split('|').map(p => p.trim());
+    if (parts.length < 3) {
+        await reply('❌ Format: `button list Title | Button Text | Option1,Option2`');
+        return null;
+    }
+
+    const title = parts[0];
+    const buttonText = parts[1];
+    const options = parts[2].split(',').map(o => o.trim());
+    const sessionId = `list_${Date.now()}`;
+    
+    const rows = options.map((opt, i) => ({ 
+        id: `${sessionId}_${opt.toLowerCase()}`, 
+        title: opt 
+    }));
+
+    return await sendInteractiveMessage(sock, chatId, {
+        text: title,
+        interactiveButtons: [{
+            name: 'single_select',
+            buttonParamsJson: JSON.stringify({
+                title: buttonText,
+                sections: [{ 
+                    title: 'Options', 
+                    rows: rows 
+                }]
+            })
+        }],
+        aimode: global.aiMode.get(chatId) || false
+    }, { quoted: quotedMsg });
+}
+
+async function handleAIMode(sock, chatId, sender, text, quotedMsg, reply) {
     const mode = text.toLowerCase().trim();
+    const sessionId = `ai_${Date.now()}`;
+    
     if (mode === 'on') {
         global.aiMode.set(chatId, true);
-        await sendButtons(sock, chatId, {
+        return await sendButtons(sock, chatId, {
             text: '✨ *AI Mode ENABLED*',
             footer: 'AI Assistant Active',
-            buttons: [{ id: 'ai_off', text: '🔕 Disable' }],
+            buttons: [{ 
+                id: `${sessionId}_disable`, 
+                text: '🔕 Disable' 
+            }],
             aimode: true
         }, { quoted: quotedMsg });
     } else if (mode === 'off') {
         global.aiMode.set(chatId, false);
-        await sendButtons(sock, chatId, {
+        return await sendButtons(sock, chatId, {
             text: '🔕 *AI Mode DISABLED*',
-            buttons: [{ id: 'ai_on', text: '✨ Enable' }],
+            buttons: [{ 
+                id: `${sessionId}_enable`, 
+                text: '✨ Enable' 
+            }],
             aimode: false
         }, { quoted: quotedMsg });
     } else {
         const status = global.aiMode.get(chatId) ? 'ENABLED ✅' : 'DISABLED ❌';
         await reply(`🤖 *AI Mode Status*: ${status}`);
+        return null;
     }
 }
 
-// 8. Combo Buttons
-async function handleComboButtons(sock, chatId, quotedMsg, reply) {
-    await sendButtons(sock, chatId, {
-        text: '🔘 *Combo Demo*',
+async function handleComboButtons(sock, chatId, sender, quotedMsg, reply) {
+    const sessionId = `combo_${Date.now()}`;
+    
+    return await sendButtons(sock, chatId, {
+        text: '🔘 *Interactive Demo*\n\nClick any button to see a random response:',
+        footer: 'Each click gives a different reply',
         buttons: [
-            { id: 'yes', text: '✅ Yes' },
-            { name: 'cta_url', buttonParamsJson: JSON.stringify({ display_text: '🌐 Google', url: 'https://google.com' }) }
+            { 
+                id: `${sessionId}_yes`, 
+                text: '✅ Yes' 
+            },
+            { 
+                id: `${sessionId}_no`, 
+                text: '❌ No' 
+            },
+            { 
+                id: `${sessionId}_help`, 
+                text: '❓ Help' 
+            },
+            {
+                name: 'cta_url',
+                buttonParamsJson: JSON.stringify({ 
+                    display_text: '🌐 Google', 
+                    url: 'https://google.com' 
+                })
+            }
         ],
         aimode: global.aiMode.get(chatId) || false
     }, { quoted: quotedMsg });
