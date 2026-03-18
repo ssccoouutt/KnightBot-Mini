@@ -13,28 +13,21 @@ const latestSessionMap = new Map();
 const SESSION_TIMEOUT = 5 * 60 * 1000;
 
 /**
- * Generate session key (per user per chat)
+ * Generate a unique session ID
  */
-function getSessionKey(userId, chatId) {
-    return `${userId}:${chatId}`;
+function generateSessionId(userId, chatId) {
+    return `${userId}:${chatId}:${Date.now()}:${Math.random().toString(36).substring(7)}`;
 }
 
 /**
- * Get latest session key for a user in a chat
- */
-function getLatestSessionKey(userId, chatId) {
-    return `${userId}:${chatId}:latest`;
-}
-
-/**
- * Create a new session
+ * Create a new session (does NOT delete old ones)
  */
 function createSession(userId, chatId, command, data = {}) {
-    const key = getSessionKey(userId, chatId);
-    const latestKey = getLatestSessionKey(userId, chatId);
+    const sessionId = generateSessionId(userId, chatId);
+    const latestKey = `${userId}:${chatId}:latest`;
     
     const session = {
-        id: `${key}_${Date.now()}`,
+        id: sessionId,
         userId,
         chatId,
         command,
@@ -45,14 +38,15 @@ function createSession(userId, chatId, command, data = {}) {
         pendingMessages: [] // Store bot message IDs waiting for response
     };
     
-    sessions.set(key, session);
+    sessions.set(sessionId, session);
     
     // Update latest session
     latestSessionMap.set(latestKey, {
-        sessionKey: key,
+        sessionId: sessionId,
         timestamp: Date.now()
     });
     
+    console.log(`✅ Created session ${sessionId} for ${userId} in ${chatId} (command: ${command})`);
     return session;
 }
 
@@ -60,8 +54,13 @@ function createSession(userId, chatId, command, data = {}) {
  * Add a pending bot message to session
  */
 function addPendingMessage(userId, chatId, messageId, command) {
-    const key = getSessionKey(userId, chatId);
-    const session = sessions.get(key);
+    // Find the latest session for this user
+    const latestKey = `${userId}:${chatId}:latest`;
+    const latest = latestSessionMap.get(latestKey);
+    
+    if (!latest) return null;
+    
+    const session = sessions.get(latest.sessionId);
     if (!session) return null;
     
     session.pendingMessages.push({
@@ -77,10 +76,9 @@ function addPendingMessage(userId, chatId, messageId, command) {
     
     session.lastActivity = Date.now();
     
-    // Update latest activity timestamp
-    const latestKey = getLatestSessionKey(userId, chatId);
+    // Update latest timestamp
     latestSessionMap.set(latestKey, {
-        sessionKey: key,
+        sessionId: latest.sessionId,
         timestamp: Date.now()
     });
     
@@ -88,27 +86,32 @@ function addPendingMessage(userId, chatId, messageId, command) {
 }
 
 /**
- * Find session by replied message ID
+ * Find session by replied message ID - searches ALL sessions
  */
 function findSessionByRepliedMessage(messageId, userId) {
-    console.log(`🔍 Searching for session with pending message: ${messageId} for user ${userId}`);
+    console.log(`🔍 Searching ALL sessions for pending message: ${messageId} for user ${userId}`);
     
-    for (const [key, session] of sessions.entries()) {
+    let foundSessions = [];
+    
+    for (const [sessionId, session] of sessions.entries()) {
         // Only check sessions belonging to this user
         if (session.userId !== userId) continue;
-        
-        console.log(`   Checking session ${session.command} with ${session.pendingMessages?.length || 0} pending messages`);
         
         if (session.pendingMessages && Array.isArray(session.pendingMessages)) {
             const found = session.pendingMessages.find(p => p && p.messageId === messageId);
             if (found) {
-                console.log(`✅ Found match in session: ${session.command}`);
-                return {
+                console.log(`✅ Found match in session: ${session.command} (${sessionId})`);
+                foundSessions.push({
                     session,
                     pendingInfo: found
-                };
+                });
             }
         }
+    }
+    
+    if (foundSessions.length > 0) {
+        // Return the most recent one
+        return foundSessions.sort((a, b) => b.session.lastActivity - a.session.lastActivity)[0];
     }
     
     console.log(`❌ No session found for message ID ${messageId}`);
@@ -119,12 +122,12 @@ function findSessionByRepliedMessage(messageId, userId) {
  * Get the latest active session for a user
  */
 function getLatestSession(userId, chatId) {
-    const latestKey = getLatestSessionKey(userId, chatId);
+    const latestKey = `${userId}:${chatId}:latest`;
     const latest = latestSessionMap.get(latestKey);
     
     if (!latest) return null;
     
-    const session = sessions.get(latest.sessionKey);
+    const session = sessions.get(latest.sessionId);
     if (!session) {
         latestSessionMap.delete(latestKey);
         return null;
@@ -132,7 +135,7 @@ function getLatestSession(userId, chatId) {
     
     // Check if expired
     if (Date.now() - session.lastActivity > SESSION_TIMEOUT) {
-        sessions.delete(latest.sessionKey);
+        sessions.delete(latest.sessionId);
         latestSessionMap.delete(latestKey);
         return null;
     }
@@ -141,13 +144,19 @@ function getLatestSession(userId, chatId) {
 }
 
 /**
- * Get all sessions for a user (for debugging)
+ * Get all active sessions for a user
  */
 function getUserSessions(userId, chatId) {
     const userSessions = [];
-    for (const [key, session] of sessions.entries()) {
+    for (const [sessionId, session] of sessions.entries()) {
         if (session.userId === userId && session.chatId === chatId) {
-            userSessions.push(session);
+            // Check if expired
+            if (Date.now() - session.lastActivity <= SESSION_TIMEOUT) {
+                userSessions.push(session);
+            } else {
+                // Clean up expired session
+                sessions.delete(sessionId);
+            }
         }
     }
     return userSessions;
@@ -157,18 +166,24 @@ function getUserSessions(userId, chatId) {
  * Update session data
  */
 function updateSession(userId, chatId, data) {
-    const key = getSessionKey(userId, chatId);
-    const session = sessions.get(key);
-    if (!session) return null;
+    const latestKey = `${userId}:${chatId}:latest`;
+    const latest = latestSessionMap.get(latestKey);
+    
+    if (!latest) return null;
+    
+    const session = sessions.get(latest.sessionId);
+    if (!session) {
+        latestSessionMap.delete(latestKey);
+        return null;
+    }
     
     session.data = { ...session.data, ...data };
     session.step++;
     session.lastActivity = Date.now();
     
-    // Update latest activity timestamp
-    const latestKey = getLatestSessionKey(userId, chatId);
+    // Update latest timestamp
     latestSessionMap.set(latestKey, {
-        sessionKey: key,
+        sessionId: latest.sessionId,
         timestamp: Date.now()
     });
     
@@ -176,16 +191,41 @@ function updateSession(userId, chatId, data) {
 }
 
 /**
- * Clear session
+ * Clear a specific session
  */
-function clearSession(userId, chatId) {
-    const key = getSessionKey(userId, chatId);
-    sessions.delete(key);
+function clearSession(sessionId) {
+    const session = sessions.get(sessionId);
+    if (!session) return;
+    
+    sessions.delete(sessionId);
     
     // Check if this was the latest session
-    const latestKey = getLatestSessionKey(userId, chatId);
+    const latestKey = `${session.userId}:${session.chatId}:latest`;
     const latest = latestSessionMap.get(latestKey);
-    if (latest && latest.sessionKey === key) {
+    if (latest && latest.sessionId === sessionId) {
+        latestSessionMap.delete(latestKey);
+        
+        // Set new latest session if any exist
+        const userSessions = getUserSessions(session.userId, session.chatId);
+        if (userSessions.length > 0) {
+            const newLatest = userSessions.sort((a, b) => b.lastActivity - a.lastActivity)[0];
+            latestSessionMap.set(latestKey, {
+                sessionId: newLatest.id,
+                timestamp: newLatest.lastActivity
+            });
+        }
+    }
+}
+
+/**
+ * Clear latest session for a user
+ */
+function clearLatestSession(userId, chatId) {
+    const latestKey = `${userId}:${chatId}:latest`;
+    const latest = latestSessionMap.get(latestKey);
+    
+    if (latest) {
+        sessions.delete(latest.sessionId);
         latestSessionMap.delete(latestKey);
     }
 }
@@ -198,25 +238,14 @@ function hasActiveSession(userId, chatId) {
 }
 
 /**
- * Check if a specific session is still active (not expired)
+ * Check if a specific session is still active
  */
-function isSessionActive(userId, chatId) {
-    const key = getSessionKey(userId, chatId);
-    const session = sessions.get(key);
-    
+function isSessionActive(sessionId) {
+    const session = sessions.get(sessionId);
     if (!session) return false;
     
-    // Check if expired
     if (Date.now() - session.lastActivity > SESSION_TIMEOUT) {
-        sessions.delete(key);
-        
-        // Clean up latest session if this was it
-        const latestKey = getLatestSessionKey(userId, chatId);
-        const latest = latestSessionMap.get(latestKey);
-        if (latest && latest.sessionKey === key) {
-            latestSessionMap.delete(latestKey);
-        }
-        
+        sessions.delete(sessionId);
         return false;
     }
     
@@ -231,6 +260,7 @@ module.exports = {
     getUserSessions,
     updateSession,
     clearSession,
+    clearLatestSession,
     hasActiveSession,
     isSessionActive
 };
