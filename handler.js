@@ -10,7 +10,7 @@ const { jidDecode, jidEncode } = require('@whiskeysockets/baileys');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
-const sessionManager = require('./utils/sessionManager'); // ADD THIS LINE
+const sessionManager = require('./utils/sessionManager');
 
 // Group metadata cache to prevent rate limiting
 const groupMetadataCache = new Map();
@@ -534,6 +534,10 @@ const handleMessage = async (sock, msg) => {
         }
         return;
       }
+      
+      // For all other buttons, just let the message appear normally
+      console.log(`🔘 Button clicked: ${displayText} (${buttonId}) - letting through`);
+      return; // Don't process as command, but don't block either
     }
     
     // Get message body from unwrapped content
@@ -755,6 +759,45 @@ const handleMessage = async (sock, msg) => {
     } catch (e) {
       // Silently ignore if tictactoe command doesn't exist or has errors
     }
+    
+    // ===== CHECK FOR ACTIVE SESSIONS =====
+    const activeSession = sessionManager.getSession(sender, from);
+    if (activeSession) {
+        // User has an active session in THIS chat
+        console.log(`💬 Active session for ${sender} in ${from}: ${activeSession.command} (step ${activeSession.step})`);
+        
+        // Get the command that owns this session
+        const sessionCommand = commands.get(activeSession.command);
+        
+        if (sessionCommand && typeof sessionCommand.handleSession === 'function') {
+            // Command has a session handler - let it process the input
+            const handled = await sessionCommand.handleSession(sock, msg, activeSession, {
+                from,
+                sender,
+                isGroup,
+                groupMetadata,
+                isOwner: isOwner(sender),
+                isAdmin: await isAdmin(sock, sender, from, groupMetadata),
+                isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
+                isMod: isMod(sender),
+                reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+                react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
+            });
+            
+            if (handled) {
+                // Session handler processed the message
+                return;
+            } else {
+                // Session handler didn't process - maybe clear it
+                sessionManager.clearSession(sender, from);
+            }
+        } else {
+            // Command doesn't have session handler - clear session
+            console.log(`⚠️ Command ${activeSession.command} has no session handler, clearing session`);
+            sessionManager.clearSession(sender, from);
+        }
+    }
+    // ===== END SESSION CHECK =====
     
     // Check if message starts with prefix
     if (!body.startsWith(config.prefix)) return;
