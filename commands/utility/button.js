@@ -165,36 +165,40 @@ module.exports = {
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, react } = context;
         
-        // Check if this is actually a button click (has quoted message)
+        // Check if this is a reply to a specific bot message
         const quotedMessageId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
-        const isButtonClick = quotedMessageId && session.pendingMessages?.some(p => p.messageId === quotedMessageId);
         
-        if (!isButtonClick) {
-            // This is a regular message during the session, not a button click
-            console.log(`💬 Regular message during button session - ignoring`);
-            // Let it pass through to be handled by other commands
-            return false;
+        if (quotedMessageId) {
+            // This is a reply - find which session it belongs to
+            const sessionInfo = sessionManager.findSessionByRepliedMessage(quotedMessageId, sender);
+            
+            if (sessionInfo) {
+                // This reply belongs to this specific session
+                const text = msg.message?.conversation || 
+                            msg.message?.extendedTextMessage?.text || 
+                            '';
+                
+                console.log(`🔘 Button reply detected for session: ${text} (quoting: ${quotedMessageId})`);
+                
+                // Get random response based on button
+                const response = getRandomResponse(quotedMessageId, text);
+                
+                // Send response
+                const sentMsg = await reply(response);
+                
+                // Store this response in session
+                if (sentMsg && sentMsg.key) {
+                    sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'button');
+                }
+                
+                return true; // Handled
+            }
         }
         
-        // Get the message text
-        const text = msg.message?.conversation || 
-                    msg.message?.extendedTextMessage?.text || 
-                    '';
-        
-        console.log(`🔘 Button click detected: ${text} (quoting: ${quotedMessageId})`);
-        
-        // Get random response based on button
-        const response = getRandomResponse(quotedMessageId, text);
-        
-        // Send response
-        const sentMsg = await reply(response);
-        
-        // Store this response in session for potential follow-up
-        if (sentMsg && sentMsg.key) {
-            sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'button');
-        }
-        
-        return true; // Session handled
+        // Not a reply - this is a direct message during active session
+        // Route to latest session (handled by handler.js automatically)
+        console.log(`💬 Direct message during button session - routing to latest session`);
+        return false; // Let handler.js route to latest session
     }
 };
 
