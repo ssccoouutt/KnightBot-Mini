@@ -783,7 +783,7 @@ const handleMessage = async (sock, msg) => {
             const { session, pendingInfo } = sessionInfo;
             
             // Check if this session is still active (not expired)
-            const isActive = sessionManager.isSessionActive(session.userId, session.chatId);
+            const isActive = sessionManager.isSessionActive(session.id);
             
             if (!isActive) {
                 // Session expired - ignore completely
