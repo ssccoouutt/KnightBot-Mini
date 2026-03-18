@@ -1,6 +1,5 @@
 /**
  * Session Manager - Handles multi-step conversations
- * Stores temporary user sessions for commands that need multiple inputs
  */
 
 // Session store (in-memory)
@@ -92,7 +91,7 @@ function addPendingMessage(userId, chatId, messageId, command) {
  */
 function findSessionByRepliedMessage(messageId, userId) {
     for (const [key, session] of sessions.entries()) {
-        // Check if this message belongs to this user's session
+        // Only check sessions belonging to this user
         if (session.userId !== userId) continue;
         
         const found = session.pendingMessages.find(p => p.messageId === messageId);
