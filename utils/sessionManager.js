@@ -60,10 +60,14 @@ function addPendingMessage(userId, chatId, messageId, command) {
 }
 
 /**
- * Find session by replied message ID
+ * Find session by replied message ID and user ID
+ * This ensures only the user who started the session can reply to it
  */
-function findSessionByRepliedMessage(messageId) {
+function findSessionByRepliedMessage(messageId, userId) {
     for (const [key, session] of sessions.entries()) {
+        // Check if this message belongs to this user's session
+        if (session.userId !== userId) continue;
+        
         const found = session.pendingMessages.find(p => p.messageId === messageId);
         if (found) {
             return {
@@ -76,7 +80,7 @@ function findSessionByRepliedMessage(messageId) {
 }
 
 /**
- * Get current session
+ * Get current session for a specific user in a chat
  */
 function getSession(userId, chatId) {
     const key = getSessionKey(userId, chatId);
@@ -109,7 +113,7 @@ function updateSession(userId, chatId, data) {
 }
 
 /**
- * Clear session
+ * Clear session for a specific user in a chat
  */
 function clearSession(userId, chatId) {
     const key = getSessionKey(userId, chatId);
@@ -117,7 +121,7 @@ function clearSession(userId, chatId) {
 }
 
 /**
- * Check if has active session
+ * Check if user has active session in a chat
  */
 function hasActiveSession(userId, chatId) {
     return getSession(userId, chatId) !== null;
