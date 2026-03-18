@@ -116,32 +116,32 @@ module.exports = {
             switch (subCommand) {
                 case 'native':
                 case 'quick':
-                    sentMsg = await handleNativeButtons(sock, from, sender, args.slice(1).join(' '), msg, reply);
+                    sentMsg = await handleNativeButtons(sock, from, args.slice(1).join(' '), msg, reply);
                     break;
                 case 'url':
                 case 'cta_url':
-                    sentMsg = await handleUrlButton(sock, from, sender, args.slice(1).join(' '), msg, reply);
+                    sentMsg = await handleUrlButton(sock, from, args.slice(1).join(' '), msg, reply);
                     break;
                 case 'call':
                 case 'cta_call':
-                    sentMsg = await handleCallButton(sock, from, sender, args.slice(1).join(' '), msg, reply);
+                    sentMsg = await handleCallButton(sock, from, args.slice(1).join(' '), msg, reply);
                     break;
                 case 'copy':
                 case 'cta_copy':
-                    sentMsg = await handleCopyButton(sock, from, sender, args.slice(1).join(' '), msg, reply);
+                    sentMsg = await handleCopyButton(sock, from, args.slice(1).join(' '), msg, reply);
                     break;
                 case 'location':
                 case 'cta_location':
-                    sentMsg = await handleLocationButton(sock, from, sender, args.slice(1).join(' '), msg, reply);
+                    sentMsg = await handleLocationButton(sock, from, args.slice(1).join(' '), msg, reply);
                     break;
                 case 'list':
-                    sentMsg = await handleListButton(sock, from, sender, args.slice(1).join(' '), msg, reply);
+                    sentMsg = await handleListButton(sock, from, args.slice(1).join(' '), msg, reply);
                     break;
                 case 'ai':
-                    sentMsg = await handleAIMode(sock, from, sender, args.slice(1).join(' '), msg, reply);
+                    sentMsg = await handleAIMode(sock, from, args.slice(1).join(' '), msg, reply);
                     break;
                 case 'combo':
-                    sentMsg = await handleComboButtons(sock, from, sender, msg, reply);
+                    sentMsg = await handleComboButtons(sock, from, msg, reply);
                     break;
                 default:
                     await showHelp(sock, from, reply);
@@ -163,7 +163,7 @@ module.exports = {
     
     // Handle ALL session messages (both replies AND direct messages)
     async handleSession(sock, msg, session, context) {
-        const { from, sender, reply, react } = context;
+        const { from, sender, reply, react, isButtonClick } = context;
         
         // Get message info
         const text = msg.message?.conversation || 
@@ -171,28 +171,45 @@ module.exports = {
                     '';
         const quotedMessageId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
         
-        // Check if this is a reply (button click)
-        const isReply = quotedMessageId && session.pendingMessages?.some(p => p.messageId === quotedMessageId);
+        console.log(`📨 Button session handling: text="${text}", isButtonClick=${isButtonClick}, quotedId=${quotedMessageId}`);
+        console.log(`📊 Session pending messages:`, session.pendingMessages);
         
-        if (isReply) {
+        // Check if this is a button click (either flagged by handler or is a reply to our message)
+        const isReplyToOurMessage = quotedMessageId && session.pendingMessages?.some(p => p && p.messageId === quotedMessageId);
+        
+        if (isButtonClick || isReplyToOurMessage) {
             // This is a BUTTON CLICK - respond with random message
-            console.log(`🔘 Button click detected: ${text} (quoting: ${quotedMessageId})`);
+            console.log(`🔘 BUTTON CLICK detected: ${text}`);
             
-            const response = getRandomResponse(quotedMessageId, text);
-            
+            const response = getRandomResponse(quotedMessageId || 'unknown', text);
             const sentMsg = await reply(response);
             
             // Store this response in session for potential follow-up
             if (sentMsg && sentMsg.key) {
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
             }
-        } else {
-            // This is a DIRECT MESSAGE during button session
+        } 
+        else if (quotedMessageId) {
+            // This is a regular reply to a bot message (not a button click)
+            console.log(`💬 Regular reply during button session: ${text}`);
+            
+            // For regular replies, still respond with something helpful
+            const response = `ℹ️ You replied to a message, but this is a button command. Please click the buttons above to interact.`;
+            const sentMsg = await reply(response);
+            
+            if (sentMsg && sentMsg.key) {
+                sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
+            }
+        }
+        else {
+            // This is a direct message during button session
             console.log(`💬 Direct message during button session: ${text}`);
             
-            // You can customize what happens for direct messages
-            // For now, just acknowledge
-            const sentMsg = await reply(`ℹ️ I'm here! Click any button above or use \`.button\` to start over.`);
+            if (!text || text.trim() === '') {
+                return true;
+            }
+            
+            const sentMsg = await reply(`ℹ️ Please click one of the buttons above to interact with me. If you want to start over, use \`.button\` again.`);
             
             if (sentMsg && sentMsg.key) {
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
@@ -237,7 +254,7 @@ async function showHelp(sock, chatId, reply) {
     await reply(helpText);
 }
 
-async function handleNativeButtons(sock, chatId, sender, text, quotedMsg, reply) {
+async function handleNativeButtons(sock, chatId, text, quotedMsg, reply) {
     const parts = text.split('|').map(p => p.trim());
     if (parts.length < 2) {
         await reply('❌ Format: `button native Question | Option1,Option2`');
@@ -261,7 +278,7 @@ async function handleNativeButtons(sock, chatId, sender, text, quotedMsg, reply)
     }, { quoted: quotedMsg });
 }
 
-async function handleUrlButton(sock, chatId, sender, text, quotedMsg, reply) {
+async function handleUrlButton(sock, chatId, text, quotedMsg, reply) {
     const parts = text.split('|').map(p => p.trim());
     if (parts.length < 4) {
         await reply('❌ Format: `button url Title | Description | Button Text | URL`');
@@ -283,7 +300,7 @@ async function handleUrlButton(sock, chatId, sender, text, quotedMsg, reply) {
     }, { quoted: quotedMsg });
 }
 
-async function handleCallButton(sock, chatId, sender, text, quotedMsg, reply) {
+async function handleCallButton(sock, chatId, text, quotedMsg, reply) {
     const parts = text.split('|').map(p => p.trim());
     if (parts.length < 4) {
         await reply('❌ Format: `button call Title | Description | Button Text | Phone`');
@@ -305,7 +322,7 @@ async function handleCallButton(sock, chatId, sender, text, quotedMsg, reply) {
     }, { quoted: quotedMsg });
 }
 
-async function handleCopyButton(sock, chatId, sender, text, quotedMsg, reply) {
+async function handleCopyButton(sock, chatId, text, quotedMsg, reply) {
     const parts = text.split('|').map(p => p.trim());
     if (parts.length < 4) {
         await reply('❌ Format: `button copy Title | Description | Button Text | Text`');
@@ -327,7 +344,7 @@ async function handleCopyButton(sock, chatId, sender, text, quotedMsg, reply) {
     }, { quoted: quotedMsg });
 }
 
-async function handleLocationButton(sock, chatId, sender, text, quotedMsg, reply) {
+async function handleLocationButton(sock, chatId, text, quotedMsg, reply) {
     const parts = text.split('|').map(p => p.trim());
     if (parts.length < 3) {
         await reply('❌ Format: `button location Title | Description | Button Text`');
@@ -348,7 +365,7 @@ async function handleLocationButton(sock, chatId, sender, text, quotedMsg, reply
     }, { quoted: quotedMsg });
 }
 
-async function handleListButton(sock, chatId, sender, text, quotedMsg, reply) {
+async function handleListButton(sock, chatId, text, quotedMsg, reply) {
     const parts = text.split('|').map(p => p.trim());
     if (parts.length < 3) {
         await reply('❌ Format: `button list Title | Button Text | Option1,Option2`');
@@ -382,7 +399,7 @@ async function handleListButton(sock, chatId, sender, text, quotedMsg, reply) {
     }, { quoted: quotedMsg });
 }
 
-async function handleAIMode(sock, chatId, sender, text, quotedMsg, reply) {
+async function handleAIMode(sock, chatId, text, quotedMsg, reply) {
     const mode = text.toLowerCase().trim();
     const sessionId = `ai_${Date.now()}`;
     
@@ -414,7 +431,7 @@ async function handleAIMode(sock, chatId, sender, text, quotedMsg, reply) {
     }
 }
 
-async function handleComboButtons(sock, chatId, sender, quotedMsg, reply) {
+async function handleComboButtons(sock, chatId, quotedMsg, reply) {
     const sessionId = `combo_${Date.now()}`;
     
     return await sendButtons(sock, chatId, {
