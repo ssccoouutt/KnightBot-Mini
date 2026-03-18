@@ -28,11 +28,51 @@ function createSession(userId, chatId, command, data = {}) {
         command,
         data,
         step: 1,
-        lastActivity: Date.now()
+        lastActivity: Date.now(),
+        pendingMessages: [] // Store bot message IDs waiting for response
     };
     
     sessions.set(key, session);
     return session;
+}
+
+/**
+ * Add a pending bot message to session
+ */
+function addPendingMessage(userId, chatId, messageId, command) {
+    const key = getSessionKey(userId, chatId);
+    const session = sessions.get(key);
+    if (!session) return null;
+    
+    session.pendingMessages.push({
+        messageId,
+        command,
+        timestamp: Date.now()
+    });
+    
+    // Keep only last 5 pending messages
+    if (session.pendingMessages.length > 5) {
+        session.pendingMessages.shift();
+    }
+    
+    session.lastActivity = Date.now();
+    return session;
+}
+
+/**
+ * Find session by replied message ID
+ */
+function findSessionByRepliedMessage(messageId) {
+    for (const [key, session] of sessions.entries()) {
+        const found = session.pendingMessages.find(p => p.messageId === messageId);
+        if (found) {
+            return {
+                session,
+                pendingInfo: found
+            };
+        }
+    }
+    return null;
 }
 
 /**
@@ -88,5 +128,7 @@ module.exports = {
     getSession,
     updateSession,
     clearSession,
-    hasActiveSession
+    hasActiveSession,
+    addPendingMessage,
+    findSessionByRepliedMessage
 };
