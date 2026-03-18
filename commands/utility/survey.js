@@ -51,17 +51,17 @@ module.exports = {
                 
             case 2:
                 // Validate age
-                const age = parseInt(text);
-                if (isNaN(age) || age < 1 || age > 120) {
+                const userAge = parseInt(text);  // Changed variable name from 'age' to 'userAge'
+                if (isNaN(userAge) || userAge < 1 || userAge > 120) {
                     await reply('❌ Please enter a valid age (1-120).');
                     return true; // Keep session alive
                 }
                 
                 // Save age and ask for favorite color
                 sessionManager.updateSession(sender, from, { 
-                    answers: { ...session.data.answers, age: age }
+                    answers: { ...session.data.answers, age: userAge }
                 });
-                await reply(`📊 Age recorded: *${age}*\n\n` +
+                await reply(`📊 Age recorded: *${userAge}*\n\n` +
                            `Step 3/3: What's your favorite color?`);
                 break;
                 
