@@ -69,8 +69,8 @@ const buttonResponses = {
 
 function getRandomResponse(buttonId, displayText) {
     const parts = buttonId.split('_');
-    const key = parts[parts.length - 1].toLowerCase();
-    const text = displayText.toLowerCase();
+    const key = parts[parts.length - 1]?.toLowerCase() || '';
+    const text = displayText?.toLowerCase() || '';
     
     let category = 'default';
     if (key === 'yes' || text.includes('yes')) category = 'yes';
@@ -106,6 +106,13 @@ module.exports = {
         try {
             let sentMsg;
             
+            // Create a session for this button command
+            sessionManager.createSession(sender, from, 'button', {
+                type: subCommand,
+                args: args.slice(1).join(' '),
+                step: 1
+            });
+            
             switch (subCommand) {
                 case 'native':
                 case 'quick':
@@ -140,9 +147,10 @@ module.exports = {
                     await showHelp(sock, from, reply);
             }
             
-            // Store the message ID in session if we have one
+            // Store the message ID in session for reply tracking
             if (sentMsg && sentMsg.key) {
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'button');
+                console.log(`✅ Session created for ${sender} with message ID: ${sentMsg.key.id}`);
             }
             
             await react('✅');
@@ -163,13 +171,13 @@ module.exports = {
                     '';
         
         // Extract button info from the message
-        const buttonId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId || 'unknown';
+        const quotedMessageId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
         const displayText = text;
         
-        console.log(`🔘 Button clicked: ${displayText} (${buttonId})`);
+        console.log(`🔘 Button clicked: ${displayText} (quoting: ${quotedMessageId})`);
         
         // Get random response based on button
-        const response = getRandomResponse(buttonId, displayText);
+        const response = getRandomResponse(quotedMessageId || '', displayText);
         
         // Send response
         const sentMsg = await reply(response);
@@ -342,7 +350,8 @@ async function handleListButton(sock, chatId, sender, text, quotedMsg, reply) {
     
     const rows = options.map((opt, i) => ({ 
         id: `${sessionId}_${opt.toLowerCase()}`, 
-        title: opt 
+        title: opt,
+        description: `Select ${opt}`
     }));
 
     return await sendInteractiveMessage(sock, chatId, {
