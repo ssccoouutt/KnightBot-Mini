@@ -760,44 +760,53 @@ const handleMessage = async (sock, msg) => {
       // Silently ignore if tictactoe command doesn't exist or has errors
     }
     
-    // ===== CHECK FOR ACTIVE SESSIONS =====
+    // ===== SMART SESSION CHECK - ONLY HANDLE REPLIES TO BOT'S SESSION MESSAGES =====
     const activeSession = sessionManager.getSession(sender, from);
     if (activeSession) {
-        // User has an active session in THIS chat
-        console.log(`💬 Active session for ${sender} in ${from}: ${activeSession.command} (step ${activeSession.step})`);
+        // Check if this message is a reply to the bot's last session message
+        const isReplyToBot = msg.message?.extendedTextMessage?.contextInfo?.stanzaId && 
+                             msg.message.extendedTextMessage.contextInfo.participant === sock.user.id;
         
-        // Get the command that owns this session
-        const sessionCommand = commands.get(activeSession.command);
-        
-        if (sessionCommand && typeof sessionCommand.handleSession === 'function') {
-            // Command has a session handler - let it process the input
-            const handled = await sessionCommand.handleSession(sock, msg, activeSession, {
-                from,
-                sender,
-                isGroup,
-                groupMetadata,
-                isOwner: isOwner(sender),
-                isAdmin: await isAdmin(sock, sender, from, groupMetadata),
-                isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
-                isMod: isMod(sender),
-                reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
-                react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
-            });
+        if (isReplyToBot) {
+            // User replied to bot's message - treat as session input
+            console.log(`💬 Session reply from ${sender} in ${from}: ${activeSession.command} (step ${activeSession.step})`);
             
-            if (handled) {
-                // Session handler processed the message
-                return;
+            // Get the command that owns this session
+            const sessionCommand = commands.get(activeSession.command);
+            
+            if (sessionCommand && typeof sessionCommand.handleSession === 'function') {
+                // Command has a session handler - let it process the input
+                const handled = await sessionCommand.handleSession(sock, msg, activeSession, {
+                    from,
+                    sender,
+                    isGroup,
+                    groupMetadata,
+                    isOwner: isOwner(sender),
+                    isAdmin: await isAdmin(sock, sender, from, groupMetadata),
+                    isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
+                    isMod: isMod(sender),
+                    reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+                    react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
+                });
+                
+                if (handled) {
+                    // Session handler processed the message
+                    return;
+                } else {
+                    // Session handler didn't process - maybe clear it
+                    sessionManager.clearSession(sender, from);
+                }
             } else {
-                // Session handler didn't process - maybe clear it
+                // Command doesn't have session handler - clear session
+                console.log(`⚠️ Command ${activeSession.command} has no session handler, clearing session`);
                 sessionManager.clearSession(sender, from);
             }
         } else {
-            // Command doesn't have session handler - clear session
-            console.log(`⚠️ Command ${activeSession.command} has no session handler, clearing session`);
-            sessionManager.clearSession(sender, from);
+            // Not a reply to bot - let it pass through normally
+            console.log(`💬 User has active session but message is not a reply - letting through`);
         }
     }
-    // ===== END SESSION CHECK =====
+    // ===== END SMART SESSION CHECK =====
     
     // Check if message starts with prefix
     if (!body.startsWith(config.prefix)) return;
@@ -805,19 +814,6 @@ const handleMessage = async (sock, msg) => {
     // Parse command
     const args = body.slice(config.prefix.length).trim().split(/\s+/);
     const commandName = args.shift().toLowerCase();
-    
-    // ===== SESSION CHECK - BLOCK NEW COMMANDS DURING ACTIVE SESSION =====
-    if (sessionManager.hasActiveSession(sender, from)) {
-      const session = sessionManager.getSession(sender, from);
-      await sock.sendMessage(from, { 
-        text: `⚠️ *Cannot run command*\n\n` +
-              `You have an active *${session.command}* session in this chat.\n\n` +
-              `• Type \`.cancel\` to end the session\n` +
-              `• Complete your current session first`
-      }, { quoted: msg });
-      return;
-    }
-    // ===== END SESSION CHECK =====
     
     // Get command
     const command = commands.get(commandName);
