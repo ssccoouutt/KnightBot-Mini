@@ -760,17 +760,18 @@ const handleMessage = async (sock, msg) => {
       // Silently ignore if tictactoe command doesn't exist or has errors
     }
     
-    // ===== SMART SESSION DETECTION =====
-    // First, check if this message is a reply to any bot message
+    // ===== UNIVERSAL SESSION DETECTION =====
+    // Check if this message is a reply to any bot message
     const quotedMessageId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
     
     if (quotedMessageId) {
-        // This is a reply - find which session it belongs to
+        // This is a REPLY - find which session it belongs to
         const sessionInfo = sessionManager.findSessionByRepliedMessage(quotedMessageId, sender);
         
         if (sessionInfo) {
+            // Found a specific session this reply belongs to
             const { session, pendingInfo } = sessionInfo;
-            console.log(`💬 Reply detected for command: ${pendingInfo.command} (step ${session.step})`);
+            console.log(`💬 REPLY routed to specific session: ${pendingInfo.command} (step ${session.step})`);
             
             // Get the command that owns this session
             const sessionCommand = commands.get(pendingInfo.command);
@@ -790,21 +791,22 @@ const handleMessage = async (sock, msg) => {
                 });
                 
                 if (handled) {
-                    return; // Session handled
+                    return; // Message handled by session
                 }
             }
         }
     }
     
-    // If not a reply, check if this is a command
+    // If not a reply (or reply didn't match any session), check if user has ANY active sessions
     const isCommand = body.startsWith(config.prefix);
     
-    // If it's not a command and user has an active session, route to latest session
     if (!isCommand) {
+        // This is a DIRECT MESSAGE (non-command)
+        // Get the user's LATEST active session
         const latestSession = sessionManager.getLatestSession(sender, from);
         
         if (latestSession) {
-            console.log(`💬 Direct message routed to latest session: ${latestSession.command} (step ${latestSession.step})`);
+            console.log(`💬 DIRECT MESSAGE routed to latest session: ${latestSession.command} (step ${latestSession.step})`);
             
             const sessionCommand = commands.get(latestSession.command);
             
@@ -823,12 +825,12 @@ const handleMessage = async (sock, msg) => {
                 });
                 
                 if (handled) {
-                    return; // Session handled
+                    return; // Message handled by session
                 }
             }
         }
     }
-    // ===== END SESSION DETECTION =====
+    // ===== END UNIVERSAL SESSION DETECTION =====
     
     // Check if message starts with prefix
     if (!body.startsWith(config.prefix)) return;
