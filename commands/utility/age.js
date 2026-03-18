@@ -53,7 +53,6 @@ module.exports = {
             case 1:
                 // Validate birth year
                 const birthYear = parseInt(text.trim());
-                const currentYear = new Date().getFullYear();
                 
                 // Check if it's a valid number
                 if (isNaN(birthYear)) {
@@ -69,10 +68,6 @@ module.exports = {
                 
                 // Calculate age
                 let age = currentYear - birthYear;
-                
-                // Adjust if birthday hasn't occurred yet this year
-                // For simplicity, we'll just use the year difference
-                // You could ask for month/day for more accuracy
                 
                 // Store the result
                 sessionManager.updateSession(sender, from, {
@@ -90,12 +85,11 @@ module.exports = {
             case 2:
                 // Handle response for more precise calculation
                 const response = text.trim().toLowerCase();
-                const { birthYear } = session.data;
+                const birthYearData = session.data.birthYear;
                 
                 if (response === 'yes' || response === 'y') {
                     // Ask for birth month
                     sessionManager.updateSession(sender, from, {
-                        step: 3, // Skip to month question
                         data: { ...session.data, preciseMode: true }
                     });
                     
@@ -135,7 +129,7 @@ module.exports = {
             case 4:
                 // Validate day
                 const day = parseInt(text.trim());
-                const { birthYear, month } = session.data;
+                const { birthYear: year, month: birthMonth } = session.data;
                 
                 // Simple day validation (not checking days per month for simplicity)
                 if (isNaN(day) || day < 1 || day > 31) {
@@ -145,7 +139,7 @@ module.exports = {
                 
                 // Calculate precise age
                 const today = new Date();
-                const birthDate = new Date(birthYear, month - 1, day);
+                const birthDate = new Date(year, birthMonth - 1, day);
                 
                 let preciseAge = today.getFullYear() - birthDate.getFullYear();
                 const monthDiff = today.getMonth() - birthDate.getMonth();
@@ -165,7 +159,7 @@ module.exports = {
                 
                 await reply(`✅ *Age Calculation Complete*\n\n` +
                            `${ageEmoji} You are exactly *${preciseAge} years old*.\n\n` +
-                           `📅 Born: ${birthYear}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}\n` +
+                           `📅 Born: ${year}-${birthMonth.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}\n` +
                            `🎂 Happy birthday${preciseAge % 10 === 0 ? ' milestone' : ''}!`);
                 break;
                 
