@@ -13,15 +13,21 @@ module.exports = {
     async execute(sock, msg, args, context) {
         const { from, sender, reply, react } = context;
         
-        // Create a new session for this user in this chat
+        // Create a new session
         sessionManager.createSession(sender, from, 'survey', {
             step: 1,
             answers: {}
         });
         
         await react('📝');
-        await reply(`📋 *Quick Survey*\n\n` +
-                   `Step 1/3: What's your name?`);
+        
+        // Send message and capture its ID
+        const sentMsg = await sock.sendMessage(from, { 
+            text: `📋 *Quick Survey*\n\nStep 1/3: What's your name?` 
+        });
+        
+        // Store this message ID in session
+        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
     },
     
     // Handle survey responses
@@ -35,65 +41,50 @@ module.exports = {
         
         if (!text) {
             await reply('❌ Please enter a valid response.');
-            return true; // Keep session alive
+            return true;
         }
         
-        // Process based on current step
         switch (session.step) {
             case 1:
                 // Save name and ask for age
                 sessionManager.updateSession(sender, from, { 
                     answers: { ...session.data.answers, name: text }
                 });
-                await reply(`👋 Nice to meet you, *${text}*!\n\n` +
-                           `Step 2/3: How old are you?`);
+                
+                const sentMsg1 = await reply(`👋 Nice to meet you, *${text}*!\n\nStep 2/3: How old are you?`);
+                sessionManager.addPendingMessage(sender, from, sentMsg1.key.id, 'survey');
                 break;
                 
             case 2:
-                // Validate age
                 const userAge = parseInt(text);
                 if (isNaN(userAge) || userAge < 1 || userAge > 120) {
                     await reply('❌ Please enter a valid age (1-120).');
-                    return true; // Keep session alive
+                    return true;
                 }
                 
-                // Save age and ask for favorite color
                 sessionManager.updateSession(sender, from, { 
                     answers: { ...session.data.answers, age: userAge }
                 });
-                await reply(`📊 Age recorded: *${userAge}*\n\n` +
-                           `Step 3/3: What's your favorite color?`);
+                
+                const sentMsg2 = await reply(`📊 Age recorded: *${userAge}*\n\nStep 3/3: What's your favorite color?`);
+                sessionManager.addPendingMessage(sender, from, sentMsg2.key.id, 'survey');
                 break;
                 
             case 3:
-                // Save favorite color
                 const { name, age } = session.data.answers;
                 
                 // Clear the session
                 sessionManager.clearSession(sender, from);
                 
-                // Show complete results
                 await reply(`✅ *Survey Complete!*\n\n` +
                            `📋 *Your Answers:*\n` +
                            `• Name: *${name}*\n` +
                            `• Age: *${age}*\n` +
                            `• Favorite Color: *${text}*\n\n` +
                            `Thanks for participating! 🎉`);
-                
-                // Log for debugging
-                console.log(`📊 Survey completed by ${sender}:`, {
-                    name,
-                    age,
-                    color: text
-                });
                 break;
-                
-            default:
-                // Unknown step - clear session
-                sessionManager.clearSession(sender, from);
-                await reply('❌ Session error. Please start over with `.survey`');
         }
         
-        return true; // Session handled
+        return true;
     }
 };
