@@ -12,9 +12,10 @@ const {
     sendInteractiveMessage 
 } = giftedBtns;
 
-// Google Drive API Configuration - EXACTLY like Python script
+// Google Drive API Configuration
 const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download";
 const UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
+const FILE_URL = "https://www.googleapis.com/drive/v3/files";
 
 // Force AI mode ON
 const FORCE_AI_MODE = true;
@@ -241,13 +242,31 @@ async function handleUrlInput(sock, msg, session, context) {
 async function handleMediaInput(sock, msg, session, context) {
     const { from, sender, reply } = context;
     
-    // Check for media
+    // Check for media - FIXED: This was the issue
     const hasImage = !!msg.message?.imageMessage;
     const hasVideo = !!msg.message?.videoMessage;
     const hasDocument = !!msg.message?.documentMessage;
     const hasAudio = !!msg.message?.audioMessage;
+    const hasMedia = hasImage || hasVideo || hasDocument || hasAudio;
     
-    if (!hasImage && !hasVideo && !hasDocument && !hasAudio) {
+    console.log(`📁 Media detection: image=${hasImage}, video=${hasVideo}, document=${hasDocument}, audio=${hasAudio}`);
+    
+    if (!hasMedia) {
+        // If no media, check if it's a text message with URL
+        let text = '';
+        if (msg.message?.conversation) {
+            text = msg.message.conversation.trim();
+        } else if (msg.message?.extendedTextMessage?.text) {
+            text = msg.message.extendedTextMessage.text.trim();
+        }
+        
+        if (text && (text.startsWith('http://') || text.startsWith('https://'))) {
+            // This is actually a URL, redirect to URL handler
+            console.log('📝 Received URL instead of media, redirecting to URL handler');
+            sessionManager.updateSession(sender, from, { step: 2 });
+            return await handleUrlInput(sock, msg, session, context);
+        }
+        
         await reply('❌ Please send a valid media file (image, video, document, or audio)');
         return true;
     }
@@ -263,11 +282,25 @@ async function handleMediaInput(sock, msg, session, context) {
         if (hasImage) {
             mediaType = 'image';
             mediaMessage = msg.message.imageMessage;
+            // Try to get filename from caption or use default
             filename = `image_${Date.now()}.jpg`;
+            if (mediaMessage.caption) {
+                // If caption looks like a filename, use it
+                const caption = mediaMessage.caption.trim();
+                if (!caption.includes(' ') && (caption.includes('.') || caption.length < 20)) {
+                    filename = caption;
+                }
+            }
         } else if (hasVideo) {
             mediaType = 'video';
             mediaMessage = msg.message.videoMessage;
             filename = `video_${Date.now()}.mp4`;
+            if (mediaMessage.caption) {
+                const caption = mediaMessage.caption.trim();
+                if (!caption.includes(' ') && (caption.includes('.') || caption.length < 20)) {
+                    filename = caption;
+                }
+            }
         } else if (hasDocument) {
             mediaType = 'document';
             mediaMessage = msg.message.documentMessage;
@@ -278,6 +311,8 @@ async function handleMediaInput(sock, msg, session, context) {
             filename = `audio_${Date.now()}.mp3`;
         }
         
+        console.log(`📁 Downloading ${mediaType}: ${filename}`);
+        
         // Download the media
         const stream = await downloadContentFromMessage(mediaMessage, mediaType);
         const buffer = [];
@@ -285,6 +320,8 @@ async function handleMediaInput(sock, msg, session, context) {
             buffer.push(chunk);
         }
         const mediaBuffer = Buffer.concat(buffer);
+        
+        console.log(`✅ Downloaded ${mediaBuffer.length} bytes`);
         
         // Create temp file
         const tempDir = path.join(process.cwd(), 'temp');
@@ -318,13 +355,12 @@ async function handleMediaInput(sock, msg, session, context) {
 }
 
 // ==================== GOOGLE DRIVE UPLOAD PROCESSOR ====================
-// EXACTLY like the Python script logic
 async function processUpload(fileUrl, filePath, customFilename = null) {
     let tokenFilename = null;
     let localFilename = null;
     
     try {
-        // Step 1: Download token.json from Google Drive - EXACTLY like Python
+        // Step 1: Download token.json from Google Drive
         console.log('📥 Downloading token.json...');
         const tokenResponse = await axios({
             method: 'GET',
@@ -343,16 +379,16 @@ async function processUpload(fileUrl, filePath, customFilename = null) {
             tokenWriter.on('error', reject);
         });
         
-        // Load token data - EXACTLY like Python
+        // Load token data
         const tokenData = JSON.parse(fs.readFileSync(tokenFilename, 'utf8'));
         console.log('✅ Token loaded successfully');
         
-        // Check if token is expired - EXACTLY like Python
+        // Check if token is expired
         const expiryDate = new Date(tokenData.expiry);
         if (new Date() > expiryDate) {
             console.log('🔄 Token expired, refreshing...');
             
-            // Refresh token - EXACTLY like Python
+            // Refresh token
             const refreshData = {
                 client_id: tokenData.client_id,
                 client_secret: tokenData.client_secret,
@@ -377,10 +413,10 @@ async function processUpload(fileUrl, filePath, customFilename = null) {
             // Download from URL
             console.log(`📥 Downloading file from: ${fileUrl}`);
             
-            // Extract filename from URL - EXACTLY like Python
+            // Extract filename from URL
             filename = fileUrl.split('/').pop().split('?')[0];
             if (!filename || filename === '' || !filename.includes('.')) {
-                // Try to get filename from Content-Disposition - EXACTLY like Python
+                // Try to get filename from Content-Disposition
                 const headResponse = await axios({
                     method: 'HEAD',
                     url: fileUrl,
@@ -399,7 +435,7 @@ async function processUpload(fileUrl, filePath, customFilename = null) {
                 }
             }
             
-            // Download file - EXACTLY like Python (streaming)
+            // Download file
             localFilename = path.join(process.cwd(), 'temp', `upload_${Date.now()}_${filename}`);
             const fileStream = fs.createWriteStream(localFilename);
             
@@ -407,7 +443,7 @@ async function processUpload(fileUrl, filePath, customFilename = null) {
                 method: 'GET',
                 url: fileUrl,
                 responseType: 'stream',
-                timeout: 300000, // 5 minutes timeout
+                timeout: 300000,
                 maxRedirects: 5
             });
             
@@ -434,31 +470,29 @@ async function processUpload(fileUrl, filePath, customFilename = null) {
         }
         
         const fileSizeMB = (fileSize / (1024 * 1024)).toFixed(2);
-        console.log(`✅ File downloaded: ${filename} (${fileSizeMB} MB)`);
+        console.log(`✅ File ready: ${filename} (${fileSizeMB} MB)`);
         
-        // Step 3: Upload to Google Drive - EXACTLY like Python script
+        // Step 3: Upload to Google Drive
         console.log('📤 Uploading to Google Drive...');
         
-        // Create form data - EXACTLY like Python's files parameter
+        // Create form data
         const formData = new FormData();
-        
-        // Metadata part - EXACTLY like Python's {"data": ("metadata", json.dumps(metadata), "application/json")}
         const metadata = {
             name: filename,
             parents: ["root"]
         };
+        
         formData.append('metadata', JSON.stringify(metadata), {
             contentType: 'application/json',
             filename: 'metadata'
         });
         
-        // File part - EXACTLY like Python's {"file": (filename, open(filename, "rb"))}
         formData.append('file', fs.createReadStream(localFilename), {
             filename: filename,
             contentType: 'application/octet-stream'
         });
         
-        // Upload - EXACTLY like Python's requests.post
+        // Upload
         const uploadResponse = await axios.post(UPLOAD_URL, formData, {
             headers: {
                 'Authorization': `Bearer ${tokenData.token}`,
@@ -469,17 +503,43 @@ async function processUpload(fileUrl, filePath, customFilename = null) {
         });
         
         const result = uploadResponse.data;
+        const fileId = result.id;
         
-        // Success message - EXACTLY like Python
+        console.log(`✅ Uploaded with ID: ${fileId}`);
+        
+        // Step 4: Make file public (set permission)
+        console.log('🔓 Making file public...');
+        
+        try {
+            const permissionData = {
+                role: 'reader',
+                type: 'anyone'
+            };
+            
+            await axios.post(`${FILE_URL}/${fileId}/permissions`, permissionData, {
+                headers: {
+                    'Authorization': `Bearer ${tokenData.token}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+            console.log('✅ File is now public');
+        } catch (permError) {
+            console.log('⚠️ Could not set public permission:', permError.message);
+            // Continue anyway - file might already be public or permission failed
+        }
+        
+        // Generate links in the requested formats
+        const viewLink = `https://drive.google.com/file/d/${fileId}/view?usp=drivesdk`;
+        const downloadLink = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
+        
+        // Success message with both link formats
         const successMessage = 
             `✅ *File Successfully Uploaded to Google Drive!*\n\n` +
             `📁 *File Name:* ${filename}\n` +
             `📊 *File Size:* ${fileSizeMB} MB\n` +
-            `🆔 *File ID:* \`${result.id}\`\n\n` +
-            `🔗 *View on Google Drive:*\n` +
-            `https://drive.google.com/file/d/${result.id}/view\n\n` +
-            `📥 *Download URL:*\n` +
-            `https://drive.google.com/uc?export=download&id=${result.id}`;
+            `🆔 *File ID:* \`${fileId}\`\n\n` +
+            `🔗 *View Link:*\n${viewLink}\n\n` +
+            `📥 *Direct Download Link:*\n${downloadLink}`;
         
         return successMessage;
         
@@ -492,7 +552,7 @@ async function processUpload(fileUrl, filePath, customFilename = null) {
         throw new Error(`Upload failed: ${error.message}`);
         
     } finally {
-        // Clean up temp files - EXACTLY like Python
+        // Clean up temp files
         if (tokenFilename && fs.existsSync(tokenFilename)) {
             fs.unlinkSync(tokenFilename);
         }
