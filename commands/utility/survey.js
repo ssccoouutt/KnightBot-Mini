@@ -197,7 +197,6 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
             break;
             
         case 4: // Gender selection
-            // Gender buttons have IDs like "gender_male_xxx", "gender_female_xxx", etc.
             let gender = 'Not specified';
             if (buttonId?.includes('gender_male')) {
                 gender = 'Male';
@@ -217,13 +216,12 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
             sessionManager.addPendingMessage(sender, from, sentMsg1.key.id, 'survey');
             return true;
             
-        case 6: // Country selection - handle list button response
+        case 6: // Country selection
             if (buttonId) {
                 let country = buttonId;
                 if (country.startsWith('country_')) {
                     country = country.replace('country_', '');
                 }
-                // Capitalize first letter
                 country = country.charAt(0).toUpperCase() + country.slice(1);
                 
                 sessionManager.updateSession(sender, from, {
@@ -248,7 +246,7 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
             
         case 7: // URL button demo choice
             if (buttonId?.includes('url')) {
-                // User wants to try URL button
+                // Send actual URL button
                 const urlButtons = [{
                     name: 'cta_url',
                     buttonParamsJson: JSON.stringify({
@@ -264,10 +262,8 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                 }, {});
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
                 
-                // Move to next step
                 sessionManager.updateSession(sender, from, { step: 8 });
                 
-                // Send next options
                 setTimeout(async () => {
                     const nextButtons = [
                         { id: `call_${Date.now()}`, text: '📞 Try Call Button' },
@@ -283,7 +279,6 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                 }, 2000);
                 return true;
             } else {
-                // Skip to next step
                 sessionManager.updateSession(sender, from, { step: 8 });
                 const nextButtons = [
                     { id: `call_${Date.now()}`, text: '📞 Try Call Button' },
@@ -401,21 +396,20 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
             
         case 10: // Location button demo choice
             if (buttonId?.includes('location')) {
-                // Send actual location button
-                const locationButtons = [{
-                    name: 'cta_location',
-                    buttonParamsJson: JSON.stringify({
-                        display_text: '📍 View Map',
-                        latitude: 40.7128,
-                        longitude: -74.0060
-                    })
-                }];
-                
-                const sentMsg = await sendButtons(sock, from, {
+                // Send actual location button - MUST use sendInteractiveMessage, not sendButtons
+                const sentMsg = await sendInteractiveMessage(sock, from, {
                     text: '📍 *Location Button Demo*\n\nClick to see New York location:',
-                    buttons: locationButtons,
+                    interactiveButtons: [{
+                        name: 'send_location',
+                        buttonParamsJson: JSON.stringify({
+                            display_text: '📍 View Map',
+                            latitude: 40.7128,
+                            longitude: -74.0060
+                        })
+                    }],
                     aimode: global.aiMode.get(from) || false
                 }, {});
+                
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
                 
                 sessionManager.updateSession(sender, from, { step: 11 });
@@ -447,7 +441,6 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
             break;
             
         default:
-            // For any other step, just log and continue
             console.log(`ℹ️ Unhandled button click at step ${session.step}: ${buttonId}`);
     }
     
