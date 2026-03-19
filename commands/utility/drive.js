@@ -29,13 +29,6 @@ module.exports = {
     async execute(sock, msg, args, context) {
         const { from, sender, reply, react } = context;
         
-        // Check if user has any active session
-        const existingSession = sessionManager.getLatestSession(sender, from);
-        if (existingSession) {
-            await reply(`⚠️ You already have an active session. Please complete or cancel it first.`);
-            return;
-        }
-        
         // Create session
         const session = sessionManager.createSession(sender, from, this.name, {
             step: 1,
@@ -79,7 +72,7 @@ module.exports = {
         let buttonText = null;
         
         if (isButtonClick) {
-            // Extract button ID based on message type
+            // Extract button ID based on message type - EXACTLY like survey.js
             if (msg.message?.buttonsResponseMessage) {
                 buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
                 buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
@@ -89,6 +82,9 @@ module.exports = {
                 if (listReply) {
                     buttonId = listReply.selectedRowId;
                     buttonText = listReply.title;
+                }
+                if (!buttonText && msg.message.listResponseMessage.title) {
+                    buttonText = msg.message.listResponseMessage.title;
                 }
             }
             else if (msg.message?.interactiveResponseMessage) {
@@ -135,7 +131,7 @@ module.exports = {
         
         console.log(`📨 Drive session step ${session.step}: text="${text}", hasMedia=${hasMedia}, isButtonClick=${isButtonClick}, buttonId=${buttonId}`);
         
-        // Handle button clicks based on current step
+        // Handle button clicks based on current step - EXACTLY like survey.js
         if (isButtonClick && buttonId) {
             return await handleButtonClick(sock, msg, session, context, buttonId, buttonText);
         }
@@ -147,10 +143,6 @@ module.exports = {
                 return true;
                 
             case 2: // Waiting for URL
-                if (hasMedia) {
-                    await reply('❌ Please send a URL, not a media file.');
-                    return true;
-                }
                 return await handleUrlInput(sock, msg, session, context);
                 
             case 3: // Waiting for media file
