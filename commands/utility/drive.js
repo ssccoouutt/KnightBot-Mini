@@ -6,18 +6,23 @@ const path = require('path');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 const giftedBtns = require('gifted-btns');
 
-const { sendButtons } = giftedBtns;
+const { 
+    sendButtons, 
+    sendInteractiveMessage 
+} = giftedBtns;
 
 // Google Drive API Configuration
 const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download";
 const UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
 
+// Force AI mode ON
+const FORCE_AI_MODE = true;
+
 module.exports = {
     name: 'drive',
     aliases: ['gdrive', 'upload', 'gdupload'],
     description: 'Upload files to Google Drive from URL or media',
-    usage: 'drive - Start upload process\n' +
-           'Then send a direct download link or media file',
+    usage: 'drive',
     category: 'utility',
     ownerOnly: false,
 
@@ -31,19 +36,15 @@ module.exports = {
             return;
         }
         
-        // Create session for drive upload
+        // Create session
         const session = sessionManager.createSession(sender, from, this.name, {
             step: 1,
-            data: {
-                method: null, // 'url' or 'media'
-                url: null,
-                fileInfo: null
-            }
+            data: {}
         });
         
         await react('📤');
         
-        // Create unique button IDs with session reference
+        // Create unique button IDs that include session reference
         const sessionId = session.id.split(':').pop();
         const urlId = `url_${sessionId}_${Date.now()}`;
         const mediaId = `media_${sessionId}_${Date.now()}`;
@@ -55,7 +56,6 @@ module.exports = {
             { id: cancelId, text: '❌ Cancel' }
         ];
         
-        // Use sendButtons from gifted-btns (same as button.js)
         const sentMsg = await sendButtons(sock, from, {
             text: '📤 *Google Drive Uploader*\n\n' +
                   'How would you like to upload?\n\n' +
@@ -63,7 +63,7 @@ module.exports = {
                   '• *From Media* - Send a file directly',
             footer: 'Choose upload method',
             buttons: buttons,
-            aimode: true
+            aimode: FORCE_AI_MODE
         }, { quoted: msg });
         
         sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
@@ -74,66 +74,126 @@ module.exports = {
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, react, isButtonClick } = context;
         
-        console.log(`📨 Drive session step ${session.step}, isButtonClick=${isButtonClick}`);
+        // Get the button ID from the message if this is a button click
+        let buttonId = null;
+        let buttonText = null;
         
-        // Handle button clicks
         if (isButtonClick) {
-            return await handleButtonClick(sock, msg, session, context);
+            // Extract button ID based on message type
+            if (msg.message?.buttonsResponseMessage) {
+                buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
+                buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
+            }
+            else if (msg.message?.listResponseMessage) {
+                const listReply = msg.message.listResponseMessage.singleSelectReply;
+                if (listReply) {
+                    buttonId = listReply.selectedRowId;
+                    buttonText = listReply.title;
+                }
+            }
+            else if (msg.message?.interactiveResponseMessage) {
+                const interactive = msg.message.interactiveResponseMessage;
+                if (interactive.nativeFlowResponseMessage) {
+                    try {
+                        const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
+                        buttonId = params.id;
+                        buttonText = params.display_text;
+                    } catch (e) {
+                        console.error('Error parsing interactive response:', e);
+                    }
+                }
+            }
+            else if (msg.message?.templateButtonReplyMessage) {
+                buttonId = msg.message.templateButtonReplyMessage.selectedId;
+                buttonText = msg.message.templateButtonReplyMessage.selectedDisplayText;
+            }
+            
+            console.log(`🔘 Button click in drive: ID=${buttonId}, Text=${buttonText}`);
         }
         
-        // Handle based on current step
+        // Detect media types
+        const hasImage = !!msg.message?.imageMessage;
+        const hasVideo = !!msg.message?.videoMessage;
+        const hasDocument = !!msg.message?.documentMessage;
+        const hasAudio = !!msg.message?.audioMessage;
+        const hasMedia = hasImage || hasVideo || hasDocument || hasAudio;
+        
+        // Get text from message
+        let text = '';
+        if (msg.message?.conversation) {
+            text = msg.message.conversation;
+        } else if (msg.message?.extendedTextMessage?.text) {
+            text = msg.message.extendedTextMessage.text;
+        } else if (msg.message?.imageMessage?.caption) {
+            text = msg.message.imageMessage.caption;
+        } else if (msg.message?.videoMessage?.caption) {
+            text = msg.message.videoMessage.caption;
+        } else if (msg.message?.documentMessage?.caption) {
+            text = msg.message.documentMessage.caption;
+        }
+        text = text.trim();
+        
+        console.log(`📨 Drive session step ${session.step}: text="${text}", hasMedia=${hasMedia}, isButtonClick=${isButtonClick}, buttonId=${buttonId}`);
+        
+        // Handle button clicks based on current step
+        if (isButtonClick && buttonId) {
+            return await handleButtonClick(sock, msg, session, context, buttonId, buttonText);
+        }
+        
+        // Process based on current step (non-button inputs)
         switch (session.step) {
+            case 1: // Welcome screen - should only get here if button wasn't handled
+                await reply('❌ Please use the buttons above to choose upload method.');
+                return true;
+                
             case 2: // Waiting for URL
+                if (hasMedia) {
+                    await reply('❌ Please send a URL, not a media file.');
+                    return true;
+                }
                 return await handleUrlInput(sock, msg, session, context);
                 
             case 3: // Waiting for media file
                 return await handleMediaInput(sock, msg, session, context);
                 
             default:
-                await reply('❌ Session error. Please start over with `.drive`');
                 sessionManager.clearSession(session.id);
+                await reply('❌ Session error. Please start over with `.drive`');
                 return true;
         }
     }
 };
 
 // ==================== BUTTON CLICK HANDLER ====================
-async function handleButtonClick(sock, msg, session, context) {
+async function handleButtonClick(sock, msg, session, context, buttonId, buttonText) {
     const { from, sender, reply } = context;
     
-    let buttonId = null;
-    let buttonText = null;
+    console.log(`🔘 Handling button click in drive: step=${session.step}, id=${buttonId}, text=${buttonText}`);
     
-    // Extract button info based on message type
-    if (msg.message?.buttonsResponseMessage) {
-        buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
-        buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
-    } else if (msg.message?.templateButtonReplyMessage) {
-        buttonId = msg.message.templateButtonReplyMessage.selectedId;
-        buttonText = msg.message.templateButtonReplyMessage.selectedDisplayText;
-    }
-    
-    console.log(`🔘 Drive button click: ID=${buttonId}, Text=${buttonText}`);
-    
-    // Handle method selection (step 1)
-    if (session.step === 1) {
-        if (buttonId?.includes('url')) {
-            sessionManager.updateSession(sender, from, { step: 2 });
-            const sentMsg = await reply(`🔗 *Upload from URL*\n\nPlease send me the direct download link.\n\nExample: \`https://example.com/file.zip\``);
-            sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'drive');
-            return true;
+    // Handle based on current step
+    switch (session.step) {
+        case 1: // Method selection
+            if (buttonId?.includes('url')) {
+                sessionManager.updateSession(sender, from, { step: 2 });
+                const sentMsg = await reply(`🔗 *Upload from URL*\n\nPlease send me the direct download link.\n\nExample: \`https://example.com/file.zip\``);
+                sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'drive');
+                return true;
+                
+            } else if (buttonId?.includes('media')) {
+                sessionManager.updateSession(sender, from, { step: 3 });
+                const sentMsg = await reply(`📎 *Upload from Media*\n\nPlease send me the file (image, video, document, audio)`);
+                sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'drive');
+                return true;
+                
+            } else if (buttonId?.includes('cancel')) {
+                sessionManager.clearSession(session.id);
+                await reply('❌ Upload cancelled.');
+                return true;
+            }
+            break;
             
-        } else if (buttonId?.includes('media')) {
-            sessionManager.updateSession(sender, from, { step: 3 });
-            const sentMsg = await reply(`📎 *Upload from Media*\n\nPlease send me the file (image, video, document, etc.)`);
-            sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'drive');
-            return true;
-            
-        } else if (buttonId?.includes('cancel')) {
-            sessionManager.clearSession(session.id);
-            await reply('❌ Upload cancelled.');
-            return true;
-        }
+        default:
+            console.log(`ℹ️ Unhandled button click at step ${session.step}: ${buttonId}`);
     }
     
     await reply(`❌ Unhandled button click. Please try again.`);
@@ -162,7 +222,7 @@ async function handleUrlInput(sock, msg, session, context) {
     
     try {
         // Process the upload
-        const result = await processUpload(url, null, sender, from, reply);
+        const result = await processUpload(url, null);
         
         // Send result
         await sock.sendMessage(from, {
@@ -203,19 +263,24 @@ async function handleMediaInput(sock, msg, session, context) {
         // Determine media type
         let mediaType = 'document';
         let mediaMessage = null;
+        let filename = 'file';
         
         if (hasImage) {
             mediaType = 'image';
             mediaMessage = msg.message.imageMessage;
+            filename = `image_${Date.now()}.jpg`;
         } else if (hasVideo) {
             mediaType = 'video';
             mediaMessage = msg.message.videoMessage;
+            filename = `video_${Date.now()}.mp4`;
         } else if (hasDocument) {
             mediaType = 'document';
             mediaMessage = msg.message.documentMessage;
+            filename = mediaMessage.fileName || `document_${Date.now()}.bin`;
         } else if (hasAudio) {
             mediaType = 'audio';
             mediaMessage = msg.message.audioMessage;
+            filename = `audio_${Date.now()}.mp3`;
         }
         
         // Download the media
@@ -230,18 +295,11 @@ async function handleMediaInput(sock, msg, session, context) {
         const tempDir = path.join(process.cwd(), 'temp');
         if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
         
-        // Generate filename
-        let filename = 'file';
-        if (hasImage) filename = `image_${Date.now()}.jpg`;
-        else if (hasVideo) filename = `video_${Date.now()}.mp4`;
-        else if (hasDocument) filename = mediaMessage.fileName || `document_${Date.now()}.bin`;
-        else if (hasAudio) filename = `audio_${Date.now()}.mp3`;
-        
         const filepath = path.join(tempDir, filename);
         fs.writeFileSync(filepath, mediaBuffer);
         
         // Upload to Google Drive
-        const result = await processUpload(null, filepath, sender, from, reply);
+        const result = await processUpload(null, filepath, filename);
         
         // Clean up temp file
         fs.unlinkSync(filepath);
@@ -265,7 +323,7 @@ async function handleMediaInput(sock, msg, session, context) {
 }
 
 // ==================== GOOGLE DRIVE UPLOAD PROCESSOR ====================
-async function processUpload(fileUrl, filePath, sender, chatId, reply) {
+async function processUpload(fileUrl, filePath, customFilename = null) {
     let tokenFilename = null;
     let localFilename = null;
     
@@ -317,7 +375,6 @@ async function processUpload(fileUrl, filePath, sender, chatId, reply) {
         
         // Step 2: Get the file
         let filename = '';
-        let fileStream = null;
         let fileSize = 0;
         
         if (fileUrl) {
@@ -347,7 +404,7 @@ async function processUpload(fileUrl, filePath, sender, chatId, reply) {
             }
             
             localFilename = path.join(process.cwd(), 'temp', `upload_${Date.now()}_${filename}`);
-            fileStream = fs.createWriteStream(localFilename);
+            const fileStream = fs.createWriteStream(localFilename);
             
             let downloadedSize = 0;
             fileResponse.data.on('data', (chunk) => {
@@ -366,7 +423,7 @@ async function processUpload(fileUrl, filePath, sender, chatId, reply) {
         } else if (filePath) {
             // Use local file
             localFilename = filePath;
-            filename = path.basename(filePath);
+            filename = customFilename || path.basename(filePath);
             const stats = fs.statSync(filePath);
             fileSize = stats.size;
         }
