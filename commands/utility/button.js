@@ -107,7 +107,7 @@ module.exports = {
             let sentMsg;
             
             // Create a session for this button command
-            sessionManager.createSession(sender, from, this.name, {
+            const session = sessionManager.createSession(sender, from, this.name, {
                 type: subCommand,
                 args: args.slice(1).join(' '),
                 step: 1
@@ -161,7 +161,7 @@ module.exports = {
         }
     },
     
-    // Handle ALL session messages (both replies AND direct messages)
+    // Handle ALL session messages (distinguish between button clicks and manual replies)
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, react, isButtonClick } = context;
         
@@ -174,12 +174,10 @@ module.exports = {
         console.log(`📨 Button session handling: text="${text}", isButtonClick=${isButtonClick}, quotedId=${quotedMessageId}`);
         console.log(`📊 Session pending messages:`, session.pendingMessages);
         
-        // Check if this is a button click (either flagged by handler or is a reply to our message)
-        const isReplyToOurMessage = quotedMessageId && session.pendingMessages?.some(p => p && p.messageId === quotedMessageId);
-        
-        if (isButtonClick || isReplyToOurMessage) {
-            // This is a BUTTON CLICK - respond with random message
-            console.log(`🔘 BUTTON CLICK detected: ${text}`);
+        // Check if this is a BUTTON CLICK (actual button press, not manual reply)
+        if (isButtonClick) {
+            // This is a real button click - respond with random message
+            console.log(`🔘 REAL BUTTON CLICK detected: ${text}`);
             
             const response = getRandomResponse(quotedMessageId || 'unknown', text);
             const sentMsg = await reply(response);
@@ -188,35 +186,42 @@ module.exports = {
             if (sentMsg && sentMsg.key) {
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
             }
-        } 
-        else if (quotedMessageId) {
-            // This is a regular reply to a bot message (not a button click)
-            console.log(`💬 Regular reply during button session: ${text}`);
             
-            // For regular replies, still respond with something helpful
-            const response = `ℹ️ You replied to a message, but this is a button command. Please click the buttons above to interact.`;
+            return true;
+        }
+        
+        // Check if this is a reply to one of our messages (manual reply)
+        const isReplyToOurMessage = quotedMessageId && session.pendingMessages?.some(p => p && p.messageId === quotedMessageId);
+        
+        if (isReplyToOurMessage) {
+            // This is a MANUAL REPLY to a button message - NOT a button click
+            console.log(`💬 MANUAL REPLY to button message: ${text}`);
+            
+            // For manual replies, give a helpful message
+            const response = `ℹ️ You replied manually. Please click the buttons above to interact with the button command.`;
             const sentMsg = await reply(response);
             
             if (sentMsg && sentMsg.key) {
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
             }
-        }
-        else {
-            // This is a direct message during button session
-            console.log(`💬 Direct message during button session: ${text}`);
             
-            if (!text || text.trim() === '') {
-                return true;
-            }
-            
-            const sentMsg = await reply(`ℹ️ Please click one of the buttons above to interact with me. If you want to start over, use \`.button\` again.`);
-            
-            if (sentMsg && sentMsg.key) {
-                sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
-            }
+            return true;
         }
         
-        return true; // Session handled
+        // This is a direct message during button session
+        console.log(`💬 Direct message during button session: ${text}`);
+        
+        if (!text || text.trim() === '') {
+            return true;
+        }
+        
+        const sentMsg = await reply(`ℹ️ Please click one of the buttons above to interact with me. If you want to start over, use \`.button\` again.`);
+        
+        if (sentMsg && sentMsg.key) {
+            sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
+        }
+        
+        return true;
     }
 };
 
