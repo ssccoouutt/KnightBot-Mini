@@ -110,10 +110,13 @@ module.exports = {
             
             console.log(`🔘 Button click in drive: ID=${buttonId}, Text=${buttonText}`);
             
-            // Handle button clicks immediately
+            // Handle button clicks immediately and RETURN - CRITICAL!
             if (buttonId) {
                 const handled = await handleButtonClick(sock, msg, session, context, buttonId, buttonText);
-                if (handled) return true;
+                if (handled) {
+                    console.log('✅ Button click handled, returning early to prevent further processing');
+                    return true; // CRITICAL: Return early to prevent further processing
+                }
             }
         }
         
@@ -143,7 +146,7 @@ module.exports = {
         
         // Process based on current step (non-button inputs)
         switch (session.step) {
-            case 1: // Welcome screen
+            case 1: // Welcome screen - should only get here if button wasn't handled
                 await reply('❌ Please use the buttons above to choose upload method.');
                 return true;
                 
@@ -174,20 +177,20 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
             sessionManager.updateSession(sender, from, { step: 2 });
             const sentMsg = await reply(`🔗 *Upload from URL*\n\nPlease send me the direct download link.\n\nExample: \`https://example.com/file.zip\``);
             sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'drive');
-            return true;
+            return true; // Important!
             
         } else if (buttonId?.includes('media')) {
             console.log('✅ Media button clicked, updating to step 3');
             sessionManager.updateSession(sender, from, { step: 3 });
             const sentMsg = await reply(`📎 *Upload from Media*\n\nPlease send me the file (image, video, document, audio)`);
             sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'drive');
-            return true;
+            return true; // Important!
             
         } else if (buttonId?.includes('cancel')) {
             console.log('✅ Cancel button clicked');
             sessionManager.clearSession(session.id);
             await reply('❌ Upload cancelled.');
-            return true;
+            return true; // Important!
         }
     }
     
@@ -242,7 +245,7 @@ async function handleUrlInput(sock, msg, session, context) {
 async function handleMediaInput(sock, msg, session, context) {
     const { from, sender, reply } = context;
     
-    console.log('📁 handleMediaInput called');
+    console.log('📁 handleMediaInput called - step 3');
     
     // Check for media
     const hasImage = !!msg.message?.imageMessage;
@@ -265,6 +268,7 @@ async function handleMediaInput(sock, msg, session, context) {
         if (text && (text.startsWith('http://') || text.startsWith('https://'))) {
             // This is actually a URL, redirect to URL handler
             console.log('📝 Received URL instead of media, redirecting to URL handler');
+            sessionManager.updateSession(sender, from, { step: 2 });
             return await handleUrlInput(sock, msg, session, context);
         }
         
