@@ -820,33 +820,48 @@ const handleMessage = async (sock, msg) => {
             console.log(`🔘 Button ID: ${buttonId}, Text: ${buttonText}`);
             
             // Try to find the session this button belongs to
-            // First, check if the button ID contains a session identifier
-            const idParts = buttonId.split('_');
             let sessionFound = null;
             let sessionCommand = null;
             
-            // Method 1: Try to find by checking all sessions' pending messages
-            // This is the most reliable method
-            const sessionInfo = sessionManager.findSessionByRepliedMessage(quotedMessageId, sender);
+            // Method 1: Try to find by button ID prefix (contains session identifier)
+            const idParts = buttonId.split('_');
+            if (idParts.length >= 2) {
+                const sessionIdentifier = idParts[1];
+                console.log(`🔍 Looking for session with identifier: ${sessionIdentifier}`);
+                
+                // Get all sessions for this user
+                const userSessions = sessionManager.getUserSessions(sender, from);
+                for (const sess of userSessions) {
+                    // Check if session ID contains this identifier
+                    if (sess.id.includes(sessionIdentifier)) {
+                        sessionFound = sess;
+                        sessionCommand = commands.get(sess.command);
+                        console.log(`✅ Found session by ID match: ${sess.command}`);
+                        break;
+                    }
+                }
+            }
             
-            if (sessionInfo) {
-                sessionFound = sessionInfo.session;
-                sessionCommand = commands.get(sessionInfo.pendingInfo.command);
-                console.log(`✅ Found session via quoted message: ${sessionFound.command}`);
-            } else {
-                // Method 2: Try to find by scanning all user sessions
+            // Method 2: If not found, try to find by checking pending messages
+            if (!sessionFound && quotedMessageId) {
+                const sessionInfo = sessionManager.findSessionByRepliedMessage(quotedMessageId, sender);
+                if (sessionInfo) {
+                    sessionFound = sessionInfo.session;
+                    sessionCommand = commands.get(sessionInfo.pendingInfo.command);
+                    console.log(`✅ Found session via quoted message: ${sessionFound.command}`);
+                }
+            }
+            
+            // Method 3: Last resort - just take the most recent session
+            if (!sessionFound) {
                 const userSessions = sessionManager.getUserSessions(sender, from);
                 console.log(`📊 Found ${userSessions.length} sessions for user`);
                 
-                // Look for a session that might be expecting this button
-                for (const sess of userSessions) {
-                    // Check if this session is for a command that handles buttons
-                    if (sess.command === 'button' || sess.command === 'survey') {
-                        sessionFound = sess;
-                        sessionCommand = commands.get(sess.command);
-                        console.log(`✅ Found matching session: ${sess.command}`);
-                        break;
-                    }
+                if (userSessions.length > 0) {
+                    // Take the most recent session
+                    sessionFound = userSessions.sort((a, b) => b.lastActivity - a.lastActivity)[0];
+                    sessionCommand = commands.get(sessionFound.command);
+                    console.log(`✅ Using most recent session: ${sessionFound.command}`);
                 }
             }
             
@@ -854,6 +869,7 @@ const handleMessage = async (sock, msg) => {
                 // Activate this session
                 sessionManager.activateSession(sender, from, sessionFound.id);
                 
+                // IMPORTANT: Always pass isButtonClick: true for button clicks
                 const handled = await sessionCommand.handleSession(sock, msg, sessionFound, {
                     from,
                     sender,
@@ -863,13 +879,13 @@ const handleMessage = async (sock, msg) => {
                     isAdmin: await isAdmin(sock, sender, from, groupMetadata),
                     isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
                     isMod: isMod(sender),
-                    isButtonClick: true,
+                    isButtonClick: true, // THIS MUST BE TRUE FOR ALL BUTTON CLICKS
                     reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
                     react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
                 });
                 
                 if (handled) {
-                    return;
+                    return; // Message handled
                 }
             } else {
                 console.log(`⚠️ No session found for button click`);
@@ -909,7 +925,7 @@ const handleMessage = async (sock, msg) => {
                     isAdmin: await isAdmin(sock, sender, from, groupMetadata),
                     isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
                     isMod: isMod(sender),
-                    isButtonClick: false,
+                    isButtonClick: false, // This is a regular reply, not a button click
                     reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
                     react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
                 });
