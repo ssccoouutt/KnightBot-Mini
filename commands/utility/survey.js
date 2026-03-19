@@ -74,8 +74,9 @@ module.exports = {
                 const listReply = msg.message.listResponseMessage.singleSelectReply;
                 if (listReply) {
                     buttonId = listReply.selectedRowId;
-                    // For list buttons, the title is what should be displayed
-                    buttonText = listReply.title || msg.message.listResponseMessage.title;
+                    // IMPORTANT: The title is what gets sent, NOT the description
+                    buttonText = listReply.title;
+                    console.log('✅ List button - selected title:', buttonText);
                 }
                 // If still no buttonText, try to get from the list response itself
                 if (!buttonText && msg.message.listResponseMessage.title) {
@@ -223,12 +224,11 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
             sessionManager.addPendingMessage(sender, from, sentMsg1.key.id, 'survey');
             return true;
             
-        case 6: // Country selection - FIXED: Handle list button properly
-            // For list buttons, the buttonText might come from different places
-            let country = buttonText;
+        case 6: // Country selection - FIXED: Use buttonText which is the title
+            let country = buttonText || 'Unknown';
             
-            // If buttonText is undefined, try to extract from buttonId
-            if (!country && buttonId) {
+            // If still no country, try to extract from buttonId as fallback
+            if (country === 'Unknown' && buttonId) {
                 if (buttonId.startsWith('country_')) {
                     country = buttonId.replace('country_', '');
                 } else {
@@ -236,17 +236,8 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                 }
             }
             
-            // Also check if the message has a listResponseMessage with title
-            if (!country && msg.message?.listResponseMessage?.title) {
-                country = msg.message.listResponseMessage.title;
-            }
-            
             // Capitalize properly
-            if (country) {
-                country = country.charAt(0).toUpperCase() + country.slice(1).toLowerCase();
-            } else {
-                country = 'Unknown';
-            }
+            country = country.charAt(0).toUpperCase() + country.slice(1).toLowerCase();
             
             sessionManager.updateSession(sender, from, {
                 answers: { ...session.data.answers, country }
@@ -591,12 +582,12 @@ async function handleColorInput(sock, msg, session, context) {
         step: 6
     });
     
-    // Country selection list - FIXED: Removed descriptions
+    // Country selection list - WITH descriptions (they look nice)
     const countries = ['USA', 'UK', 'Canada', 'Australia', 'India', 'Pakistan', 'UAE', 'Other'];
     const rows = countries.map(c => ({
         id: `country_${c.toLowerCase()}`,
-        title: c
-        // No description field - this removes the "Select X" text
+        title: c,
+        description: `Select ${c}` // This is just for display
     }));
     
     const sentMsg = await sendInteractiveMessage(sock, from, {
