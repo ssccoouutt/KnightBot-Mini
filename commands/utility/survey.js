@@ -10,8 +10,10 @@ const {
     sendInteractiveMessage 
 } = giftedBtns;
 
-// Store AI mode state
+// Store AI mode state - enable by default for survey
 if (!global.aiMode) global.aiMode = new Map();
+// Force AI mode ON for survey responses
+const FORCE_AI_MODE = true;
 
 module.exports = {
     name: 'survey',
@@ -47,7 +49,7 @@ module.exports = {
             text: '📋 *Welcome to the Complete Survey*\n\nThis survey supports:\n• Text input\n• All button types\n• Images\n• Videos\n• Documents\n\nClick Start to begin!',
             footer: 'Multi-format Survey',
             buttons: buttons,
-            aimode: global.aiMode.get(from) || false
+            aimode: FORCE_AI_MODE
         }, { quoted: msg });
         
         sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
@@ -72,7 +74,8 @@ module.exports = {
                 const listReply = msg.message.listResponseMessage.singleSelectReply;
                 if (listReply) {
                     buttonId = listReply.selectedRowId;
-                    buttonText = listReply.title;
+                    // For list buttons, the title is what should be displayed
+                    buttonText = listReply.title || msg.message.listResponseMessage.title;
                 }
             }
             else if (msg.message?.interactiveResponseMessage) {
@@ -216,13 +219,12 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
             sessionManager.addPendingMessage(sender, from, sentMsg1.key.id, 'survey');
             return true;
             
-        case 6: // Country selection
-            if (buttonId) {
-                let country = buttonId;
-                if (country.startsWith('country_')) {
-                    country = country.replace('country_', '');
-                }
-                country = country.charAt(0).toUpperCase() + country.slice(1);
+        case 6: // Country selection - FIXED: Use buttonText instead of buttonId
+            if (buttonText) {
+                // Use the display text directly instead of parsing ID
+                let country = buttonText;
+                // Capitalize first letter if needed
+                country = country.charAt(0).toUpperCase() + country.slice(1).toLowerCase();
                 
                 sessionManager.updateSession(sender, from, {
                     answers: { ...session.data.answers, country }
@@ -237,7 +239,7 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                     text: `✅ Country selected: *${country}*\n\nStep 7/13: Let's try a URL button demo. Click below:`,
                     footer: 'URL Button Demo',
                     buttons: buttons,
-                    aimode: global.aiMode.get(from) || false
+                    aimode: FORCE_AI_MODE
                 }, {});
                 sessionManager.addPendingMessage(sender, from, sentMsg2.key.id, 'survey');
                 return true;
@@ -258,7 +260,7 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                 const sentMsg = await sendButtons(sock, from, {
                     text: '🔗 *URL Button Demo*\n\nClick the button below to open Google:',
                     buttons: urlButtons,
-                    aimode: global.aiMode.get(from) || false
+                    aimode: FORCE_AI_MODE
                 }, {});
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
                 
@@ -273,12 +275,13 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                         text: 'Step 8/13: Now try a call button demo:',
                         footer: 'Call Button Demo',
                         buttons: nextButtons,
-                        aimode: global.aiMode.get(from) || false
+                        aimode: FORCE_AI_MODE
                     }, {});
                     sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
                 }, 2000);
                 return true;
             } else {
+                // Skip - don't send demo, just move to next step
                 sessionManager.updateSession(sender, from, { step: 8 });
                 const nextButtons = [
                     { id: `call_${Date.now()}`, text: '📞 Try Call Button' },
@@ -288,7 +291,7 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                     text: 'Step 8/13: Try a call button demo:',
                     footer: 'Call Button Demo',
                     buttons: nextButtons,
-                    aimode: global.aiMode.get(from) || false
+                    aimode: FORCE_AI_MODE
                 }, {});
                 sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
                 return true;
@@ -308,7 +311,7 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                 const sentMsg = await sendButtons(sock, from, {
                     text: '📞 *Call Button Demo*\n\nClick the button to call (demo):',
                     buttons: callButtons,
-                    aimode: global.aiMode.get(from) || false
+                    aimode: FORCE_AI_MODE
                 }, {});
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
                 
@@ -323,12 +326,13 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                         text: 'Step 9/13: Now try a copy button demo:',
                         footer: 'Copy Button Demo',
                         buttons: nextButtons,
-                        aimode: global.aiMode.get(from) || false
+                        aimode: FORCE_AI_MODE
                     }, {});
                     sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
                 }, 2000);
                 return true;
             } else {
+                // Skip - don't send demo
                 sessionManager.updateSession(sender, from, { step: 9 });
                 const nextButtons = [
                     { id: `copy_${Date.now()}`, text: '📋 Try Copy Button' },
@@ -338,7 +342,7 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                     text: 'Step 9/13: Try a copy button demo:',
                     footer: 'Copy Button Demo',
                     buttons: nextButtons,
-                    aimode: global.aiMode.get(from) || false
+                    aimode: FORCE_AI_MODE
                 }, {});
                 sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
                 return true;
@@ -358,7 +362,7 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                 const sentMsg = await sendButtons(sock, from, {
                     text: '📋 *Copy Button Demo*\n\nClick the button to copy a code:',
                     buttons: copyButtons,
-                    aimode: global.aiMode.get(from) || false
+                    aimode: FORCE_AI_MODE
                 }, {});
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
                 
@@ -373,12 +377,13 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                         text: 'Step 10/13: Now try a location button demo:',
                         footer: 'Location Button Demo',
                         buttons: nextButtons,
-                        aimode: global.aiMode.get(from) || false
+                        aimode: FORCE_AI_MODE
                     }, {});
                     sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
                 }, 2000);
                 return true;
             } else {
+                // Skip - don't send demo
                 sessionManager.updateSession(sender, from, { step: 10 });
                 const nextButtons = [
                     { id: `location_${Date.now()}`, text: '📍 Try Location Button' },
@@ -388,7 +393,7 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                     text: 'Step 10/13: Try a location button demo:',
                     footer: 'Location Button Demo',
                     buttons: nextButtons,
-                    aimode: global.aiMode.get(from) || false
+                    aimode: FORCE_AI_MODE
                 }, {});
                 sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
                 return true;
@@ -396,7 +401,7 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
             
         case 10: // Location button demo choice
             if (buttonId?.includes('location')) {
-                // Send actual location button - MUST use sendInteractiveMessage, not sendButtons
+                // Send actual location button
                 const sentMsg = await sendInteractiveMessage(sock, from, {
                     text: '📍 *Location Button Demo*\n\nClick to see New York location:',
                     interactiveButtons: [{
@@ -407,7 +412,7 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                             longitude: -74.0060
                         })
                     }],
-                    aimode: global.aiMode.get(from) || false
+                    aimode: FORCE_AI_MODE
                 }, {});
                 
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
@@ -420,6 +425,7 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                 }, 2000);
                 return true;
             } else {
+                // Skip - don't send demo
                 sessionManager.updateSession(sender, from, { step: 11 });
                 const nextMsg = await reply(`Step 11/13: Please send a photo (or type "skip"):`);
                 sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
@@ -512,7 +518,7 @@ async function handleAgeInput(sock, msg, session, context) {
         text: `📊 Age recorded: *${age}*\n\nStep 4/13: Select your gender:`,
         footer: 'Gender Selection',
         buttons: buttons,
-        aimode: global.aiMode.get(from) || false
+        aimode: FORCE_AI_MODE
     }, {});
     
     sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
@@ -557,7 +563,7 @@ async function handleColorInput(sock, msg, session, context) {
                 sections: [{ title: 'Countries', rows }]
             })
         }],
-        aimode: global.aiMode.get(from) || false
+        aimode: FORCE_AI_MODE
     }, {});
     
     sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
@@ -821,7 +827,7 @@ async function handleFinalConfirmation(sock, msg, session, context) {
         text: summary,
         footer: 'Thank you for participating!',
         buttons: buttons,
-        aimode: global.aiMode.get(from) || false
+        aimode: FORCE_AI_MODE
     }, {});
     
     return true;
