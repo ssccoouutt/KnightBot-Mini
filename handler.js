@@ -779,31 +779,67 @@ const handleMessage = async (sock, msg) => {
         console.log(`🔘 BUTTON CLICK DETECTED!`);
     }
 
-    if (quotedMessageId) {
-        // This is a REPLY to some message
-        console.log(`🔍 Checking reply to message ID: ${quotedMessageId}`);
+    // IMPORTANT: Handle button clicks FIRST - they are a type of reply
+    if (isButtonClick) {
+        // For button clicks, the quoted message ID might be in a different location
+        // Try to get it from various possible locations
+        let buttonQuotedId = null;
         
-        // Find which session has this message ID in its pendingMessages
-        const sessionInfo = sessionManager.findSessionByRepliedMessage(quotedMessageId, sender);
+        if (msg.message?.buttonsResponseMessage) {
+            buttonQuotedId = msg.message.buttonsResponseMessage.selectedButtonId;
+        } else if (msg.message?.listResponseMessage) {
+            buttonQuotedId = msg.message.listResponseMessage.singleSelectReply?.selectedRowId;
+        } else if (msg.message?.interactiveResponseMessage) {
+            buttonQuotedId = msg.message.interactiveResponseMessage.nativeFlowResponseMessage?.id;
+        }
+        
+        // If we couldn't get a quoted ID, try the standard location
+        if (!buttonQuotedId) {
+            buttonQuotedId = quotedMessageId;
+        }
+        
+        console.log(`🔘 Button click with ID: ${buttonQuotedId}`);
+        
+        // Find which session this button click belongs to
+        // For button clicks, we might need to search by the button ID or by the quoted message
+        let sessionInfo = null;
+        
+        if (buttonQuotedId) {
+            sessionInfo = sessionManager.findSessionByRepliedMessage(buttonQuotedId, sender);
+        }
+        
+        // If still no session found, try to find by the most recent button session
+        if (!sessionInfo) {
+            // Get all sessions for this user
+            const userSessions = sessionManager.getUserSessions(sender, from);
+            // Find the most recent button session
+            const buttonSessions = userSessions.filter(s => s.command === 'button');
+            if (buttonSessions.length > 0) {
+                const mostRecent = buttonSessions.sort((a, b) => b.lastActivity - a.lastActivity)[0];
+                sessionInfo = {
+                    session: mostRecent,
+                    pendingInfo: { command: 'button' }
+                };
+                console.log(`🔘 Using most recent button session: ${mostRecent.id}`);
+            }
+        }
         
         if (sessionInfo) {
-            // Found a session - this reply belongs to it
             const { session, pendingInfo } = sessionInfo;
             
             // Check if session exists (not expired)
             const sessionExists = sessionManager.isSessionActive(session.id);
             
             if (!sessionExists) {
-                console.log(`⚠️ Reply to expired session - ignoring`);
+                console.log(`⚠️ Button click on expired session - ignoring`);
                 return;
             }
             
-            console.log(`💬 REPLY routed to CORRECT session: ${pendingInfo.command} (step ${session.step})`);
+            console.log(`💬 Button click routed to session: ${pendingInfo.command} (step ${session.step})`);
             
-            // IMPORTANT: Activate this session and freeze others
+            // Activate this session
             sessionManager.activateSession(sender, from, session.id);
             
-            // Get the command that owns this session
             const sessionCommand = commands.get(pendingInfo.command);
             
             if (sessionCommand && typeof sessionCommand.handleSession === 'function') {
@@ -816,7 +852,57 @@ const handleMessage = async (sock, msg) => {
                     isAdmin: await isAdmin(sock, sender, from, groupMetadata),
                     isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
                     isMod: isMod(sender),
-                    isButtonClick: isButtonClick, // Pass whether this is a button click
+                    isButtonClick: true, // This is definitely a button click
+                    reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+                    react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
+                });
+                
+                if (handled) {
+                    return; // Message handled by session
+                }
+            }
+        } else {
+            console.log(`⚠️ Button click but no session found - ignoring`);
+            return;
+        }
+    }
+
+    // If not a button click, check for regular replies
+    if (quotedMessageId && !isButtonClick) {
+        // This is a REGULAR REPLY to some message
+        console.log(`🔍 Checking reply to message ID: ${quotedMessageId}`);
+        
+        const sessionInfo = sessionManager.findSessionByRepliedMessage(quotedMessageId, sender);
+        
+        if (sessionInfo) {
+            const { session, pendingInfo } = sessionInfo;
+            
+            // Check if session exists (not expired)
+            const sessionExists = sessionManager.isSessionActive(session.id);
+            
+            if (!sessionExists) {
+                console.log(`⚠️ Reply to expired session - ignoring`);
+                return;
+            }
+            
+            console.log(`💬 REPLY routed to CORRECT session: ${pendingInfo.command} (step ${session.step})`);
+            
+            // Activate this session
+            sessionManager.activateSession(sender, from, session.id);
+            
+            const sessionCommand = commands.get(pendingInfo.command);
+            
+            if (sessionCommand && typeof sessionCommand.handleSession === 'function') {
+                const handled = await sessionCommand.handleSession(sock, msg, session, {
+                    from,
+                    sender,
+                    isGroup,
+                    groupMetadata,
+                    isOwner: isOwner(sender),
+                    isAdmin: await isAdmin(sock, sender, from, groupMetadata),
+                    isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
+                    isMod: isMod(sender),
+                    isButtonClick: false, // This is a regular reply
                     reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
                     react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
                 });
@@ -831,7 +917,7 @@ const handleMessage = async (sock, msg) => {
         }
     }
 
-    // If we get here, it's NOT a reply to any bot message
+    // If we get here, it's NOT a reply or button click
     const isCommand = body.startsWith(config.prefix);
 
     if (!isCommand) {
