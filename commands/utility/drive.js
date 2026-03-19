@@ -115,7 +115,7 @@ module.exports = {
                 const handled = await handleButtonClick(sock, msg, session, context, buttonId, buttonText);
                 if (handled) {
                     console.log('✅ Button click handled, returning early to prevent further processing');
-                    return true; // CRITICAL: Return early to prevent further processing
+                    return true;
                 }
             }
         }
@@ -174,6 +174,8 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
     if (session.step === 1) {
         if (buttonId?.includes('url')) {
             console.log('✅ URL button clicked, updating to step 2');
+            // Force update the session
+            session.step = 2;
             sessionManager.updateSession(sender, from, { step: 2 });
             const sentMsg = await reply(`🔗 *Upload from URL*\n\nPlease send me the direct download link.\n\nExample: \`https://example.com/file.zip\``);
             sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'drive');
@@ -181,6 +183,8 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
             
         } else if (buttonId?.includes('media')) {
             console.log('✅ Media button clicked, updating to step 3');
+            // Force update the session
+            session.step = 3;
             sessionManager.updateSession(sender, from, { step: 3 });
             const sentMsg = await reply(`📎 *Upload from Media*\n\nPlease send me the file (image, video, document, audio)`);
             sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'drive');
@@ -269,6 +273,7 @@ async function handleMediaInput(sock, msg, session, context) {
             // Check if it's a URL
             if (text.startsWith('http://') || text.startsWith('https://')) {
                 console.log('📝 Received URL instead of media, redirecting to URL handler');
+                session.step = 2;
                 sessionManager.updateSession(sender, from, { step: 2 });
                 return await handleUrlInput(sock, msg, session, context);
             }
