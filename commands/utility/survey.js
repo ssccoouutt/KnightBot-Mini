@@ -10,13 +10,13 @@ const {
     sendInteractiveMessage 
 } = giftedBtns;
 
-// Store AI mode state (from button.js)
+// Store AI mode state
 if (!global.aiMode) global.aiMode = new Map();
 
 module.exports = {
     name: 'survey',
     aliases: ['multisurvey', 'fullsurvey'],
-    description: 'Complete survey with buttons and media support',
+    description: 'Complete survey with all button types and media',
     usage: 'survey',
     category: 'utility',
     ownerOnly: false,
@@ -35,12 +35,12 @@ module.exports = {
         
         // Send welcome message with native buttons
         const buttons = [
-            { id: `survey_start_${Date.now()}`, text: '✅ Start Survey' },
-            { id: `survey_cancel_${Date.now()}`, text: '❌ Cancel' }
+            { id: `start_${Date.now()}`, text: '✅ Start Survey' },
+            { id: `cancel_${Date.now()}`, text: '❌ Cancel' }
         ];
         
         const sentMsg = await sendButtons(sock, from, {
-            text: '📋 *Welcome to the Complete Survey*\n\nThis survey supports:\n• Text input\n• Button selections\n• Images\n• Videos\n• Documents\n• Audio\n\nClick Start to begin!',
+            text: '📋 *Welcome to the Complete Survey*\n\nThis survey supports:\n• Text input\n• All button types\n• Images\n• Videos\n• Documents\n\nClick Start to begin!',
             footer: 'Multi-format Survey',
             buttons: buttons,
             aimode: global.aiMode.get(from) || false
@@ -57,11 +57,9 @@ module.exports = {
         const hasImage = !!msg.message?.imageMessage;
         const hasVideo = !!msg.message?.videoMessage;
         const hasDocument = !!msg.message?.documentMessage;
-        const hasAudio = !!msg.message?.audioMessage;
-        const hasSticker = !!msg.message?.stickerMessage;
-        const hasMedia = hasImage || hasVideo || hasDocument || hasAudio || hasSticker;
+        const hasMedia = hasImage || hasVideo || hasDocument;
         
-        // Get text from message (could be conversation or caption)
+        // Get text from message
         let text = '';
         if (msg.message?.conversation) {
             text = msg.message.conversation;
@@ -78,16 +76,15 @@ module.exports = {
         
         console.log(`📨 Survey session step ${session.step}: text="${text}", hasMedia=${hasMedia}, isButtonClick=${isButtonClick}`);
         
-        // Handle button clicks
+        // Handle button clicks FIRST
         if (isButtonClick) {
             return await handleButtonClick(sock, msg, session, context);
         }
         
         // Process based on current step
         switch (session.step) {
-            case 1: // Welcome screen - waiting for Start/Cancel buttons
-                // This should only be reached if button click wasn't handled
-                await reply('❌ Please use the buttons above to start or cancel the survey.');
+            case 1: // Welcome screen
+                await reply('❌ Please use the Start button to begin the survey.');
                 return true;
                 
             case 2: // Name input
@@ -96,28 +93,37 @@ module.exports = {
             case 3: // Age input
                 return await handleAgeInput(sock, msg, session, context);
                 
-            case 4: // Gender selection (buttons)
+            case 4: // Gender selection (native buttons)
                 return await handleGenderSelection(sock, msg, session, context);
                 
             case 5: // Favorite color (text)
                 return await handleColorInput(sock, msg, session, context);
                 
-            case 6: // Country selection (list)
+            case 6: // Country selection (list button)
                 return await handleCountrySelection(sock, msg, session, context);
                 
-            case 7: // Photo upload
+            case 7: // URL button demo
+                return await handleUrlButton(sock, msg, session, context);
+                
+            case 8: // Call button demo
+                return await handleCallButton(sock, msg, session, context);
+                
+            case 9: // Copy button demo
+                return await handleCopyButton(sock, msg, session, context);
+                
+            case 10: // Location button demo
+                return await handleLocationButton(sock, msg, session, context);
+                
+            case 11: // Photo upload
                 return await handlePhotoUpload(sock, msg, session, context);
                 
-            case 8: // Video upload (optional)
+            case 12: // Video upload (optional)
                 return await handleVideoUpload(sock, msg, session, context);
                 
-            case 9: // Document upload (optional)
+            case 13: // Document upload (optional)
                 return await handleDocumentUpload(sock, msg, session, context);
                 
-            case 10: // Audio upload (optional)
-                return await handleAudioUpload(sock, msg, session, context);
-                
-            case 11: // Final confirmation
+            case 14: // Final confirmation
                 return await handleFinalConfirmation(sock, msg, session, context);
                 
             default:
@@ -136,23 +142,42 @@ async function handleButtonClick(sock, msg, session, context) {
     let buttonId = null;
     let buttonText = null;
     
+    // Method 1: buttonsResponseMessage (native buttons)
     if (msg.message?.buttonsResponseMessage) {
         buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
         buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
-    } else if (msg.message?.listResponseMessage) {
-        buttonId = msg.message.listResponseMessage.singleSelectReply?.selectedRowId;
-        buttonText = msg.message.listResponseMessage.title;
-    } else if (msg.message?.interactiveResponseMessage) {
-        const nativeFlow = msg.message.interactiveResponseMessage.nativeFlowResponseMessage;
-        if (nativeFlow) {
+        console.log('✅ Native button click:', { buttonId, buttonText });
+    }
+    // Method 2: listResponseMessage (list buttons)
+    else if (msg.message?.listResponseMessage) {
+        const listReply = msg.message.listResponseMessage.singleSelectReply;
+        if (listReply) {
+            buttonId = listReply.selectedRowId;
+            buttonText = listReply.title || msg.message.listResponseMessage.title;
+        }
+        console.log('✅ List button click:', { buttonId, buttonText });
+    }
+    // Method 3: interactiveResponseMessage (interactive buttons)
+    else if (msg.message?.interactiveResponseMessage) {
+        const interactive = msg.message.interactiveResponseMessage;
+        if (interactive.nativeFlowResponseMessage) {
             try {
-                const params = JSON.parse(nativeFlow.paramsJson);
+                const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
                 buttonId = params.id;
                 buttonText = params.display_text;
+                console.log('✅ Interactive button click:', { buttonId, buttonText });
             } catch (e) {
                 console.error('Error parsing interactive response:', e);
             }
         }
+    }
+    
+    // Fallback to message text
+    if (!buttonId) {
+        buttonId = msg.message?.conversation || 
+                   msg.message?.extendedTextMessage?.text || 
+                   'unknown';
+        console.log('⚠️ Using text as buttonId:', buttonId);
     }
     
     console.log(`🔘 Button clicked: ID=${buttonId}, Text=${buttonText}`);
@@ -160,12 +185,11 @@ async function handleButtonClick(sock, msg, session, context) {
     // Handle based on current step
     switch (session.step) {
         case 1: // Start/Cancel buttons
-            if (buttonText?.includes('Start') || buttonId?.includes('start')) {
-                // Move to name input
+            if (buttonText?.toLowerCase().includes('start') || buttonId?.toLowerCase().includes('start')) {
                 sessionManager.updateSession(sender, from, { step: 2 });
-                const sentMsg = await reply(`📋 *Step 1/10:* What's your name?`);
+                const sentMsg = await reply(`📋 *Step 1/13:* What's your name?`);
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
-            } else if (buttonText?.includes('Cancel') || buttonId?.includes('cancel')) {
+            } else if (buttonText?.toLowerCase().includes('cancel') || buttonId?.toLowerCase().includes('cancel')) {
                 sessionManager.clearSession(session.id);
                 await reply('❌ Survey cancelled. You can start again with `.survey`');
             }
@@ -176,20 +200,209 @@ async function handleButtonClick(sock, msg, session, context) {
             sessionManager.updateSession(sender, from, {
                 answers: { ...session.data.answers, gender }
             });
-            
-            const sentMsg = await reply(`✅ Gender recorded: *${gender}*\n\nStep 5/10: What's your favorite color?`);
-            sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
+            const sentMsg1 = await reply(`✅ Gender recorded: *${gender}*\n\nStep 5/13: What's your favorite color?`);
+            sessionManager.addPendingMessage(sender, from, sentMsg1.key.id, 'survey');
             break;
             
-        case 6: // Country selection (list)
-            if (buttonId) {
-                const country = buttonId.replace('country_', '');
-                sessionManager.updateSession(sender, from, {
-                    answers: { ...session.data.answers, country }
-                });
+        case 6: // Country selection
+            let country = buttonId || buttonText || 'Unknown';
+            if (country.startsWith('country_')) {
+                country = country.replace('country_', '');
+            }
+            country = country.charAt(0).toUpperCase() + country.slice(1);
+            
+            sessionManager.updateSession(sender, from, {
+                answers: { ...session.data.answers, country }
+            });
+            
+            const buttons = [
+                { id: `url_demo_${Date.now()}`, text: '🔗 Try URL Button' },
+                { id: `skip_url_${Date.now()}`, text: '⏩ Skip' }
+            ];
+            
+            const sentMsg2 = await sendButtons(sock, from, {
+                text: `✅ Country selected: *${country}*\n\nStep 7/13: Let's try a URL button demo. Click below:`,
+                footer: 'URL Button Demo',
+                buttons: buttons,
+                aimode: global.aiMode.get(from) || false
+            }, {});
+            sessionManager.addPendingMessage(sender, from, sentMsg2.key.id, 'survey');
+            break;
+            
+        case 7: // URL button demo
+            if (buttonText?.includes('URL') || buttonId?.includes('url')) {
+                // Send actual URL button
+                const urlButtons = [{
+                    name: 'cta_url',
+                    buttonParamsJson: JSON.stringify({
+                        display_text: '🌐 Visit Google',
+                        url: 'https://google.com'
+                    })
+                }];
                 
-                const sentMsg = await reply(`✅ Country selected: *${country}*\n\nStep 7/10: Please send a photo of yourself (or type "skip")`);
+                const sentMsg = await sendButtons(sock, from, {
+                    text: '🔗 *URL Button Demo*\n\nClick the button below to open Google:',
+                    buttons: urlButtons,
+                    aimode: global.aiMode.get(from) || false
+                }, {});
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
+                
+                // Move to next step after a short delay
+                setTimeout(async () => {
+                    const nextButtons = [
+                        { id: `call_demo_${Date.now()}`, text: '📞 Try Call Button' },
+                        { id: `skip_call_${Date.now()}`, text: '⏩ Skip' }
+                    ];
+                    const nextMsg = await sendButtons(sock, from, {
+                        text: 'Step 8/13: Now try a call button demo:',
+                        footer: 'Call Button Demo',
+                        buttons: nextButtons,
+                        aimode: global.aiMode.get(from) || false
+                    }, {});
+                    sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
+                    sessionManager.updateSession(sender, from, { step: 8 });
+                }, 2000);
+            } else {
+                // Skip to next step
+                sessionManager.updateSession(sender, from, { step: 8 });
+                const nextButtons = [
+                    { id: `call_demo_${Date.now()}`, text: '📞 Try Call Button' },
+                    { id: `skip_call_${Date.now()}`, text: '⏩ Skip' }
+                ];
+                const nextMsg = await sendButtons(sock, from, {
+                    text: 'Step 8/13: Try a call button demo:',
+                    footer: 'Call Button Demo',
+                    buttons: nextButtons,
+                    aimode: global.aiMode.get(from) || false
+                }, {});
+                sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
+            }
+            break;
+            
+        case 8: // Call button demo
+            if (buttonText?.includes('Call') || buttonId?.includes('call')) {
+                // Send actual call button
+                const callButtons = [{
+                    name: 'cta_call',
+                    buttonParamsJson: JSON.stringify({
+                        display_text: '📞 Call Support',
+                        phone_number: '1234567890'
+                    })
+                }];
+                
+                const sentMsg = await sendButtons(sock, from, {
+                    text: '📞 *Call Button Demo*\n\nClick the button to call (demo):',
+                    buttons: callButtons,
+                    aimode: global.aiMode.get(from) || false
+                }, {});
+                sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
+                
+                setTimeout(async () => {
+                    const nextButtons = [
+                        { id: `copy_demo_${Date.now()}`, text: '📋 Try Copy Button' },
+                        { id: `skip_copy_${Date.now()}`, text: '⏩ Skip' }
+                    ];
+                    const nextMsg = await sendButtons(sock, from, {
+                        text: 'Step 9/13: Now try a copy button demo:',
+                        footer: 'Copy Button Demo',
+                        buttons: nextButtons,
+                        aimode: global.aiMode.get(from) || false
+                    }, {});
+                    sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
+                    sessionManager.updateSession(sender, from, { step: 9 });
+                }, 2000);
+            } else {
+                sessionManager.updateSession(sender, from, { step: 9 });
+                const nextButtons = [
+                    { id: `copy_demo_${Date.now()}`, text: '📋 Try Copy Button' },
+                    { id: `skip_copy_${Date.now()}`, text: '⏩ Skip' }
+                ];
+                const nextMsg = await sendButtons(sock, from, {
+                    text: 'Step 9/13: Try a copy button demo:',
+                    footer: 'Copy Button Demo',
+                    buttons: nextButtons,
+                    aimode: global.aiMode.get(from) || false
+                }, {});
+                sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
+            }
+            break;
+            
+        case 9: // Copy button demo
+            if (buttonText?.includes('Copy') || buttonId?.includes('copy')) {
+                // Send actual copy button
+                const copyButtons = [{
+                    name: 'cta_copy',
+                    buttonParamsJson: JSON.stringify({
+                        display_text: '📋 Copy Code',
+                        copy_code: 'SURVEY2024'
+                    })
+                }];
+                
+                const sentMsg = await sendButtons(sock, from, {
+                    text: '📋 *Copy Button Demo*\n\nClick the button to copy a code:',
+                    buttons: copyButtons,
+                    aimode: global.aiMode.get(from) || false
+                }, {});
+                sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
+                
+                setTimeout(async () => {
+                    const nextButtons = [
+                        { id: `location_demo_${Date.now()}`, text: '📍 Try Location Button' },
+                        { id: `skip_location_${Date.now()}`, text: '⏩ Skip' }
+                    ];
+                    const nextMsg = await sendButtons(sock, from, {
+                        text: 'Step 10/13: Now try a location button demo:',
+                        footer: 'Location Button Demo',
+                        buttons: nextButtons,
+                        aimode: global.aiMode.get(from) || false
+                    }, {});
+                    sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
+                    sessionManager.updateSession(sender, from, { step: 10 });
+                }, 2000);
+            } else {
+                sessionManager.updateSession(sender, from, { step: 10 });
+                const nextButtons = [
+                    { id: `location_demo_${Date.now()}`, text: '📍 Try Location Button' },
+                    { id: `skip_location_${Date.now()}`, text: '⏩ Skip' }
+                ];
+                const nextMsg = await sendButtons(sock, from, {
+                    text: 'Step 10/13: Try a location button demo:',
+                    footer: 'Location Button Demo',
+                    buttons: nextButtons,
+                    aimode: global.aiMode.get(from) || false
+                }, {});
+                sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
+            }
+            break;
+            
+        case 10: // Location button demo
+            if (buttonText?.includes('Location') || buttonId?.includes('location')) {
+                // Send actual location button
+                const locationButtons = [{
+                    name: 'cta_location',
+                    buttonParamsJson: JSON.stringify({
+                        display_text: '📍 View Map',
+                        latitude: 40.7128,
+                        longitude: -74.0060
+                    })
+                }];
+                
+                const sentMsg = await sendButtons(sock, from, {
+                    text: '📍 *Location Button Demo*\n\nClick to see New York location:',
+                    buttons: locationButtons,
+                    aimode: global.aiMode.get(from) || false
+                }, {});
+                sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
+                
+                setTimeout(async () => {
+                    const nextMsg = await reply(`Step 11/13: Now please send a photo (or type "skip"):`);
+                    sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
+                    sessionManager.updateSession(sender, from, { step: 11 });
+                }, 2000);
+            } else {
+                sessionManager.updateSession(sender, from, { step: 11 });
+                const nextMsg = await reply(`Step 11/13: Please send a photo (or type "skip"):`);
+                sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
             }
             break;
             
@@ -205,7 +418,6 @@ async function handleButtonClick(sock, msg, session, context) {
 async function handleNameInput(sock, msg, session, context) {
     const { from, sender, reply } = context;
     
-    // Get text
     let text = '';
     if (msg.message?.conversation) {
         text = msg.message.conversation;
@@ -224,7 +436,7 @@ async function handleNameInput(sock, msg, session, context) {
         step: 3
     });
     
-    const sentMsg = await reply(`👋 Nice to meet you, *${text}*!\n\nStep 3/10: How old are you?`);
+    const sentMsg = await reply(`👋 Nice to meet you, *${text}*!\n\nStep 3/13: How old are you?`);
     sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
     return true;
 }
@@ -232,7 +444,6 @@ async function handleNameInput(sock, msg, session, context) {
 async function handleAgeInput(sock, msg, session, context) {
     const { from, sender, reply } = context;
     
-    // Get text
     let text = '';
     if (msg.message?.conversation) {
         text = msg.message.conversation;
@@ -252,17 +463,17 @@ async function handleAgeInput(sock, msg, session, context) {
         step: 4
     });
     
-    // Send gender selection buttons
+    // Gender selection buttons
     const buttons = [
         { id: `gender_male_${Date.now()}`, text: '👨 Male' },
         { id: `gender_female_${Date.now()}`, text: '👩 Female' },
         { id: `gender_other_${Date.now()}`, text: '⚧ Other' },
-        { id: `gender_prefer_not_${Date.now()}`, text: '🔳 Prefer not to say' }
+        { id: `gender_prefer_not_${Date.now()}`, text: '🔳 Prefer not' }
     ];
     
     const sentMsg = await sendButtons(sock, from, {
-        text: `📊 Age recorded: *${age}*\n\nStep 4/10: Please select your gender:`,
-        footer: 'Select one option',
+        text: `📊 Age recorded: *${age}*\n\nStep 4/13: Select your gender:`,
+        footer: 'Gender Selection',
         buttons: buttons,
         aimode: global.aiMode.get(from) || false
     }, {});
@@ -274,7 +485,6 @@ async function handleAgeInput(sock, msg, session, context) {
 async function handleColorInput(sock, msg, session, context) {
     const { from, sender, reply } = context;
     
-    // Get text
     let text = '';
     if (msg.message?.conversation) {
         text = msg.message.conversation;
@@ -293,16 +503,16 @@ async function handleColorInput(sock, msg, session, context) {
         step: 6
     });
     
-    // Send country selection list
-    const countries = ['USA', 'UK', 'Canada', 'Australia', 'India', 'Pakistan', 'Other'];
-    const rows = countries.map((c, i) => ({
+    // Country selection list
+    const countries = ['USA', 'UK', 'Canada', 'Australia', 'India', 'Pakistan', 'UAE', 'Other'];
+    const rows = countries.map(c => ({
         id: `country_${c.toLowerCase()}`,
         title: c,
         description: `Select ${c}`
     }));
     
     const sentMsg = await sendInteractiveMessage(sock, from, {
-        text: `🎨 Favorite color: *${text}*\n\nStep 6/10: Select your country:`,
+        text: `🎨 Favorite color: *${text}*\n\nStep 6/13: Select your country:`,
         interactiveButtons: [{
             name: 'single_select',
             buttonParamsJson: JSON.stringify({
@@ -320,10 +530,8 @@ async function handleColorInput(sock, msg, session, context) {
 async function handlePhotoUpload(sock, msg, session, context) {
     const { from, sender, reply } = context;
     
-    // Check for image
     const hasImage = !!msg.message?.imageMessage;
     
-    // Get text (for "skip" command)
     let text = '';
     if (msg.message?.conversation) {
         text = msg.message.conversation;
@@ -332,27 +540,25 @@ async function handlePhotoUpload(sock, msg, session, context) {
     }
     text = text.trim().toLowerCase();
     
-    // Handle skip
     if (text === 'skip') {
         sessionManager.updateSession(sender, from, {
             answers: { ...session.data.answers, photo: 'skipped' },
-            step: 8
+            step: 12
         });
         
-        const sentMsg = await reply(`⏩ Photo skipped.\n\nStep 8/10: Would you like to upload a video? (send video or type "skip")`);
+        const sentMsg = await reply(`⏩ Photo skipped.\n\nStep 12/13: Send a video (or type "skip"):`);
         sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
         return true;
     }
     
     if (!hasImage) {
-        await reply(`❌ Please send an image photo or type "skip".`);
+        await reply(`❌ Please send an image or type "skip".`);
         return true;
     }
     
     await reply(`📸 Downloading your photo...`);
     
     try {
-        // Download image
         const stream = await downloadContentFromMessage(msg.message.imageMessage, 'image');
         const buffer = [];
         for await (const chunk of stream) {
@@ -360,15 +566,13 @@ async function handlePhotoUpload(sock, msg, session, context) {
         }
         const imageBuffer = Buffer.concat(buffer);
         
-        // Save to temp
         const tempDir = path.join(process.cwd(), 'temp');
         if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
         
-        const filename = `survey_photo_${sender.split('@')[0]}_${Date.now()}.jpg`;
+        const filename = `photo_${sender.split('@')[0]}_${Date.now()}.jpg`;
         const filepath = path.join(tempDir, filename);
         fs.writeFileSync(filepath, imageBuffer);
         
-        // Store in session
         const mediaFiles = session.data.mediaFiles || [];
         mediaFiles.push({
             type: 'photo',
@@ -378,15 +582,15 @@ async function handlePhotoUpload(sock, msg, session, context) {
         
         sessionManager.updateSession(sender, from, {
             mediaFiles,
-            step: 8
+            step: 12
         });
         
-        const sentMsg = await reply(`✅ Photo received! (${(imageBuffer.length/1024).toFixed(2)} KB)\n\nStep 8/10: Would you like to upload a video? (send video or type "skip")`);
+        const sentMsg = await reply(`✅ Photo received! (${(imageBuffer.length/1024).toFixed(2)} KB)\n\nStep 12/13: Send a video (or type "skip"):`);
         sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
         
     } catch (error) {
         console.error('Error downloading photo:', error);
-        await reply(`❌ Failed to download photo. Please try again or type "skip".`);
+        await reply(`❌ Failed to download photo. Try again or type "skip".`);
     }
     
     return true;
@@ -397,7 +601,6 @@ async function handleVideoUpload(sock, msg, session, context) {
     
     const hasVideo = !!msg.message?.videoMessage;
     
-    // Get text for "skip"
     let text = '';
     if (msg.message?.conversation) {
         text = msg.message.conversation;
@@ -409,10 +612,10 @@ async function handleVideoUpload(sock, msg, session, context) {
     if (text === 'skip') {
         sessionManager.updateSession(sender, from, {
             answers: { ...session.data.answers, video: 'skipped' },
-            step: 9
+            step: 13
         });
         
-        const sentMsg = await reply(`⏩ Video skipped.\n\nStep 9/10: Would you like to upload a document? (send document or type "skip")`);
+        const sentMsg = await reply(`⏩ Video skipped.\n\nStep 13/13: Send a document (or type "skip" to finish):`);
         sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
         return true;
     }
@@ -435,7 +638,7 @@ async function handleVideoUpload(sock, msg, session, context) {
         const tempDir = path.join(process.cwd(), 'temp');
         if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
         
-        const filename = `survey_video_${sender.split('@')[0]}_${Date.now()}.mp4`;
+        const filename = `video_${sender.split('@')[0]}_${Date.now()}.mp4`;
         const filepath = path.join(tempDir, filename);
         fs.writeFileSync(filepath, videoBuffer);
         
@@ -448,15 +651,15 @@ async function handleVideoUpload(sock, msg, session, context) {
         
         sessionManager.updateSession(sender, from, {
             mediaFiles,
-            step: 9
+            step: 13
         });
         
-        const sentMsg = await reply(`✅ Video received! (${(videoBuffer.length/1024/1024).toFixed(2)} MB)\n\nStep 9/10: Would you like to upload a document? (send document or type "skip")`);
+        const sentMsg = await reply(`✅ Video received! (${(videoBuffer.length/1024/1024).toFixed(2)} MB)\n\nStep 13/13: Send a document (or type "skip" to finish):`);
         sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
         
     } catch (error) {
         console.error('Error downloading video:', error);
-        await reply(`❌ Failed to download video. Please try again or type "skip".`);
+        await reply(`❌ Failed to download video. Try again or type "skip".`);
     }
     
     return true;
@@ -476,18 +679,15 @@ async function handleDocumentUpload(sock, msg, session, context) {
     text = text.trim().toLowerCase();
     
     if (text === 'skip') {
+        // Skip to final
         sessionManager.updateSession(sender, from, {
-            answers: { ...session.data.answers, document: 'skipped' },
-            step: 10
+            answers: { ...session.data.answers, document: 'skipped' }
         });
-        
-        const sentMsg = await reply(`⏩ Document skipped.\n\nStep 10/10: Would you like to upload audio? (send audio or type "skip")`);
-        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
-        return true;
+        return await handleFinalConfirmation(sock, msg, session, context);
     }
     
     if (!hasDocument) {
-        await reply(`❌ Please send a document or type "skip".`);
+        await reply(`❌ Please send a document or type "skip" to finish.`);
         return true;
     }
     
@@ -505,7 +705,7 @@ async function handleDocumentUpload(sock, msg, session, context) {
         if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
         
         const fileName = msg.message.documentMessage.fileName || `document_${Date.now()}.bin`;
-        const filepath = path.join(tempDir, `survey_doc_${sender.split('@')[0]}_${Date.now()}_${fileName}`);
+        const filepath = path.join(tempDir, `doc_${sender.split('@')[0]}_${Date.now()}_${fileName}`);
         fs.writeFileSync(filepath, docBuffer);
         
         const mediaFiles = session.data.mediaFiles || [];
@@ -517,86 +717,14 @@ async function handleDocumentUpload(sock, msg, session, context) {
         });
         
         sessionManager.updateSession(sender, from, {
-            mediaFiles,
-            step: 10
-        });
-        
-        const sentMsg = await reply(`✅ Document received! (${(docBuffer.length/1024).toFixed(2)} KB)\n\nStep 10/10: Would you like to upload audio? (send audio or type "skip")`);
-        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
-        
-    } catch (error) {
-        console.error('Error downloading document:', error);
-        await reply(`❌ Failed to download document. Please try again or type "skip".`);
-    }
-    
-    return true;
-}
-
-async function handleAudioUpload(sock, msg, session, context) {
-    const { from, sender, reply } = context;
-    
-    const hasAudio = !!msg.message?.audioMessage;
-    
-    let text = '';
-    if (msg.message?.conversation) {
-        text = msg.message.conversation;
-    } else if (msg.message?.extendedTextMessage?.text) {
-        text = msg.message.extendedTextMessage.text;
-    }
-    text = text.trim().toLowerCase();
-    
-    if (text === 'skip') {
-        // Move to final step
-        sessionManager.updateSession(sender, from, {
-            answers: { ...session.data.answers, audio: 'skipped' },
-            step: 11
-        });
-        
-        return await handleFinalConfirmation(sock, msg, session, context);
-    }
-    
-    if (!hasAudio) {
-        await reply(`❌ Please send audio or type "skip" to finish.`);
-        return true;
-    }
-    
-    await reply(`🎵 Downloading your audio...`);
-    
-    try {
-        const stream = await downloadContentFromMessage(msg.message.audioMessage, 'audio');
-        const buffer = [];
-        for await (const chunk of stream) {
-            buffer.push(chunk);
-        }
-        const audioBuffer = Buffer.concat(buffer);
-        
-        const tempDir = path.join(process.cwd(), 'temp');
-        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-        
-        const isVoiceNote = msg.message.audioMessage.ptt;
-        const ext = isVoiceNote ? 'ogg' : 'mp3';
-        const filename = `survey_audio_${sender.split('@')[0]}_${Date.now()}.${ext}`;
-        const filepath = path.join(tempDir, filename);
-        fs.writeFileSync(filepath, audioBuffer);
-        
-        const mediaFiles = session.data.mediaFiles || [];
-        mediaFiles.push({
-            type: 'audio',
-            path: filepath,
-            isVoiceNote,
-            size: audioBuffer.length
-        });
-        
-        sessionManager.updateSession(sender, from, {
-            mediaFiles,
-            step: 11
+            mediaFiles
         });
         
         await handleFinalConfirmation(sock, msg, session, context);
         
     } catch (error) {
-        console.error('Error downloading audio:', error);
-        await reply(`❌ Failed to download audio. Please try again or type "skip".`);
+        console.error('Error downloading document:', error);
+        await reply(`❌ Failed to download document. Type "skip" to finish.`);
     }
     
     return true;
@@ -629,9 +757,6 @@ async function handleFinalConfirmation(sock, msg, session, context) {
     console.log('📊 SURVEY RESULTS:');
     console.log(JSON.stringify({ answers, mediaFiles }, null, 2));
     
-    // Clear session
-    sessionManager.clearSession(session.id);
-    
     // Clean up temp files
     if (mediaFiles && mediaFiles.length > 0) {
         mediaFiles.forEach(file => {
@@ -645,10 +770,13 @@ async function handleFinalConfirmation(sock, msg, session, context) {
         });
     }
     
-    // Send final message with completion buttons
+    // Clear session
+    sessionManager.clearSession(session.id);
+    
+    // Final buttons
     const buttons = [
-        { id: `survey_new_${Date.now()}`, text: '🔄 New Survey' },
-        { id: `survey_menu_${Date.now()}`, text: '📋 Main Menu' }
+        { id: `new_survey_${Date.now()}`, text: '🔄 New Survey' },
+        { id: `menu_${Date.now()}`, text: '📋 Main Menu' }
     ];
     
     await sendButtons(sock, from, {
