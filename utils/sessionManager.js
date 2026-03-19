@@ -292,16 +292,14 @@ function clearSession(sessionId) {
     // Check if this was the latest session
     const latestKey = `${userId}:${chatId}:latest`;
     const latest = latestSessionMap.get(latestKey);
+    
     if (latest && latest.sessionId === sessionId) {
+        // This was the latest session - remove it from latest map
         latestSessionMap.delete(latestKey);
         
-        // Find another session to activate
-        const userSessions = getUserSessions(userId, chatId);
-        if (userSessions.length > 0) {
-            // Activate the most recent session
-            const newLatest = userSessions.sort((a, b) => b.lastActivity - a.lastActivity)[0];
-            activateSession(userId, chatId, newLatest.id);
-        }
+        // DO NOT automatically activate another session
+        // Let the user decide which session to continue by replying
+        console.log(`📭 No active session remaining for ${userId} - user must start a new command or reply to an old session`);
     }
 }
 
