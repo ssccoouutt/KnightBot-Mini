@@ -1,26 +1,22 @@
 const config = require('../../config');
-const sessionManager = require('../../utils/sessionManager');
 const GoogleDrive = require('../../utils/googleDrive');
-const giftedBtns = require('gifted-btns');
+const path = require('path');
+const fs = require('fs');
 
-const { sendButtons } = giftedBtns;
-const FORCE_AI_MODE = true;
-
-// Your specific file ID
-const FILE_ID = "1NCIWtN_OoToORJ18XPC-1M6zQC8nFRr6";
+// Your new file ID from the link
+// https://drive.google.com/file/d/1bK0_FSna8KzX-XgvlVlfHA9Al2M385qV/view
+const FILE_ID = "1bK0_FSna8KzX-XgvlVlfHA9Al2M385qV";
 
 module.exports = {
     name: 'editor',
     aliases: ['edit', 'append', 'timestamp'],
-    description: 'Edit a Google Drive text file',
-    usage: 'editor [read|append|clear|status]',
+    description: 'Append current time to the activity log file',
+    usage: 'editor',
     category: 'utility',
     ownerOnly: false,
 
     async execute(sock, msg, args, context) {
         const { from, sender, reply, react } = context;
-        
-        const subCommand = args[0]?.toLowerCase() || 'append';
         
         await react('⏳');
         
@@ -34,81 +30,37 @@ module.exports = {
                 timeStyle: 'medium'
             });
             
+            // Read current content
             let currentContent = '';
-            let result;
-            
-            switch (subCommand) {
-                case 'read':
-                case 'view':
-                    // Just read and display the file
-                    currentContent = await drive.readTextFile(FILE_ID);
-                    await reply(
-                        `📄 *File Content*\n\n` +
-                        `\`\`\`\n${currentContent || '(empty)'}\n\`\`\``
-                    );
-                    break;
-                    
-                case 'append':
-                case 'add':
-                case '':
-                    // Append timestamp
-                    try {
-                        currentContent = await drive.readTextFile(FILE_ID);
-                    } catch {
-                        currentContent = '';
-                    }
-                    
-                    const newContent = currentContent + 
-                        `\n[${timeString}] - Editor command executed`;
-                    
-                    result = await drive.editTextFile(FILE_ID, newContent);
-                    
-                    await reply(
-                        `✅ *Timestamp Added*\n\n` +
-                        `📝 *Appended:* \`${timeString}\`\n` +
-                        `🔗 ${result.viewLink}`
-                    );
-                    break;
-                    
-                case 'clear':
-                case 'reset':
-                    // Clear the file and start fresh
-                    const freshContent = `📝 File Edit History\nCreated: ${timeString}\n\n`;
-                    result = await drive.editTextFile(FILE_ID, freshContent);
-                    
-                    await reply(
-                        `🔄 *File Reset*\n\n` +
-                        `📝 Created new history log\n` +
-                        `🔗 ${result.viewLink}`
-                    );
-                    break;
-                    
-                case 'status':
-                    // Show file info
-                    const token = await drive.getAccessToken();
-                    const axios = require('axios');
-                    
-                    const response = await axios.get(`https://www.googleapis.com/drive/v3/files/${FILE_ID}`, {
-                        headers: { 'Authorization': `Bearer ${token}` },
-                        params: { fields: 'name, size, createdTime, modifiedTime, webViewLink' }
-                    });
-                    
-                    const fileInfo = response.data;
-                    const sizeKB = (fileInfo.size / 1024).toFixed(2);
-                    
-                    await reply(
-                        `📁 *File Information*\n\n` +
-                        `📌 *Name:* ${fileInfo.name}\n` +
-                        `📦 *Size:* ${sizeKB} KB\n` +
-                        `📅 *Created:* ${new Date(fileInfo.createdTime).toLocaleString()}\n` +
-                        `✏️ *Modified:* ${new Date(fileInfo.modifiedTime).toLocaleString()}\n` +
-                        `🔗 ${fileInfo.webViewLink}`
-                    );
-                    break;
-                    
-                default:
-                    await reply(`❌ Unknown command. Use: \`editor [read|append|clear|status]\``);
+            try {
+                currentContent = await drive.readTextFile(FILE_ID);
+                console.log(`📖 Read ${currentContent.split('\n').length} lines`);
+            } catch (readError) {
+                console.log('File read error:', readError.message);
+                currentContent = '📝 Activity Log\n\n';
             }
+            
+            // Create new entry
+            const userInfo = msg.key.participant || msg.key.remoteJid;
+            const userNumber = userInfo.split('@')[0];
+            
+            const newEntry = `[${timeString}] - Editor command executed by ${userNumber}`;
+            const newContent = currentContent + '\n' + newEntry;
+            
+            // Update file (preserves ID)
+            const result = await drive.editTextFile(FILE_ID, newContent);
+            
+            // Show preview of last few entries
+            const lines = newContent.split('\n');
+            const lastEntries = lines.slice(-5).join('\n');
+            
+            await reply(
+                `✅ *Activity Log Updated!*\n\n` +
+                `📝 *New Entry:*\n\`${newEntry}\`\n\n` +
+                `📋 *Last 5 Entries:*\n\`\`\`\n${lastEntries}\n\`\`\`\n\n` +
+                `📁 *File:* ${result.name}\n` +
+                `🔗 ${result.viewLink}`
+            );
             
             await react('✅');
             
