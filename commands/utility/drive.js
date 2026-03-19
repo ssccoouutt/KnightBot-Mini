@@ -3,6 +3,7 @@ const sessionManager = require('../../utils/sessionManager');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const FormData = require('form-data');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 const giftedBtns = require('gifted-btns');
 
@@ -11,7 +12,7 @@ const {
     sendInteractiveMessage 
 } = giftedBtns;
 
-// Google Drive API Configuration
+// Google Drive API Configuration - EXACTLY like Python script
 const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download";
 const UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
 
@@ -67,14 +68,12 @@ module.exports = {
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, react, isButtonClick } = context;
         
-        // Log what we received
         console.log(`📨 Drive session handling - isButtonClick from context: ${isButtonClick}`);
         
         // Get the button ID from the message if this is a button click
         let buttonId = null;
         let buttonText = null;
         
-        // EXACT same extraction as survey.js
         if (isButtonClick) {
             // Extract button ID based on message type
             if (msg.message?.buttonsResponseMessage) {
@@ -135,7 +134,7 @@ module.exports = {
         
         console.log(`📨 Drive session step ${session.step}: text="${text}", hasMedia=${hasMedia}, isButtonClick=${isButtonClick}, buttonId=${buttonId}`);
         
-        // Handle button clicks based on current step - EXACT same as survey.js
+        // Handle button clicks based on current step
         if (isButtonClick && buttonId) {
             return await handleButtonClick(sock, msg, session, context, buttonId, buttonText);
         }
@@ -319,12 +318,13 @@ async function handleMediaInput(sock, msg, session, context) {
 }
 
 // ==================== GOOGLE DRIVE UPLOAD PROCESSOR ====================
+// EXACTLY like the Python script logic
 async function processUpload(fileUrl, filePath, customFilename = null) {
     let tokenFilename = null;
     let localFilename = null;
     
     try {
-        // Step 1: Download token.json from Google Drive
+        // Step 1: Download token.json from Google Drive - EXACTLY like Python
         console.log('📥 Downloading token.json...');
         const tokenResponse = await axios({
             method: 'GET',
@@ -343,16 +343,16 @@ async function processUpload(fileUrl, filePath, customFilename = null) {
             tokenWriter.on('error', reject);
         });
         
-        // Load token data
+        // Load token data - EXACTLY like Python
         const tokenData = JSON.parse(fs.readFileSync(tokenFilename, 'utf8'));
         console.log('✅ Token loaded successfully');
         
-        // Check if token is expired
+        // Check if token is expired - EXACTLY like Python
         const expiryDate = new Date(tokenData.expiry);
         if (new Date() > expiryDate) {
             console.log('🔄 Token expired, refreshing...');
             
-            // Refresh token
+            // Refresh token - EXACTLY like Python
             const refreshData = {
                 client_id: tokenData.client_id,
                 client_secret: tokenData.client_secret,
@@ -377,13 +377,32 @@ async function processUpload(fileUrl, filePath, customFilename = null) {
             // Download from URL
             console.log(`📥 Downloading file from: ${fileUrl}`);
             
-            // Extract filename from URL
+            // Extract filename from URL - EXACTLY like Python
             filename = fileUrl.split('/').pop().split('?')[0];
             if (!filename || filename === '' || !filename.includes('.')) {
-                filename = `file_${Date.now()}.bin`;
+                // Try to get filename from Content-Disposition - EXACTLY like Python
+                const headResponse = await axios({
+                    method: 'HEAD',
+                    url: fileUrl,
+                    timeout: 10000,
+                    maxRedirects: 5
+                }).catch(() => ({ headers: {} }));
+                
+                const contentDisposition = headResponse.headers['content-disposition'];
+                if (contentDisposition) {
+                    const match = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+                    if (match) filename = match[1].replace(/['"]/g, '');
+                }
+                
+                if (!filename || filename === '' || !filename.includes('.')) {
+                    filename = `file_${Date.now()}.bin`;
+                }
             }
             
-            // Download file
+            // Download file - EXACTLY like Python (streaming)
+            localFilename = path.join(process.cwd(), 'temp', `upload_${Date.now()}_${filename}`);
+            const fileStream = fs.createWriteStream(localFilename);
+            
             const fileResponse = await axios({
                 method: 'GET',
                 url: fileUrl,
@@ -391,16 +410,6 @@ async function processUpload(fileUrl, filePath, customFilename = null) {
                 timeout: 300000, // 5 minutes timeout
                 maxRedirects: 5
             });
-            
-            // Try to get filename from Content-Disposition
-            const contentDisposition = fileResponse.headers['content-disposition'];
-            if (contentDisposition) {
-                const match = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
-                if (match) filename = match[1].replace(/['"]/g, '');
-            }
-            
-            localFilename = path.join(process.cwd(), 'temp', `upload_${Date.now()}_${filename}`);
-            const fileStream = fs.createWriteStream(localFilename);
             
             let downloadedSize = 0;
             fileResponse.data.on('data', (chunk) => {
@@ -427,22 +436,33 @@ async function processUpload(fileUrl, filePath, customFilename = null) {
         const fileSizeMB = (fileSize / (1024 * 1024)).toFixed(2);
         console.log(`✅ File downloaded: ${filename} (${fileSizeMB} MB)`);
         
-        // Step 3: Upload to Google Drive
+        // Step 3: Upload to Google Drive - EXACTLY like Python script
         console.log('📤 Uploading to Google Drive...');
         
+        // Create form data - EXACTLY like Python's files parameter
         const formData = new FormData();
+        
+        // Metadata part - EXACTLY like Python's {"data": ("metadata", json.dumps(metadata), "application/json")}
         const metadata = {
             name: filename,
             parents: ["root"]
         };
+        formData.append('metadata', JSON.stringify(metadata), {
+            contentType: 'application/json',
+            filename: 'metadata'
+        });
         
-        formData.append('metadata', JSON.stringify(metadata));
-        formData.append('file', fs.createReadStream(localFilename));
+        // File part - EXACTLY like Python's {"file": (filename, open(filename, "rb"))}
+        formData.append('file', fs.createReadStream(localFilename), {
+            filename: filename,
+            contentType: 'application/octet-stream'
+        });
         
+        // Upload - EXACTLY like Python's requests.post
         const uploadResponse = await axios.post(UPLOAD_URL, formData, {
             headers: {
                 'Authorization': `Bearer ${tokenData.token}`,
-                'Content-Type': 'multipart/form-data'
+                ...formData.getHeaders()
             },
             maxContentLength: Infinity,
             maxBodyLength: Infinity
@@ -450,7 +470,7 @@ async function processUpload(fileUrl, filePath, customFilename = null) {
         
         const result = uploadResponse.data;
         
-        // Success message
+        // Success message - EXACTLY like Python
         const successMessage = 
             `✅ *File Successfully Uploaded to Google Drive!*\n\n` +
             `📁 *File Name:* ${filename}\n` +
@@ -465,10 +485,14 @@ async function processUpload(fileUrl, filePath, customFilename = null) {
         
     } catch (error) {
         console.error('Upload error:', error);
+        if (error.response) {
+            console.error('Response data:', error.response.data);
+            console.error('Response status:', error.response.status);
+        }
         throw new Error(`Upload failed: ${error.message}`);
         
     } finally {
-        // Clean up temp files
+        // Clean up temp files - EXACTLY like Python
         if (tokenFilename && fs.existsSync(tokenFilename)) {
             fs.unlinkSync(tokenFilename);
         }
