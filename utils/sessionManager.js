@@ -20,7 +20,7 @@ function generateSessionId(userId, chatId) {
 }
 
 /**
- * Create a new session (does NOT delete old ones)
+ * Create a new session (becomes the latest active session)
  */
 function createSession(userId, chatId, command, data = {}) {
     const sessionId = generateSessionId(userId, chatId);
@@ -35,18 +35,29 @@ function createSession(userId, chatId, command, data = {}) {
         step: 1,
         createdAt: Date.now(),
         lastActivity: Date.now(),
+        isActive: true, // New sessions are active
+        isFrozen: false, // Not frozen
         pendingMessages: [] // Store bot message IDs waiting for response
     };
     
     sessions.set(sessionId, session);
     
-    // Update latest session
+    // Mark all other sessions as frozen (inactive)
+    for (const [id, s] of sessions.entries()) {
+        if (s.userId === userId && s.chatId === chatId && s.id !== sessionId) {
+            s.isActive = false;
+            s.isFrozen = true;
+            console.log(`❄️ Session ${s.id} frozen (command: ${s.command})`);
+        }
+    }
+    
+    // Set as latest session
     latestSessionMap.set(latestKey, {
         sessionId: sessionId,
         timestamp: Date.now()
     });
     
-    console.log(`✅ Created session ${sessionId} for ${userId} in ${chatId} (command: ${command})`);
+    console.log(`✅ Created ACTIVE session ${sessionId} for ${userId} (command: ${command})`);
     return session;
 }
 
@@ -62,6 +73,12 @@ function addPendingMessage(userId, chatId, messageId, command) {
     
     const session = sessions.get(latest.sessionId);
     if (!session) return null;
+    
+    // Only add to active sessions
+    if (!session.isActive) {
+        console.log(`⚠️ Cannot add message to frozen session ${session.id}`);
+        return null;
+    }
     
     session.pendingMessages.push({
         messageId,
@@ -100,7 +117,7 @@ function findSessionByRepliedMessage(messageId, userId) {
         if (session.pendingMessages && Array.isArray(session.pendingMessages)) {
             const found = session.pendingMessages.find(p => p && p.messageId === messageId);
             if (found) {
-                console.log(`✅ Found match in session: ${session.command} (${sessionId})`);
+                console.log(`✅ Found match in session: ${session.command} (${sessionId}) - Active: ${session.isActive}, Frozen: ${session.isFrozen}`);
                 foundSessions.push({
                     session,
                     pendingInfo: found
@@ -116,6 +133,40 @@ function findSessionByRepliedMessage(messageId, userId) {
     
     console.log(`❌ No session found for message ID ${messageId}`);
     return null;
+}
+
+/**
+ * Activate a specific session (make it the active one, freeze others)
+ */
+function activateSession(userId, chatId, sessionId) {
+    const latestKey = `${userId}:${chatId}:latest`;
+    const targetSession = sessions.get(sessionId);
+    
+    if (!targetSession) return null;
+    
+    // Mark all other sessions as frozen
+    for (const [id, s] of sessions.entries()) {
+        if (s.userId === userId && s.chatId === chatId) {
+            if (s.id === sessionId) {
+                s.isActive = true;
+                s.isFrozen = false;
+                s.lastActivity = Date.now();
+                console.log(`✅ Session ${s.id} activated (command: ${s.command})`);
+            } else {
+                s.isActive = false;
+                s.isFrozen = true;
+                console.log(`❄️ Session ${s.id} frozen (command: ${s.command})`);
+            }
+        }
+    }
+    
+    // Set as latest session
+    latestSessionMap.set(latestKey, {
+        sessionId: sessionId,
+        timestamp: Date.now()
+    });
+    
+    return targetSession;
 }
 
 /**
@@ -144,7 +195,7 @@ function getLatestSession(userId, chatId) {
 }
 
 /**
- * Get all active sessions for a user
+ * Get all active sessions for a user (for debugging)
  */
 function getUserSessions(userId, chatId) {
     const userSessions = [];
@@ -177,6 +228,12 @@ function updateSession(userId, chatId, data) {
         return null;
     }
     
+    // Only update active sessions
+    if (!session.isActive) {
+        console.log(`⚠️ Cannot update frozen session ${session.id}`);
+        return null;
+    }
+    
     session.data = { ...session.data, ...data };
     session.step++;
     session.lastActivity = Date.now();
@@ -191,28 +248,56 @@ function updateSession(userId, chatId, data) {
 }
 
 /**
+ * Update session activity (without changing step)
+ */
+function updateSessionActivity(sessionId) {
+    const session = sessions.get(sessionId);
+    if (!session) return null;
+    
+    session.lastActivity = Date.now();
+    return session;
+}
+
+/**
+ * Set a session as the latest (without activating it)
+ */
+function setAsLatestSession(userId, chatId, sessionId) {
+    const latestKey = `${userId}:${chatId}:latest`;
+    const session = sessions.get(sessionId);
+    
+    if (!session) return null;
+    
+    latestSessionMap.set(latestKey, {
+        sessionId: sessionId,
+        timestamp: Date.now()
+    });
+    
+    return session;
+}
+
+/**
  * Clear a specific session
  */
 function clearSession(sessionId) {
     const session = sessions.get(sessionId);
     if (!session) return;
     
+    const { userId, chatId } = session;
+    
     sessions.delete(sessionId);
     
     // Check if this was the latest session
-    const latestKey = `${session.userId}:${session.chatId}:latest`;
+    const latestKey = `${userId}:${chatId}:latest`;
     const latest = latestSessionMap.get(latestKey);
     if (latest && latest.sessionId === sessionId) {
         latestSessionMap.delete(latestKey);
         
-        // Set new latest session if any exist
-        const userSessions = getUserSessions(session.userId, session.chatId);
+        // Find another session to activate
+        const userSessions = getUserSessions(userId, chatId);
         if (userSessions.length > 0) {
+            // Activate the most recent session
             const newLatest = userSessions.sort((a, b) => b.lastActivity - a.lastActivity)[0];
-            latestSessionMap.set(latestKey, {
-                sessionId: newLatest.id,
-                timestamp: newLatest.lastActivity
-            });
+            activateSession(userId, chatId, newLatest.id);
         }
     }
 }
@@ -225,8 +310,7 @@ function clearLatestSession(userId, chatId) {
     const latest = latestSessionMap.get(latestKey);
     
     if (latest) {
-        sessions.delete(latest.sessionId);
-        latestSessionMap.delete(latestKey);
+        clearSession(latest.sessionId);
     }
 }
 
@@ -249,18 +333,30 @@ function isSessionActive(sessionId) {
         return false;
     }
     
-    return true;
+    return session.isActive;
+}
+
+/**
+ * Check if a session is frozen
+ */
+function isSessionFrozen(sessionId) {
+    const session = sessions.get(sessionId);
+    return session ? session.isFrozen : false;
 }
 
 module.exports = {
     createSession,
     addPendingMessage,
     findSessionByRepliedMessage,
+    activateSession,
     getLatestSession,
     getUserSessions,
     updateSession,
+    updateSessionActivity,
+    setAsLatestSession,
     clearSession,
     clearLatestSession,
     hasActiveSession,
-    isSessionActive
+    isSessionActive,
+    isSessionFrozen
 };
