@@ -783,9 +783,10 @@ const handleMessage = async (sock, msg) => {
             const { session, pendingInfo } = sessionInfo;
             
             // Check if this session is still active (not expired)
-            const isActive = sessionManager.isSessionActive(session.id);
+            // isSessionActive returns true for BOTH active AND frozen sessions that haven't timed out
+            const sessionExists = sessionManager.isSessionActive(session.id);
             
-            if (!isActive) {
+            if (!sessionExists) {
                 // Session expired - ignore completely
                 console.log(`⚠️ Reply to expired session - ignoring`);
                 return; // Don't process further
