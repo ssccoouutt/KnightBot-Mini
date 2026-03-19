@@ -53,24 +53,24 @@ module.exports = {
                 break;
                 
             case 2:
-                const age = parseInt(text);
-                if (isNaN(age) || age < 1 || age > 120) {
+                const userAge = parseInt(text);  // Changed from 'age' to 'userAge'
+                if (isNaN(userAge) || userAge < 1 || userAge > 120) {
                     await reply('❌ Please enter a valid age (1-120).');
                     return true;
                 }
                 
                 sessionManager.updateSession(sender, from, { 
-                    answers: { ...session.data.answers, age }
+                    answers: { ...session.data.answers, age: userAge }  // Store as 'age' in answers
                 });
                 
-                const sentMsg2 = await reply(`📊 Age recorded: *${age}*\n\nStep 3/3: What's your favorite color?`);
+                const sentMsg2 = await reply(`📊 Age recorded: *${userAge}*\n\nStep 3/3: What's your favorite color?`);
                 sessionManager.addPendingMessage(sender, from, sentMsg2.key.id, this.name);
                 break;
                 
             case 3:
-                const { name, age } = session.data.answers;
+                const { name, age } = session.data.answers;  // This is fine - 'age' comes from answers object
                 
-                // IMPORTANT: Clear the session when done!
+                // Clear the session when done
                 sessionManager.clearSession(session.id);
                 
                 await reply(`✅ *Survey Complete!*\n\n` +
