@@ -767,83 +767,94 @@ const handleMessage = async (sock, msg) => {
     const quotedMessageId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
 
     // Check if this is a BUTTON CLICK (special type of message)
-    // WhatsApp sends button clicks as messages with buttonsResponseMessage, listResponseMessage, or interactiveResponseMessage
     const isButtonClick = !!(msg.message?.buttonsResponseMessage || 
                             msg.message?.listResponseMessage || 
                             msg.message?.interactiveResponseMessage ||
-                            msg.message?.templateButtonReplyMessage ||
-                            msg.message?.buttonsMessage);
+                            msg.message?.templateButtonReplyMessage);
 
-    // Log for debugging
+    // IMPORTANT: Handle button clicks FIRST
     if (isButtonClick) {
         console.log(`🔘 BUTTON CLICK DETECTED!`);
-    }
-
-    // IMPORTANT: Handle button clicks FIRST - they are a type of reply
-    if (isButtonClick) {
-        // For button clicks, the quoted message ID might be in a different location
-        // Try to get it from various possible locations
-        let buttonQuotedId = null;
         
+        // Extract button ID based on message type
+        let buttonId = null;
+        let buttonText = null;
+        
+        // Method 1: buttonsResponseMessage (native buttons)
         if (msg.message?.buttonsResponseMessage) {
-            buttonQuotedId = msg.message.buttonsResponseMessage.selectedButtonId;
-        } else if (msg.message?.listResponseMessage) {
-            buttonQuotedId = msg.message.listResponseMessage.singleSelectReply?.selectedRowId;
-        } else if (msg.message?.interactiveResponseMessage) {
-            buttonQuotedId = msg.message.interactiveResponseMessage.nativeFlowResponseMessage?.id;
+            buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
+            buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
+            console.log('✅ Native button ID:', buttonId);
         }
-        
-        // If we couldn't get a quoted ID, try the standard location
-        if (!buttonQuotedId) {
-            buttonQuotedId = quotedMessageId;
+        // Method 2: listResponseMessage (list buttons)
+        else if (msg.message?.listResponseMessage) {
+            const listReply = msg.message.listResponseMessage.singleSelectReply;
+            if (listReply) {
+                buttonId = listReply.selectedRowId;
+                buttonText = listReply.title;
+            }
+            console.log('✅ List button ID:', buttonId);
         }
-        
-        console.log(`🔘 Button click with ID: ${buttonQuotedId}`);
-        
-        // Find which session this button click belongs to
-        // For button clicks, we might need to search by the button ID or by the quoted message
-        let sessionInfo = null;
-        
-        if (buttonQuotedId) {
-            sessionInfo = sessionManager.findSessionByRepliedMessage(buttonQuotedId, sender);
-        }
-        
-        // If still no session found, try to find by the most recent button session
-        if (!sessionInfo) {
-            // Get all sessions for this user
-            const userSessions = sessionManager.getUserSessions(sender, from);
-            // Find the most recent button session
-            const buttonSessions = userSessions.filter(s => s.command === 'button');
-            if (buttonSessions.length > 0) {
-                const mostRecent = buttonSessions.sort((a, b) => b.lastActivity - a.lastActivity)[0];
-                sessionInfo = {
-                    session: mostRecent,
-                    pendingInfo: { command: 'button' }
-                };
-                console.log(`🔘 Using most recent button session: ${mostRecent.id}`);
+        // Method 3: interactiveResponseMessage (interactive buttons)
+        else if (msg.message?.interactiveResponseMessage) {
+            const interactive = msg.message.interactiveResponseMessage;
+            if (interactive.nativeFlowResponseMessage) {
+                try {
+                    const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
+                    buttonId = params.id;
+                    buttonText = params.display_text;
+                    console.log('✅ Interactive button ID:', buttonId);
+                } catch (e) {
+                    console.error('Error parsing interactive response:', e);
+                }
             }
         }
+        // Method 4: templateButtonReplyMessage (template buttons)
+        else if (msg.message?.templateButtonReplyMessage) {
+            buttonId = msg.message.templateButtonReplyMessage.selectedId;
+            buttonText = msg.message.templateButtonReplyMessage.selectedDisplayText;
+            console.log('✅ Template button ID:', buttonId);
+        }
         
-        if (sessionInfo) {
-            const { session, pendingInfo } = sessionInfo;
+        if (buttonId) {
+            console.log(`🔘 Button ID: ${buttonId}, Text: ${buttonText}`);
             
-            // Check if session exists (not expired)
-            const sessionExists = sessionManager.isSessionActive(session.id);
+            // Try to find the session this button belongs to
+            // First, check if the button ID contains a session identifier
+            const idParts = buttonId.split('_');
+            let sessionFound = null;
+            let sessionCommand = null;
             
-            if (!sessionExists) {
-                console.log(`⚠️ Button click on expired session - ignoring`);
-                return;
+            // Method 1: Try to find by checking all sessions' pending messages
+            // This is the most reliable method
+            const sessionInfo = sessionManager.findSessionByRepliedMessage(quotedMessageId, sender);
+            
+            if (sessionInfo) {
+                sessionFound = sessionInfo.session;
+                sessionCommand = commands.get(sessionInfo.pendingInfo.command);
+                console.log(`✅ Found session via quoted message: ${sessionFound.command}`);
+            } else {
+                // Method 2: Try to find by scanning all user sessions
+                const userSessions = sessionManager.getUserSessions(sender, from);
+                console.log(`📊 Found ${userSessions.length} sessions for user`);
+                
+                // Look for a session that might be expecting this button
+                for (const sess of userSessions) {
+                    // Check if this session is for a command that handles buttons
+                    if (sess.command === 'button' || sess.command === 'survey') {
+                        sessionFound = sess;
+                        sessionCommand = commands.get(sess.command);
+                        console.log(`✅ Found matching session: ${sess.command}`);
+                        break;
+                    }
+                }
             }
             
-            console.log(`💬 Button click routed to session: ${pendingInfo.command} (step ${session.step})`);
-            
-            // Activate this session
-            sessionManager.activateSession(sender, from, session.id);
-            
-            const sessionCommand = commands.get(pendingInfo.command);
-            
-            if (sessionCommand && typeof sessionCommand.handleSession === 'function') {
-                const handled = await sessionCommand.handleSession(sock, msg, session, {
+            if (sessionFound && sessionCommand && typeof sessionCommand.handleSession === 'function') {
+                // Activate this session
+                sessionManager.activateSession(sender, from, sessionFound.id);
+                
+                const handled = await sessionCommand.handleSession(sock, msg, sessionFound, {
                     from,
                     sender,
                     isGroup,
@@ -852,24 +863,22 @@ const handleMessage = async (sock, msg) => {
                     isAdmin: await isAdmin(sock, sender, from, groupMetadata),
                     isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
                     isMod: isMod(sender),
-                    isButtonClick: true, // This is definitely a button click
+                    isButtonClick: true,
                     reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
                     react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
                 });
                 
                 if (handled) {
-                    return; // Message handled by session
+                    return;
                 }
+            } else {
+                console.log(`⚠️ No session found for button click`);
             }
-        } else {
-            console.log(`⚠️ Button click but no session found - ignoring`);
-            return;
         }
     }
 
     // If not a button click, check for regular replies
     if (quotedMessageId && !isButtonClick) {
-        // This is a REGULAR REPLY to some message
         console.log(`🔍 Checking reply to message ID: ${quotedMessageId}`);
         
         const sessionInfo = sessionManager.findSessionByRepliedMessage(quotedMessageId, sender);
@@ -877,7 +886,6 @@ const handleMessage = async (sock, msg) => {
         if (sessionInfo) {
             const { session, pendingInfo } = sessionInfo;
             
-            // Check if session exists (not expired)
             const sessionExists = sessionManager.isSessionActive(session.id);
             
             if (!sessionExists) {
@@ -885,9 +893,8 @@ const handleMessage = async (sock, msg) => {
                 return;
             }
             
-            console.log(`💬 REPLY routed to CORRECT session: ${pendingInfo.command} (step ${session.step})`);
+            console.log(`💬 REPLY routed to session: ${pendingInfo.command} (step ${session.step})`);
             
-            // Activate this session
             sessionManager.activateSession(sender, from, session.id);
             
             const sessionCommand = commands.get(pendingInfo.command);
@@ -902,13 +909,13 @@ const handleMessage = async (sock, msg) => {
                     isAdmin: await isAdmin(sock, sender, from, groupMetadata),
                     isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
                     isMod: isMod(sender),
-                    isButtonClick: false, // This is a regular reply
+                    isButtonClick: false,
                     reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
                     react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
                 });
                 
                 if (handled) {
-                    return; // Message handled by session
+                    return;
                 }
             }
         } else {
@@ -921,8 +928,6 @@ const handleMessage = async (sock, msg) => {
     const isCommand = body.startsWith(config.prefix);
 
     if (!isCommand) {
-        // This is a DIRECT MESSAGE
-        // Only get the latest session if it exists and is ACTIVE (not frozen)
         const latestSession = sessionManager.getLatestSession(sender, from);
         
         if (latestSession && !sessionManager.isSessionFrozen(latestSession.id)) {
@@ -946,12 +951,11 @@ const handleMessage = async (sock, msg) => {
                 });
                 
                 if (handled) {
-                    return; // Message handled by session
+                    return;
                 }
             }
         } else if (latestSession) {
             console.log(`💬 Latest session exists but is FROZEN - direct message ignored`);
-            // Let it fall through to normal message handling (no response)
         }
     }
     // ===== END UNIVERSAL SESSION DETECTION =====
