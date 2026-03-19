@@ -1,10 +1,13 @@
 const config = require('../../config');
 const sessionManager = require('../../utils/sessionManager');
+const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
+const fs = require('fs');
+const path = require('path');
 
 module.exports = {
     name: 'survey',
     aliases: [],
-    description: 'Take a quick survey',
+    description: 'Take a quick survey with media support',
     usage: 'survey',
     category: 'utility',
     ownerOnly: false,
@@ -28,22 +31,44 @@ module.exports = {
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, isButtonClick } = context;
         
-        const text = msg.message?.conversation || 
-                    msg.message?.extendedTextMessage?.text || 
-                    '';
+        // Check if message has media
+        const hasMedia = !!msg.message?.imageMessage || 
+                         !!msg.message?.videoMessage || 
+                         !!msg.message?.documentMessage || 
+                         !!msg.message?.audioMessage;
         
-        if (isButtonClick) {
-            await reply(`❌ Please type your response, don't use buttons for this command.`);
-            return true;
+        // Get text from message (could be caption or conversation)
+        let text = '';
+        if (msg.message?.conversation) {
+            text = msg.message.conversation;
+        } else if (msg.message?.extendedTextMessage?.text) {
+            text = msg.message.extendedTextMessage.text;
+        } else if (msg.message?.imageMessage?.caption) {
+            text = msg.message.imageMessage.caption;
+        } else if (msg.message?.videoMessage?.caption) {
+            text = msg.message.videoMessage.caption;
         }
         
-        if (!text) {
-            await reply('❌ Please enter a valid response.');
+        text = text.trim();
+        
+        if (isButtonClick) {
+            await reply(`❌ Please type your response or send media, don't use buttons for this command.`);
             return true;
         }
         
         switch (session.step) {
             case 1:
+                // Handle name (text only)
+                if (hasMedia) {
+                    await reply(`❌ Please type your name, don't send media for this step.`);
+                    return true;
+                }
+                
+                if (!text) {
+                    await reply('❌ Please enter your name.');
+                    return true;
+                }
+                
                 sessionManager.updateSession(sender, from, { 
                     answers: { ...session.data.answers, name: text }
                 });
@@ -53,35 +78,83 @@ module.exports = {
                 break;
                 
             case 2:
-                const userAge = parseInt(text);  // Changed from 'age' to 'userAge'
+                // Handle age (text only)
+                if (hasMedia) {
+                    await reply(`❌ Please type your age, don't send media for this step.`);
+                    return true;
+                }
+                
+                const userAge = parseInt(text);
                 if (isNaN(userAge) || userAge < 1 || userAge > 120) {
                     await reply('❌ Please enter a valid age (1-120).');
                     return true;
                 }
                 
                 sessionManager.updateSession(sender, from, { 
-                    answers: { ...session.data.answers, age: userAge }  // Store as 'age' in answers
+                    answers: { ...session.data.answers, age: userAge }
                 });
                 
-                const sentMsg2 = await reply(`📊 Age recorded: *${userAge}*\n\nStep 3/3: What's your favorite color?`);
+                const sentMsg2 = await reply(`📊 Age recorded: *${userAge}*\n\nStep 3/3: Send me a photo of your favorite thing!`);
                 sessionManager.addPendingMessage(sender, from, sentMsg2.key.id, this.name);
                 break;
                 
             case 3:
-                const { name, age } = session.data.answers;  // This is fine - 'age' comes from answers object
+                // Handle media (image)
+                if (!hasMedia) {
+                    await reply(`❌ Please send a photo (image) of your favorite thing.`);
+                    return true;
+                }
                 
-                // Clear the session when done
-                sessionManager.clearSession(session.id);
+                if (!msg.message?.imageMessage) {
+                    await reply(`❌ Please send an image file.`);
+                    return true;
+                }
                 
-                await reply(`✅ *Survey Complete!*\n\n` +
-                           `📋 *Your Answers:*\n` +
-                           `• Name: *${name}*\n` +
-                           `• Age: *${age}*\n` +
-                           `• Favorite Color: *${text}*`);
+                await reply(`📸 Thanks for the photo! Downloading...`);
+                
+                try {
+                    // Download the image
+                    const stream = await downloadContentFromMessage(msg.message.imageMessage, 'image');
+                    const buffer = [];
+                    for await (const chunk of stream) {
+                        buffer.push(chunk);
+                    }
+                    const imageBuffer = Buffer.concat(buffer);
+                    
+                    // Save to temp folder
+                    const tempDir = path.join(process.cwd(), 'temp');
+                    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+                    
+                    const filename = `survey_${sender.split('@')[0]}_${Date.now()}.jpg`;
+                    const filepath = path.join(tempDir, filename);
+                    fs.writeFileSync(filepath, imageBuffer);
+                    
+                    const { name, age } = session.data.answers;
+                    
+                    // Clear the session
+                    sessionManager.clearSession(session.id);
+                    
+                    // Send the image back with results
+                    await sock.sendMessage(from, {
+                        image: imageBuffer,
+                        caption: `✅ *Survey Complete!*\n\n` +
+                                `📋 *Your Answers:*\n` +
+                                `• Name: *${name}*\n` +
+                                `• Age: *${age}*\n` +
+                                `• Favorite Thing: (see attached photo)\n\n` +
+                                `Thanks for participating! 🎉`
+                    });
+                    
+                    // Clean up temp file
+                    fs.unlinkSync(filepath);
+                    
+                } catch (error) {
+                    console.error('Error downloading image:', error);
+                    await reply(`❌ Failed to download your image. Please try again.`);
+                }
                 break;
                 
             default:
-                // Clear session on error
                 sessionManager.clearSession(session.id);
                 await reply('❌ Session error. Please start over with `.survey`');
         }
