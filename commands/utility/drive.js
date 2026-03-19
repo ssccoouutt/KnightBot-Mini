@@ -69,7 +69,7 @@ module.exports = {
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, react, isButtonClick } = context;
         
-        console.log(`📨 Drive session handling - isButtonClick from context: ${isButtonClick}`);
+        console.log(`📨 Drive session handling - isButtonClick from context: ${isButtonClick}, current step: ${session.step}`);
         
         // Get the button ID from the message if this is a button click
         let buttonId = null;
@@ -109,6 +109,12 @@ module.exports = {
             }
             
             console.log(`🔘 Button click in drive: ID=${buttonId}, Text=${buttonText}`);
+            
+            // Handle button clicks immediately
+            if (buttonId) {
+                const handled = await handleButtonClick(sock, msg, session, context, buttonId, buttonText);
+                if (handled) return true;
+            }
         }
         
         // Detect media types
@@ -135,14 +141,9 @@ module.exports = {
         
         console.log(`📨 Drive session step ${session.step}: text="${text}", hasMedia=${hasMedia}, isButtonClick=${isButtonClick}, buttonId=${buttonId}`);
         
-        // Handle button clicks based on current step
-        if (isButtonClick && buttonId) {
-            return await handleButtonClick(sock, msg, session, context, buttonId, buttonText);
-        }
-        
         // Process based on current step (non-button inputs)
         switch (session.step) {
-            case 1: // Welcome screen - should only get here if button wasn't handled
+            case 1: // Welcome screen
                 await reply('❌ Please use the buttons above to choose upload method.');
                 return true;
                 
@@ -164,34 +165,33 @@ module.exports = {
 async function handleButtonClick(sock, msg, session, context, buttonId, buttonText) {
     const { from, sender, reply } = context;
     
-    console.log(`🔘 Handling button click in drive: step=${session.step}, id=${buttonId}, text=${buttonText}`);
+    console.log(`🔘 Handling button click in drive: current step=${session.step}, id=${buttonId}, text=${buttonText}`);
     
     // Handle based on current step
-    switch (session.step) {
-        case 1: // Method selection
-            if (buttonId?.includes('url')) {
-                sessionManager.updateSession(sender, from, { step: 2 });
-                const sentMsg = await reply(`🔗 *Upload from URL*\n\nPlease send me the direct download link.\n\nExample: \`https://example.com/file.zip\``);
-                sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'drive');
-                return true;
-                
-            } else if (buttonId?.includes('media')) {
-                sessionManager.updateSession(sender, from, { step: 3 });
-                const sentMsg = await reply(`📎 *Upload from Media*\n\nPlease send me the file (image, video, document, audio)`);
-                sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'drive');
-                return true;
-                
-            } else if (buttonId?.includes('cancel')) {
-                sessionManager.clearSession(session.id);
-                await reply('❌ Upload cancelled.');
-                return true;
-            }
-            break;
+    if (session.step === 1) {
+        if (buttonId?.includes('url')) {
+            console.log('✅ URL button clicked, updating to step 2');
+            sessionManager.updateSession(sender, from, { step: 2 });
+            const sentMsg = await reply(`🔗 *Upload from URL*\n\nPlease send me the direct download link.\n\nExample: \`https://example.com/file.zip\``);
+            sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'drive');
+            return true;
             
-        default:
-            console.log(`ℹ️ Unhandled button click at step ${session.step}: ${buttonId}`);
+        } else if (buttonId?.includes('media')) {
+            console.log('✅ Media button clicked, updating to step 3');
+            sessionManager.updateSession(sender, from, { step: 3 });
+            const sentMsg = await reply(`📎 *Upload from Media*\n\nPlease send me the file (image, video, document, audio)`);
+            sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'drive');
+            return true;
+            
+        } else if (buttonId?.includes('cancel')) {
+            console.log('✅ Cancel button clicked');
+            sessionManager.clearSession(session.id);
+            await reply('❌ Upload cancelled.');
+            return true;
+        }
     }
     
+    console.log(`ℹ️ Unhandled button click at step ${session.step}: ${buttonId}`);
     await reply(`❌ Unhandled button click. Please try again.`);
     return true;
 }
@@ -242,7 +242,9 @@ async function handleUrlInput(sock, msg, session, context) {
 async function handleMediaInput(sock, msg, session, context) {
     const { from, sender, reply } = context;
     
-    // Check for media - FIXED: This was the issue
+    console.log('📁 handleMediaInput called');
+    
+    // Check for media
     const hasImage = !!msg.message?.imageMessage;
     const hasVideo = !!msg.message?.videoMessage;
     const hasDocument = !!msg.message?.documentMessage;
@@ -263,7 +265,6 @@ async function handleMediaInput(sock, msg, session, context) {
         if (text && (text.startsWith('http://') || text.startsWith('https://'))) {
             // This is actually a URL, redirect to URL handler
             console.log('📝 Received URL instead of media, redirecting to URL handler');
-            sessionManager.updateSession(sender, from, { step: 2 });
             return await handleUrlInput(sock, msg, session, context);
         }
         
@@ -282,10 +283,8 @@ async function handleMediaInput(sock, msg, session, context) {
         if (hasImage) {
             mediaType = 'image';
             mediaMessage = msg.message.imageMessage;
-            // Try to get filename from caption or use default
             filename = `image_${Date.now()}.jpg`;
             if (mediaMessage.caption) {
-                // If caption looks like a filename, use it
                 const caption = mediaMessage.caption.trim();
                 if (!caption.includes(' ') && (caption.includes('.') || caption.length < 20)) {
                     filename = caption;
@@ -525,7 +524,6 @@ async function processUpload(fileUrl, filePath, customFilename = null) {
             console.log('✅ File is now public');
         } catch (permError) {
             console.log('⚠️ Could not set public permission:', permError.message);
-            // Continue anyway - file might already be public or permission failed
         }
         
         // Generate links in the requested formats
