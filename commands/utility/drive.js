@@ -177,20 +177,20 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
             sessionManager.updateSession(sender, from, { step: 2 });
             const sentMsg = await reply(`🔗 *Upload from URL*\n\nPlease send me the direct download link.\n\nExample: \`https://example.com/file.zip\``);
             sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'drive');
-            return true; // Important!
+            return true;
             
         } else if (buttonId?.includes('media')) {
             console.log('✅ Media button clicked, updating to step 3');
             sessionManager.updateSession(sender, from, { step: 3 });
             const sentMsg = await reply(`📎 *Upload from Media*\n\nPlease send me the file (image, video, document, audio)`);
             sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'drive');
-            return true; // Important!
+            return true;
             
         } else if (buttonId?.includes('cancel')) {
             console.log('✅ Cancel button clicked');
             sessionManager.clearSession(session.id);
             await reply('❌ Upload cancelled.');
-            return true; // Important!
+            return true;
         }
     }
     
@@ -257,7 +257,7 @@ async function handleMediaInput(sock, msg, session, context) {
     console.log(`📁 Media detection: image=${hasImage}, video=${hasVideo}, document=${hasDocument}, audio=${hasAudio}`);
     
     if (!hasMedia) {
-        // If no media, check if it's a text message with URL
+        // If no media, check if it's a text message
         let text = '';
         if (msg.message?.conversation) {
             text = msg.message.conversation.trim();
@@ -265,11 +265,19 @@ async function handleMediaInput(sock, msg, session, context) {
             text = msg.message.extendedTextMessage.text.trim();
         }
         
-        if (text && (text.startsWith('http://') || text.startsWith('https://'))) {
-            // This is actually a URL, redirect to URL handler
-            console.log('📝 Received URL instead of media, redirecting to URL handler');
-            sessionManager.updateSession(sender, from, { step: 2 });
-            return await handleUrlInput(sock, msg, session, context);
+        if (text) {
+            // Check if it's a URL
+            if (text.startsWith('http://') || text.startsWith('https://')) {
+                console.log('📝 Received URL instead of media, redirecting to URL handler');
+                sessionManager.updateSession(sender, from, { step: 2 });
+                return await handleUrlInput(sock, msg, session, context);
+            }
+            
+            // If it's just the button text (like "📎 From Media"), ignore it
+            if (text.includes('📎 From Media') || text.includes('🔗 From URL') || text.includes('❌ Cancel')) {
+                console.log('⚠️ Ignoring button text message');
+                return true;
+            }
         }
         
         await reply('❌ Please send a valid media file (image, video, document, or audio)');
