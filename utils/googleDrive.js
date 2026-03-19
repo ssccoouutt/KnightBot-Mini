@@ -363,7 +363,7 @@ class GoogleDrive {
     }
 
     /**
-     * Edit/Update an existing text file
+     * Edit/Update an existing text file WITHOUT changing its ID
      */
     async editTextFile(fileId, newContent) {
         // Check if file exists
@@ -375,7 +375,9 @@ class GoogleDrive {
         // Get current file metadata
         const info = await this.getFileInfo(fileId);
         const filename = info.name;
-        const parentId = info.parents?.[0] || 'root';
+        const mimeType = info.mimeType || 'text/plain';
+        
+        console.log(`📝 Updating file: ${filename} (${fileId}) - ID will remain the same`);
         
         // Create temp file with new content
         const tempDir = path.join(process.cwd(), 'temp');
@@ -384,14 +386,61 @@ class GoogleDrive {
         const tempFile = path.join(tempDir, `edit_${Date.now()}_${filename}`);
         fs.writeFileSync(tempFile, newContent, 'utf8');
         
-        // Upload as new version
-        const result = await this.uploadToFolder(tempFile, parentId, filename);
+        // Read the file content
+        const fileBuffer = fs.readFileSync(tempFile);
+        
+        // Get fresh token
+        const token = await this.getAccessToken();
+        
+        try {
+            // Method 1: Update using media upload (simplest for text files)
+            // This updates the content WITHOUT changing the file ID
+            await axios.patch(`${FILE_URL}/${fileId}?uploadType=media`, fileBuffer, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': mimeType,
+                    'Content-Length': fileBuffer.length
+                }
+            });
+            
+            console.log(`✅ File content updated successfully (ID preserved: ${fileId})`);
+            
+        } catch (error) {
+            console.log('Media update failed, trying multipart update...');
+            
+            try {
+                // Method 2: Fallback to multipart update
+                const formData = new FormData();
+                formData.append('file', fileBuffer, { 
+                    filename: filename,
+                    contentType: mimeType 
+                });
+                
+                await axios.patch(`${FILE_URL}/${fileId}?uploadType=multipart`, formData, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        ...formData.getHeaders()
+                    }
+                });
+                
+                console.log(`✅ File updated via multipart (ID preserved: ${fileId})`);
+                
+            } catch (patchError) {
+                // If both updates fail, throw error
+                throw new Error(`Failed to update file: ${patchError.message}`);
+            }
+        }
+        
+        // Clean up temp file
         fs.unlinkSync(tempFile);
         
-        // Delete old file
-        await this.deleteFile(fileId).catch(() => {});
-        
-        return result;
+        // Return the SAME file ID (not changed!)
+        return {
+            id: fileId,
+            name: filename,
+            viewLink: `https://drive.google.com/file/d/${fileId}/view?usp=drivesdk`,
+            downloadLink: `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`
+        };
     }
 
     /**
@@ -441,7 +490,7 @@ class GoogleDrive {
      * Search for files by name
      */
     async searchFiles(query) {
-        return await this.request({
+        const result = await this.request({
             method: 'GET',
             url: FILE_URL,
             params: {
@@ -449,6 +498,8 @@ class GoogleDrive {
                 fields: 'files(id, name, mimeType, size, webViewLink)'
             }
         });
+        
+        return result.files;
     }
 }
 
