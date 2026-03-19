@@ -879,13 +879,14 @@ const handleMessage = async (sock, msg) => {
                     isAdmin: await isAdmin(sock, sender, from, groupMetadata),
                     isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
                     isMod: isMod(sender),
-                    isButtonClick: true, // THIS MUST BE TRUE FOR ALL BUTTON CLICKS
+                    isButtonClick: true,
                     reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
                     react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
                 });
                 
                 if (handled) {
-                    return; // Message handled
+                    console.log(`✅ Button click handled by ${sessionFound.command}, returning early`);
+                    return; // CRITICAL: Return to prevent further processing
                 }
             } else {
                 console.log(`⚠️ No session found for button click`);
