@@ -58,6 +58,43 @@ module.exports = {
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, react, isButtonClick } = context;
         
+        // Get the button ID from the message if this is a button click
+        let buttonId = null;
+        let buttonText = null;
+        
+        if (isButtonClick) {
+            // Extract button ID based on message type
+            if (msg.message?.buttonsResponseMessage) {
+                buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
+                buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
+            }
+            else if (msg.message?.listResponseMessage) {
+                const listReply = msg.message.listResponseMessage.singleSelectReply;
+                if (listReply) {
+                    buttonId = listReply.selectedRowId;
+                    buttonText = listReply.title;
+                }
+            }
+            else if (msg.message?.interactiveResponseMessage) {
+                const interactive = msg.message.interactiveResponseMessage;
+                if (interactive.nativeFlowResponseMessage) {
+                    try {
+                        const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
+                        buttonId = params.id;
+                        buttonText = params.display_text;
+                    } catch (e) {
+                        console.error('Error parsing interactive response:', e);
+                    }
+                }
+            }
+            else if (msg.message?.templateButtonReplyMessage) {
+                buttonId = msg.message.templateButtonReplyMessage.selectedId;
+                buttonText = msg.message.templateButtonReplyMessage.selectedDisplayText;
+            }
+            
+            console.log(`🔘 Button click in survey: ID=${buttonId}, Text=${buttonText}`);
+        }
+        
         // Detect media types
         const hasImage = !!msg.message?.imageMessage;
         const hasVideo = !!msg.message?.videoMessage;
@@ -79,16 +116,16 @@ module.exports = {
         }
         text = text.trim();
         
-        console.log(`📨 Survey session step ${session.step}: text="${text}", hasMedia=${hasMedia}, isButtonClick=${isButtonClick}`);
+        console.log(`📨 Survey session step ${session.step}: text="${text}", hasMedia=${hasMedia}, isButtonClick=${isButtonClick}, buttonId=${buttonId}`);
         
-        // Handle button clicks FIRST
-        if (isButtonClick) {
-            return await handleButtonClick(sock, msg, session, context);
+        // Handle button clicks based on current step
+        if (isButtonClick && buttonId) {
+            return await handleButtonClick(sock, msg, session, context, buttonId, buttonText);
         }
         
-        // Process based on current step
+        // Process based on current step (non-button inputs)
         switch (session.step) {
-            case 1: // Welcome screen
+            case 1: // Welcome screen - should only get here if button wasn't handled
                 await reply('❌ Please use the Start button to begin the survey.');
                 return true;
                 
@@ -98,26 +135,23 @@ module.exports = {
             case 3: // Age input
                 return await handleAgeInput(sock, msg, session, context);
                 
-            case 4: // Gender selection (native buttons)
-                return await handleGenderSelection(sock, msg, session, context);
+            case 4: // Gender selection - handled by button handler
+                await reply('❌ Please select a gender using the buttons above.');
+                return true;
                 
             case 5: // Favorite color (text)
                 return await handleColorInput(sock, msg, session, context);
                 
-            case 6: // Country selection (list button)
-                return await handleCountrySelection(sock, msg, session, context);
+            case 6: // Country selection - handled by button handler
+                await reply('❌ Please select a country from the list.');
+                return true;
                 
-            case 7: // URL button demo
-                return await handleUrlButton(sock, msg, session, context);
-                
-            case 8: // Call button demo
-                return await handleCallButton(sock, msg, session, context);
-                
-            case 9: // Copy button demo
-                return await handleCopyButton(sock, msg, session, context);
-                
-            case 10: // Location button demo
-                return await handleLocationButton(sock, msg, session, context);
+            case 7: // URL button demo - handled by button handler
+            case 8: // Call button demo - handled by button handler
+            case 9: // Copy button demo - handled by button handler
+            case 10: // Location button demo - handled by button handler
+                await reply('❌ Please use the buttons provided.');
+                return true;
                 
             case 11: // Photo upload
                 return await handlePhotoUpload(sock, msg, session, context);
@@ -128,8 +162,9 @@ module.exports = {
             case 13: // Document upload (optional)
                 return await handleDocumentUpload(sock, msg, session, context);
                 
-            case 14: // Final confirmation
-                return await handleFinalConfirmation(sock, msg, session, context);
+            case 14: // Final confirmation - handled by button handler
+                await reply('❌ Please use the buttons to continue.');
+                return true;
                 
             default:
                 sessionManager.clearSession(session.id);
@@ -140,72 +175,21 @@ module.exports = {
 };
 
 // ==================== BUTTON CLICK HANDLER ====================
-async function handleButtonClick(sock, msg, session, context) {
+async function handleButtonClick(sock, msg, session, context, buttonId, buttonText) {
     const { from, sender, reply } = context;
     
-    // Extract button info - IMPROVED VERSION
-    let buttonId = null;
-    let buttonText = null;
-    
-    console.log('🔍 Raw message structure:', Object.keys(msg.message || {}));
-    
-    // Method 1: buttonsResponseMessage (native buttons)
-    if (msg.message?.buttonsResponseMessage) {
-        buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
-        buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
-        console.log('✅ Native button click:', { buttonId, buttonText });
-    }
-    // Method 2: listResponseMessage (list buttons)
-    else if (msg.message?.listResponseMessage) {
-        const listReply = msg.message.listResponseMessage.singleSelectReply;
-        if (listReply) {
-            buttonId = listReply.selectedRowId;
-            buttonText = listReply.title || msg.message.listResponseMessage.title;
-        }
-        console.log('✅ List button click:', { buttonId, buttonText });
-    }
-    // Method 3: interactiveResponseMessage (interactive buttons)
-    else if (msg.message?.interactiveResponseMessage) {
-        const interactive = msg.message.interactiveResponseMessage;
-        if (interactive.nativeFlowResponseMessage) {
-            try {
-                const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
-                buttonId = params.id;
-                buttonText = params.display_text;
-                console.log('✅ Interactive button click:', { buttonId, buttonText });
-            } catch (e) {
-                console.error('Error parsing interactive response:', e);
-            }
-        }
-    }
-    
-    // If still no buttonId, try to get from quoted message
-    if (!buttonId) {
-        const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
-        if (contextInfo?.quotedMessage) {
-            console.log('🔍 Found quoted message, checking for button info');
-            // Try to extract from quoted message if needed
-        }
-    }
-    
-    // Last resort: use message text
-    if (!buttonId && (msg.message?.conversation || msg.message?.extendedTextMessage?.text)) {
-        buttonId = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
-        console.log('⚠️ Using message text as buttonId:', buttonId);
-    }
-    
-    console.log(`🔘 Final button info: ID=${buttonId}, Text=${buttonText}`);
+    console.log(`🔘 Handling button click in survey: step=${session.step}, id=${buttonId}, text=${buttonText}`);
     
     // Handle based on current step
     switch (session.step) {
         case 1: // Start/Cancel buttons
-            if (buttonId?.toLowerCase().includes('start')) {
+            if (buttonId?.includes('start')) {
                 // Move to name input
                 sessionManager.updateSession(sender, from, { step: 2 });
                 const sentMsg = await reply(`📋 *Step 1/13:* What's your name?`);
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
                 return true;
-            } else if (buttonId?.toLowerCase().includes('cancel')) {
+            } else if (buttonId?.includes('cancel')) {
                 sessionManager.clearSession(session.id);
                 await reply('❌ Survey cancelled. You can start again with `.survey`');
                 return true;
@@ -214,17 +198,17 @@ async function handleButtonClick(sock, msg, session, context) {
             
         case 4: // Gender selection
             // Gender buttons have IDs like "gender_male_xxx", "gender_female_xxx", etc.
+            let gender = 'Not specified';
             if (buttonId?.includes('gender_male')) {
-                buttonText = 'Male';
+                gender = 'Male';
             } else if (buttonId?.includes('gender_female')) {
-                buttonText = 'Female';
+                gender = 'Female';
             } else if (buttonId?.includes('gender_other')) {
-                buttonText = 'Other';
+                gender = 'Other';
             } else if (buttonId?.includes('gender_prefer_not')) {
-                buttonText = 'Prefer not to say';
+                gender = 'Prefer not to say';
             }
             
-            const gender = buttonText || 'Not specified';
             sessionManager.updateSession(sender, from, {
                 answers: { ...session.data.answers, gender }
             });
@@ -234,7 +218,6 @@ async function handleButtonClick(sock, msg, session, context) {
             return true;
             
         case 6: // Country selection - handle list button response
-            // For list buttons, the selected row ID contains the country
             if (buttonId) {
                 let country = buttonId;
                 if (country.startsWith('country_')) {
@@ -449,9 +432,23 @@ async function handleButtonClick(sock, msg, session, context) {
                 return true;
             }
             
+        case 14: // Final confirmation buttons
+            if (buttonId?.includes('new_survey')) {
+                // Start new survey
+                sessionManager.clearSession(session.id);
+                const { execute } = require('./survey');
+                await execute(sock, msg, [], context);
+                return true;
+            } else if (buttonId?.includes('menu')) {
+                sessionManager.clearSession(session.id);
+                await reply('Returning to main menu. Use `.menu` to see all commands.');
+                return true;
+            }
+            break;
+            
         default:
-            await reply(`❌ Button not expected at this step. Please follow the instructions.`);
-            return true;
+            // For any other step, just log and continue
+            console.log(`ℹ️ Unhandled button click at step ${session.step}: ${buttonId}`);
     }
     
     // If we get here, button wasn't handled
