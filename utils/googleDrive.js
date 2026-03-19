@@ -18,66 +18,109 @@ class GoogleDrive {
      * Get valid access token (auto-refreshes if expired)
      */
     async getAccessToken() {
-        try {
-            if (!this.tokenData) {
-                await this.loadToken();
-            }
-            
-            const expiryDate = new Date(this.tokenData.expiry);
-            if (new Date() > expiryDate) {
-                await this.refreshToken();
-            }
-            
-            return this.tokenData.token;
-        } catch (error) {
-            throw new Error(`Failed to get access token: ${error.message}`);
+        // Load token if not loaded
+        if (!this.tokenData) {
+            await this.loadToken();
         }
+        
+        // Check if token needs refresh
+        if (this.isTokenExpired()) {
+            await this.refreshToken();
+        }
+        
+        return this.tokenData.token;
+    }
+
+    /**
+     * Check if token is expired
+     */
+    isTokenExpired() {
+        if (!this.tokenData || !this.tokenData.expiry) return true;
+        const expiryDate = new Date(this.tokenData.expiry);
+        return new Date() > expiryDate;
     }
 
     /**
      * Load token from Google Drive
      */
     async loadToken() {
-        console.log('📥 Downloading token.json...');
-        
-        const tokenResponse = await axios({
-            method: 'GET',
-            url: TOKEN_URL,
-            responseType: 'stream',
-            timeout: 30000
-        });
-        
-        this.tokenFilename = path.join(process.cwd(), 'temp', `token_${Date.now()}.json`);
-        const tokenWriter = fs.createWriteStream(this.tokenFilename);
-        tokenResponse.data.pipe(tokenWriter);
-        
-        await new Promise((resolve, reject) => {
-            tokenWriter.on('finish', resolve);
-            tokenWriter.on('error', reject);
-        });
-        
-        this.tokenData = JSON.parse(fs.readFileSync(this.tokenFilename, 'utf8'));
-        console.log('✅ Token loaded');
+        try {
+            console.log('📥 Downloading token.json...');
+            
+            const tokenResponse = await axios({
+                method: 'GET',
+                url: TOKEN_URL,
+                responseType: 'stream',
+                timeout: 30000
+            });
+            
+            this.tokenFilename = path.join(process.cwd(), 'temp', `token_${Date.now()}.json`);
+            const tokenWriter = fs.createWriteStream(this.tokenFilename);
+            tokenResponse.data.pipe(tokenWriter);
+            
+            await new Promise((resolve, reject) => {
+                tokenWriter.on('finish', resolve);
+                tokenWriter.on('error', reject);
+            });
+            
+            this.tokenData = JSON.parse(fs.readFileSync(this.tokenFilename, 'utf8'));
+            console.log('✅ Token loaded');
+        } catch (error) {
+            throw new Error(`Failed to load token: ${error.message}`);
+        }
     }
 
     /**
      * Refresh expired token
      */
     async refreshToken() {
-        console.log('🔄 Refreshing token...');
-        
-        const refreshData = {
-            client_id: this.tokenData.client_id,
-            client_secret: this.tokenData.client_secret,
-            refresh_token: this.tokenData.refresh_token,
-            grant_type: 'refresh_token'
-        };
-        
-        const refreshResponse = await axios.post(this.tokenData.token_uri, refreshData);
-        this.tokenData.token = refreshResponse.data.access_token;
-        this.tokenData.expiry = new Date(Date.now() + 3600 * 1000).toISOString();
-        
-        console.log('✅ Token refreshed');
+        try {
+            console.log('🔄 Token expired, refreshing...');
+            
+            const refreshData = {
+                client_id: this.tokenData.client_id,
+                client_secret: this.tokenData.client_secret,
+                refresh_token: this.tokenData.refresh_token,
+                grant_type: 'refresh_token'
+            };
+            
+            const refreshResponse = await axios.post(this.tokenData.token_uri, refreshData);
+            
+            // Update token data
+            this.tokenData.token = refreshResponse.data.access_token;
+            this.tokenData.expiry = new Date(Date.now() + 3600 * 1000).toISOString();
+            
+            console.log('✅ Token refreshed successfully');
+        } catch (error) {
+            throw new Error(`Failed to refresh token: ${error.message}`);
+        }
+    }
+
+    /**
+     * Make API request with auto token refresh
+     */
+    async request(config, retryCount = 0) {
+        try {
+            const token = await this.getAccessToken();
+            
+            // Add auth header
+            config.headers = {
+                ...config.headers,
+                'Authorization': `Bearer ${token}`
+            };
+            
+            const response = await axios(config);
+            return response.data;
+            
+        } catch (error) {
+            // If 401 Unauthorized and we haven't retried yet, refresh token and retry
+            if (error.response?.status === 401 && retryCount === 0) {
+                console.log('🔄 Token invalid, refreshing and retrying...');
+                await this.refreshToken();
+                return this.request(config, retryCount + 1);
+            }
+            throw error;
+        }
     }
 
     /**
@@ -94,60 +137,71 @@ class GoogleDrive {
     // ==================== FILE OPERATIONS ====================
 
     /**
+     * Check if file exists
+     */
+    async fileExists(fileId) {
+        try {
+            await this.request({
+                method: 'GET',
+                url: `${FILE_URL}/${fileId}`,
+                params: { fields: 'id' }
+            });
+            return true;
+        } catch (error) {
+            if (error.response?.status === 404) return false;
+            throw error;
+        }
+    }
+
+    /**
+     * Get file metadata
+     */
+    async getFileInfo(fileId) {
+        return await this.request({
+            method: 'GET',
+            url: `${FILE_URL}/${fileId}`,
+            params: { fields: 'id, name, mimeType, size, createdTime, modifiedTime, webViewLink, parents' }
+        });
+    }
+
+    /**
      * List files/folders in a directory
-     * @param {string} folderId - Folder ID (default: 'root')
-     * @returns {Array} List of files and folders
      */
     async listFiles(folderId = 'root') {
-        const token = await this.getAccessToken();
-        
-        const response = await axios.get(`${FILE_URL}`, {
-            headers: { 'Authorization': `Bearer ${token}` },
+        return await this.request({
+            method: 'GET',
+            url: FILE_URL,
             params: {
                 q: `'${folderId}' in parents and trashed=false`,
                 fields: 'files(id, name, mimeType, size, createdTime, modifiedTime, webViewLink)',
                 pageSize: 100
             }
         });
-        
-        return response.data.files;
     }
 
     /**
      * Create a folder
-     * @param {string} folderName - Name of the folder
-     * @param {string} parentId - Parent folder ID (default: 'root')
-     * @returns {Object} Folder info
      */
     async createFolder(folderName, parentId = 'root') {
-        const token = await this.getAccessToken();
-        
-        const metadata = {
-            name: folderName,
-            mimeType: 'application/vnd.google-apps.folder',
-            parents: [parentId]
-        };
-        
-        const response = await axios.post(FILE_URL, metadata, {
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json'
+        const result = await this.request({
+            method: 'POST',
+            url: FILE_URL,
+            data: {
+                name: folderName,
+                mimeType: 'application/vnd.google-apps.folder',
+                parents: [parentId]
             }
         });
         
         return {
-            id: response.data.id,
+            id: result.id,
             name: folderName,
-            webViewLink: `https://drive.google.com/drive/folders/${response.data.id}`
+            webViewLink: `https://drive.google.com/drive/folders/${result.id}`
         };
     }
 
     /**
      * Upload file to specific folder
-     * @param {string} filePath - Local file path
-     * @param {string} folderId - Folder ID (default: 'root')
-     * @param {string} customFilename - Custom filename (optional)
-     * @returns {Object} File info
      */
     async uploadToFolder(filePath, folderId = 'root', customFilename = null) {
         const token = await this.getAccessToken();
@@ -164,18 +218,17 @@ class GoogleDrive {
         
         formData.append('file', fs.createReadStream(filePath));
         
-        const uploadResponse = await axios.post(UPLOAD_URL, formData, {
-            params: { uploadType: 'multipart' },
+        const response = await axios.post(`${UPLOAD_URL}?uploadType=multipart`, formData, {
             headers: {
                 'Authorization': `Bearer ${token}`,
                 ...formData.getHeaders()
             }
         });
         
-        const fileId = uploadResponse.data.id;
+        const fileId = response.data.id;
         
         // Make public
-        await this.makePublic(fileId);
+        await this.makePublic(fileId).catch(() => {});
         
         return {
             id: fileId,
@@ -189,15 +242,11 @@ class GoogleDrive {
 
     /**
      * Upload from URL to specific folder
-     * @param {string} fileUrl - URL to download from
-     * @param {string} folderId - Folder ID (default: 'root')
-     * @param {string} customFilename - Custom filename (optional)
-     * @returns {Object} File info
      */
     async uploadFromUrlToFolder(fileUrl, folderId = 'root', customFilename = null) {
         console.log(`📥 Downloading from URL...`);
         
-        const fileResponse = await axios({
+        const response = await axios({
             method: 'GET',
             url: fileUrl,
             responseType: 'stream',
@@ -210,7 +259,7 @@ class GoogleDrive {
             filename = `file_${Date.now()}.bin`;
         }
         
-        const contentDisposition = fileResponse.headers['content-disposition'];
+        const contentDisposition = response.headers['content-disposition'];
         if (contentDisposition) {
             const match = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
             if (match) filename = match[1].replace(/['"]/g, '');
@@ -220,12 +269,12 @@ class GoogleDrive {
         if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
         
         const tempFile = path.join(tempDir, `download_${Date.now()}_${filename}`);
-        const fileStream = fs.createWriteStream(tempFile);
+        const writer = fs.createWriteStream(tempFile);
         
-        fileResponse.data.pipe(fileStream);
+        response.data.pipe(writer);
         await new Promise((resolve, reject) => {
-            fileStream.on('finish', resolve);
-            fileStream.on('error', reject);
+            writer.on('finish', resolve);
+            writer.on('error', reject);
         });
         
         const result = await this.uploadToFolder(tempFile, folderId, filename);
@@ -236,16 +285,16 @@ class GoogleDrive {
 
     /**
      * Make file public
-     * @param {string} fileId - File ID
      */
     async makePublic(fileId) {
         try {
-            const token = await this.getAccessToken();
-            await axios.post(`${FILE_URL}/${fileId}/permissions`, {
-                role: 'reader',
-                type: 'anyone'
-            }, {
-                headers: { 'Authorization': `Bearer ${token}` }
+            await this.request({
+                method: 'POST',
+                url: `${FILE_URL}/${fileId}/permissions`,
+                data: {
+                    role: 'reader',
+                    type: 'anyone'
+                }
             });
         } catch (e) {
             // Ignore permission errors
@@ -254,28 +303,20 @@ class GoogleDrive {
 
     /**
      * Download file from Google Drive
-     * @param {string} fileId - File ID to download
-     * @param {string} savePath - Where to save (optional)
-     * @returns {string} Path where file was saved
      */
     async downloadFile(fileId, savePath = null) {
-        const token = await this.getAccessToken();
-        
-        // Get file metadata first
-        const metadataResponse = await axios.get(`${FILE_URL}/${fileId}`, {
-            headers: { 'Authorization': `Bearer ${token}` },
-            params: { fields: 'name, mimeType, size' }
-        });
-        
-        const filename = metadataResponse.data.name;
-        const fileSize = metadataResponse.data.size;
+        const info = await this.getFileInfo(fileId);
+        const filename = info.name;
+        const fileSize = info.size;
         
         console.log(`📥 Downloading ${filename} (${(fileSize/1024/1024).toFixed(2)} MB)...`);
         
-        // Download file
-        const downloadResponse = await axios.get(`${FILE_URL}/${fileId}`, {
-            headers: { 'Authorization': `Bearer ${token}` },
+        const token = await this.getAccessToken();
+        const response = await axios({
+            method: 'GET',
+            url: `${FILE_URL}/${fileId}`,
             params: { alt: 'media' },
+            headers: { 'Authorization': `Bearer ${token}` },
             responseType: 'stream'
         });
         
@@ -285,8 +326,7 @@ class GoogleDrive {
         const outputPath = savePath || path.join(tempDir, `download_${Date.now()}_${filename}`);
         const writer = fs.createWriteStream(outputPath);
         
-        downloadResponse.data.pipe(writer);
-        
+        response.data.pipe(writer);
         await new Promise((resolve, reject) => {
             writer.on('finish', resolve);
             writer.on('error', reject);
@@ -298,22 +338,16 @@ class GoogleDrive {
 
     /**
      * Read a text file from Google Drive
-     * @param {string} fileId - File ID
-     * @returns {string} File content
      */
     async readTextFile(fileId) {
         const filePath = await this.downloadFile(fileId);
         const content = fs.readFileSync(filePath, 'utf8');
-        fs.unlinkSync(filePath); // Clean up temp file
+        fs.unlinkSync(filePath);
         return content;
     }
 
     /**
      * Write/Update a text file in Google Drive
-     * @param {string} content - Text content to write
-     * @param {string} filename - Name of the file
-     * @param {string} folderId - Folder ID (default: 'root')
-     * @returns {Object} File info
      */
     async writeTextFile(content, filename, folderId = 'root') {
         const tempDir = path.join(process.cwd(), 'temp');
@@ -329,21 +363,19 @@ class GoogleDrive {
     }
 
     /**
-     * Edit/Append to an existing text file
-     * @param {string} fileId - File ID to edit
-     * @param {string} newContent - New content (replaces entire file)
-     * @returns {Object} Updated file info
+     * Edit/Update an existing text file
      */
     async editTextFile(fileId, newContent) {
-        // Get current file metadata
-        const token = await this.getAccessToken();
-        const metadataResponse = await axios.get(`${FILE_URL}/${fileId}`, {
-            headers: { 'Authorization': `Bearer ${token}` },
-            params: { fields: 'name, parents' }
-        });
+        // Check if file exists
+        const exists = await this.fileExists(fileId);
+        if (!exists) {
+            throw new Error(`File with ID ${fileId} not found`);
+        }
         
-        const filename = metadataResponse.data.name;
-        const parentId = metadataResponse.data.parents?.[0] || 'root';
+        // Get current file metadata
+        const info = await this.getFileInfo(fileId);
+        const filename = info.name;
+        const parentId = info.parents?.[0] || 'root';
         
         // Create temp file with new content
         const tempDir = path.join(process.cwd(), 'temp');
@@ -352,21 +384,18 @@ class GoogleDrive {
         const tempFile = path.join(tempDir, `edit_${Date.now()}_${filename}`);
         fs.writeFileSync(tempFile, newContent, 'utf8');
         
-        // Upload as new version (Drive doesn't support direct editing, must upload new version)
+        // Upload as new version
         const result = await this.uploadToFolder(tempFile, parentId, filename);
         fs.unlinkSync(tempFile);
         
         // Delete old file
-        await this.deleteFile(fileId);
+        await this.deleteFile(fileId).catch(() => {});
         
         return result;
     }
 
     /**
      * Append to a text file
-     * @param {string} fileId - File ID
-     * @param {string} appendContent - Content to append
-     * @returns {Object} Updated file info
      */
     async appendToTextFile(fileId, appendContent) {
         const currentContent = await this.readTextFile(fileId);
@@ -376,39 +405,29 @@ class GoogleDrive {
 
     /**
      * Delete a file
-     * @param {string} fileId - File ID to delete
      */
     async deleteFile(fileId) {
-        const token = await this.getAccessToken();
-        await axios.delete(`${FILE_URL}/${fileId}`, {
-            headers: { 'Authorization': `Bearer ${token}` }
+        await this.request({
+            method: 'DELETE',
+            url: `${FILE_URL}/${fileId}`
         });
         console.log(`🗑️ Deleted file: ${fileId}`);
     }
 
     /**
      * Move file to another folder
-     * @param {string} fileId - File ID
-     * @param {string} newFolderId - Destination folder ID
-     * @returns {Object} Updated file info
      */
     async moveFile(fileId, newFolderId) {
-        const token = await this.getAccessToken();
+        const info = await this.getFileInfo(fileId);
+        const currentParents = info.parents?.join(',') || '';
         
-        // Get current parents
-        const response = await axios.get(`${FILE_URL}/${fileId}`, {
-            headers: { 'Authorization': `Bearer ${token}` },
-            params: { fields: 'parents' }
-        });
-        
-        const currentParents = response.data.parents?.join(',') || '';
-        
-        // Move to new folder
-        const moveResponse = await axios.patch(`${FILE_URL}/${fileId}`, {
-            addParents: newFolderId,
-            removeParents: currentParents
-        }, {
-            headers: { 'Authorization': `Bearer ${token}` }
+        const result = await this.request({
+            method: 'PATCH',
+            url: `${FILE_URL}/${fileId}`,
+            params: {
+                addParents: newFolderId,
+                removeParents: currentParents
+            }
         });
         
         return {
@@ -420,21 +439,16 @@ class GoogleDrive {
 
     /**
      * Search for files by name
-     * @param {string} query - Search query
-     * @returns {Array} Matching files
      */
     async searchFiles(query) {
-        const token = await this.getAccessToken();
-        
-        const response = await axios.get(`${FILE_URL}`, {
-            headers: { 'Authorization': `Bearer ${token}` },
+        return await this.request({
+            method: 'GET',
+            url: FILE_URL,
             params: {
                 q: `name contains '${query}' and trashed=false`,
                 fields: 'files(id, name, mimeType, size, webViewLink)'
             }
         });
-        
-        return response.data.files;
     }
 }
 
