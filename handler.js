@@ -793,6 +793,9 @@ const handleMessage = async (sock, msg) => {
             
             console.log(`💬 REPLY routed to CORRECT session: ${pendingInfo.command} (step ${session.step})`);
             
+            // IMPORTANT: Activate this session and freeze others
+            sessionManager.activateSession(sender, from, session.id);
+            
             // Get the command that owns this session
             const sessionCommand = commands.get(pendingInfo.command);
             
@@ -833,6 +836,12 @@ const handleMessage = async (sock, msg) => {
         const latestSession = sessionManager.getLatestSession(sender, from);
         
         if (latestSession) {
+            // Check if this session is frozen (shouldn't happen for latest, but just in case)
+            if (sessionManager.isSessionFrozen(latestSession.id)) {
+                console.log(`⚠️ Latest session is frozen - activating it`);
+                sessionManager.activateSession(sender, from, latestSession.id);
+            }
+            
             console.log(`💬 DIRECT MESSAGE routed to latest session: ${latestSession.command} (step ${latestSession.step})`);
             
             const sessionCommand = commands.get(latestSession.command);
