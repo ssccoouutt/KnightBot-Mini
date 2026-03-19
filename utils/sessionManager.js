@@ -184,8 +184,9 @@ function getLatestSession(userId, chatId) {
         return null;
     }
     
-    // Check if expired
+    // Check if expired by timeout
     if (Date.now() - session.lastActivity > SESSION_TIMEOUT) {
+        console.log(`⏰ Session ${session.id} expired due to inactivity`);
         sessions.delete(latest.sessionId);
         latestSessionMap.delete(latestKey);
         return null;
@@ -206,6 +207,7 @@ function getUserSessions(userId, chatId) {
                 userSessions.push(session);
             } else {
                 // Clean up expired session
+                console.log(`⏰ Session ${sessionId} expired due to inactivity`);
                 sessions.delete(sessionId);
             }
         }
@@ -214,7 +216,7 @@ function getUserSessions(userId, chatId) {
 }
 
 /**
- * Update session data
+ * Update session data (only for active sessions)
  */
 function updateSession(userId, chatId, data) {
     const latestKey = `${userId}:${chatId}:latest`;
@@ -284,6 +286,7 @@ function clearSession(sessionId) {
     
     const { userId, chatId } = session;
     
+    console.log(`🗑️ Clearing session ${sessionId} (command: ${session.command})`);
     sessions.delete(sessionId);
     
     // Check if this was the latest session
@@ -322,18 +325,23 @@ function hasActiveSession(userId, chatId) {
 }
 
 /**
- * Check if a specific session is still active
+ * Check if a specific session exists and is not expired
+ * This returns true for BOTH active AND frozen sessions that haven't timed out
  */
 function isSessionActive(sessionId) {
     const session = sessions.get(sessionId);
     if (!session) return false;
     
+    // Check if expired by timeout (5 minutes of no activity)
     if (Date.now() - session.lastActivity > SESSION_TIMEOUT) {
+        console.log(`⏰ Session ${sessionId} expired due to inactivity`);
         sessions.delete(sessionId);
         return false;
     }
     
-    return session.isActive;
+    // Session exists and is not expired - it's "active" in the sense that it still exists
+    // (even if it's frozen)
+    return true;
 }
 
 /**
@@ -342,6 +350,14 @@ function isSessionActive(sessionId) {
 function isSessionFrozen(sessionId) {
     const session = sessions.get(sessionId);
     return session ? session.isFrozen : false;
+}
+
+/**
+ * Check if a session is active (not frozen)
+ */
+function isSessionCurrentlyActive(sessionId) {
+    const session = sessions.get(sessionId);
+    return session ? session.isActive : false;
 }
 
 module.exports = {
@@ -358,5 +374,6 @@ module.exports = {
     clearLatestSession,
     hasActiveSession,
     isSessionActive,
-    isSessionFrozen
+    isSessionFrozen,
+    isSessionCurrentlyActive
 };
