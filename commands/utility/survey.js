@@ -266,9 +266,9 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
             sessionManager.addPendingMessage(sender, from, sentMsg2.key.id, 'survey');
             return true;
             
-        case 7: // URL button demo choice
-            if (buttonId?.includes('url')) {
-                // Send actual URL button
+        case 7: // URL button demo choice - FIXED: Proper skip handling
+            if (buttonId?.includes('url') && !buttonId?.includes('skip')) {
+                // User wants to try URL button - send demo
                 const urlButtons = [{
                     name: 'cta_url',
                     buttonParamsJson: JSON.stringify({
@@ -301,7 +301,7 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                 }, 2000);
                 return true;
             } else {
-                // Skip - don't send demo, just move to next step
+                // Skip button clicked - move to next step without demo
                 sessionManager.updateSession(sender, from, { step: 8 });
                 const nextButtons = [
                     { id: `call_${Date.now()}`, text: '📞 Try Call Button' },
@@ -317,8 +317,8 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                 return true;
             }
             
-        case 8: // Call button demo choice
-            if (buttonId?.includes('call')) {
+        case 8: // Call button demo choice - FIXED: Proper skip handling
+            if (buttonId?.includes('call') && !buttonId?.includes('skip')) {
                 // Send actual call button
                 const callButtons = [{
                     name: 'cta_call',
@@ -352,7 +352,7 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                 }, 2000);
                 return true;
             } else {
-                // Skip - don't send demo
+                // Skip button clicked - move to next step without demo
                 sessionManager.updateSession(sender, from, { step: 9 });
                 const nextButtons = [
                     { id: `copy_${Date.now()}`, text: '📋 Try Copy Button' },
@@ -368,8 +368,8 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                 return true;
             }
             
-        case 9: // Copy button demo choice
-            if (buttonId?.includes('copy')) {
+        case 9: // Copy button demo choice - FIXED: Proper skip handling
+            if (buttonId?.includes('copy') && !buttonId?.includes('skip')) {
                 // Send actual copy button
                 const copyButtons = [{
                     name: 'cta_copy',
@@ -403,7 +403,7 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                 }, 2000);
                 return true;
             } else {
-                // Skip - don't send demo
+                // Skip button clicked - move to next step without demo
                 sessionManager.updateSession(sender, from, { step: 10 });
                 const nextButtons = [
                     { id: `location_${Date.now()}`, text: '📍 Try Location Button' },
@@ -419,8 +419,8 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                 return true;
             }
             
-        case 10: // Location button demo choice
-            if (buttonId?.includes('location')) {
+        case 10: // Location button demo choice - FIXED: Proper skip handling
+            if (buttonId?.includes('location') && !buttonId?.includes('skip')) {
                 // Send actual location button
                 const sentMsg = await sendInteractiveMessage(sock, from, {
                     text: '📍 *Location Button Demo*\n\nClick to see New York location:',
@@ -445,7 +445,7 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
                 }, 2000);
                 return true;
             } else {
-                // Skip - don't send demo
+                // Skip button clicked - move to next step without demo
                 sessionManager.updateSession(sender, from, { step: 11 });
                 const nextMsg = await reply(`Step 11/13: Please send a photo (or type "skip"):`);
                 sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
@@ -591,12 +591,12 @@ async function handleColorInput(sock, msg, session, context) {
         step: 6
     });
     
-    // Country selection list
+    // Country selection list - FIXED: Removed descriptions
     const countries = ['USA', 'UK', 'Canada', 'Australia', 'India', 'Pakistan', 'UAE', 'Other'];
     const rows = countries.map(c => ({
         id: `country_${c.toLowerCase()}`,
-        title: c,
-        description: `Select ${c}`
+        title: c
+        // No description field - this removes the "Select X" text
     }));
     
     const sentMsg = await sendInteractiveMessage(sock, from, {
@@ -605,7 +605,10 @@ async function handleColorInput(sock, msg, session, context) {
             name: 'single_select',
             buttonParamsJson: JSON.stringify({
                 title: 'Choose Country',
-                sections: [{ title: 'Countries', rows }]
+                sections: [{ 
+                    title: 'Countries', 
+                    rows: rows 
+                }]
             })
         }],
         aimode: FORCE_AI_MODE
