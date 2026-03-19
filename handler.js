@@ -886,7 +886,7 @@ const handleMessage = async (sock, msg) => {
                 
                 if (handled) {
                     console.log(`✅ Button click handled by ${sessionFound.command}, returning early`);
-                    return; // CRITICAL: Return to prevent further processing
+                    return;
                 }
             } else {
                 console.log(`⚠️ No session found for button click`);
@@ -894,8 +894,17 @@ const handleMessage = async (sock, msg) => {
         }
     }
 
-    // If not a button click, check for regular replies
-    if (quotedMessageId && !isButtonClick) {
+    // ===== NEW: Check for COMMANDS before session replies =====
+    const isCommand = body.startsWith(config.prefix);
+    if (isCommand) {
+        // This is a command - let it pass through to normal command processing
+        console.log(`📝 Command detected: ${body}`);
+        // Don't return here - let it go to normal command processing
+    }
+    // ===== END COMMAND CHECK =====
+
+    // If not a button click, check for regular replies (sessions)
+    if (quotedMessageId && !isButtonClick && !isCommand) {
         console.log(`🔍 Checking reply to message ID: ${quotedMessageId}`);
         
         const sessionInfo = sessionManager.findSessionByRepliedMessage(quotedMessageId, sender);
@@ -926,7 +935,7 @@ const handleMessage = async (sock, msg) => {
                     isAdmin: await isAdmin(sock, sender, from, groupMetadata),
                     isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
                     isMod: isMod(sender),
-                    isButtonClick: false, // This is a regular reply, not a button click
+                    isButtonClick: false,
                     reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
                     react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
                 });
@@ -941,9 +950,7 @@ const handleMessage = async (sock, msg) => {
         }
     }
 
-    // If we get here, it's NOT a reply or button click
-    const isCommand = body.startsWith(config.prefix);
-
+    // If we get here, it's NOT a reply, button click, or command
     if (!isCommand) {
         const latestSession = sessionManager.getLatestSession(sender, from);
         
