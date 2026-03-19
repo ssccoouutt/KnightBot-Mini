@@ -77,6 +77,10 @@ module.exports = {
                     // For list buttons, the title is what should be displayed
                     buttonText = listReply.title || msg.message.listResponseMessage.title;
                 }
+                // If still no buttonText, try to get from the list response itself
+                if (!buttonText && msg.message.listResponseMessage.title) {
+                    buttonText = msg.message.listResponseMessage.title;
+                }
             }
             else if (msg.message?.interactiveResponseMessage) {
                 const interactive = msg.message.interactiveResponseMessage;
@@ -166,7 +170,7 @@ module.exports = {
                 return await handleDocumentUpload(sock, msg, session, context);
                 
             case 14: // Final confirmation - handled by button handler
-                await reply('❌ Please use the buttons to continue.');
+                // This step just shows the summary, button clicks handled separately
                 return true;
                 
             default:
@@ -219,32 +223,48 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
             sessionManager.addPendingMessage(sender, from, sentMsg1.key.id, 'survey');
             return true;
             
-        case 6: // Country selection - FIXED: Use buttonText instead of buttonId
-            if (buttonText) {
-                // Use the display text directly instead of parsing ID
-                let country = buttonText;
-                // Capitalize first letter if needed
-                country = country.charAt(0).toUpperCase() + country.slice(1).toLowerCase();
-                
-                sessionManager.updateSession(sender, from, {
-                    answers: { ...session.data.answers, country }
-                });
-                
-                const buttons = [
-                    { id: `url_${Date.now()}`, text: '🔗 Try URL Button' },
-                    { id: `skip_url_${Date.now()}`, text: '⏩ Skip' }
-                ];
-                
-                const sentMsg2 = await sendButtons(sock, from, {
-                    text: `✅ Country selected: *${country}*\n\nStep 7/13: Let's try a URL button demo. Click below:`,
-                    footer: 'URL Button Demo',
-                    buttons: buttons,
-                    aimode: FORCE_AI_MODE
-                }, {});
-                sessionManager.addPendingMessage(sender, from, sentMsg2.key.id, 'survey');
-                return true;
+        case 6: // Country selection - FIXED: Handle list button properly
+            // For list buttons, the buttonText might come from different places
+            let country = buttonText;
+            
+            // If buttonText is undefined, try to extract from buttonId
+            if (!country && buttonId) {
+                if (buttonId.startsWith('country_')) {
+                    country = buttonId.replace('country_', '');
+                } else {
+                    country = buttonId;
+                }
             }
-            break;
+            
+            // Also check if the message has a listResponseMessage with title
+            if (!country && msg.message?.listResponseMessage?.title) {
+                country = msg.message.listResponseMessage.title;
+            }
+            
+            // Capitalize properly
+            if (country) {
+                country = country.charAt(0).toUpperCase() + country.slice(1).toLowerCase();
+            } else {
+                country = 'Unknown';
+            }
+            
+            sessionManager.updateSession(sender, from, {
+                answers: { ...session.data.answers, country }
+            });
+            
+            const buttons = [
+                { id: `url_${Date.now()}`, text: '🔗 Try URL Button' },
+                { id: `skip_url_${Date.now()}`, text: '⏩ Skip' }
+            ];
+            
+            const sentMsg2 = await sendButtons(sock, from, {
+                text: `✅ Country selected: *${country}*\n\nStep 7/13: Let's try a URL button demo. Click below:`,
+                footer: 'URL Button Demo',
+                buttons: buttons,
+                aimode: FORCE_AI_MODE
+            }, {});
+            sessionManager.addPendingMessage(sender, from, sentMsg2.key.id, 'survey');
+            return true;
             
         case 7: // URL button demo choice
             if (buttonId?.includes('url')) {
@@ -434,11 +454,36 @@ async function handleButtonClick(sock, msg, session, context, buttonId, buttonTe
             
         case 14: // Final confirmation buttons
             if (buttonId?.includes('new_survey')) {
-                // Start new survey
+                // Clear current session and start new survey
                 sessionManager.clearSession(session.id);
-                const { execute } = require('./survey');
-                await execute(sock, msg, [], context);
+                
+                // Create new session and execute
+                const newSession = sessionManager.createSession(sender, from, 'survey', {
+                    step: 1,
+                    answers: {},
+                    mediaFiles: []
+                });
+                
+                const sessionId = newSession.id.split(':').pop();
+                const startId = `start_${sessionId}_${Date.now()}`;
+                const cancelId = `cancel_${sessionId}_${Date.now()}`;
+                
+                const buttons = [
+                    { id: startId, text: '✅ Start Survey' },
+                    { id: cancelId, text: '❌ Cancel' }
+                ];
+                
+                const sentMsg = await sendButtons(sock, from, {
+                    text: '📋 *Welcome to the Complete Survey*\n\nThis survey supports:\n• Text input\n• All button types\n• Images\n• Videos\n• Documents\n\nClick Start to begin!',
+                    footer: 'Multi-format Survey',
+                    buttons: buttons,
+                    aimode: FORCE_AI_MODE
+                }, {});
+                
+                sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
+                console.log(`✅ New survey session created: ${newSession.id}`);
                 return true;
+                
             } else if (buttonId?.includes('menu')) {
                 sessionManager.clearSession(session.id);
                 await reply('Returning to main menu. Use `.menu` to see all commands.');
@@ -722,10 +767,7 @@ async function handleDocumentUpload(sock, msg, session, context) {
     text = text.trim().toLowerCase();
     
     if (text === 'skip') {
-        // Skip to final
-        sessionManager.updateSession(sender, from, {
-            answers: { ...session.data.answers, document: 'skipped' }
-        });
+        // Move to final confirmation
         return await handleFinalConfirmation(sock, msg, session, context);
     }
     
@@ -813,22 +855,24 @@ async function handleFinalConfirmation(sock, msg, session, context) {
         });
     }
     
-    // Clear session
-    sessionManager.clearSession(session.id);
+    // Update session to final step (14) for button handling
+    // Don't clear session yet - wait for button clicks
+    sessionManager.updateSession(sender, from, { step: 14 });
     
     // Final buttons
-    const sessionId = Date.now();
+    const buttonId = Date.now();
     const buttons = [
-        { id: `new_survey_${sessionId}`, text: '🔄 New Survey' },
-        { id: `menu_${sessionId}`, text: '📋 Main Menu' }
+        { id: `new_survey_${buttonId}`, text: '🔄 New Survey' },
+        { id: `menu_${buttonId}`, text: '📋 Main Menu' }
     ];
     
-    await sendButtons(sock, from, {
+    const sentMsg = await sendButtons(sock, from, {
         text: summary,
         footer: 'Thank you for participating!',
         buttons: buttons,
         aimode: FORCE_AI_MODE
     }, {});
     
+    sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
     return true;
 }
