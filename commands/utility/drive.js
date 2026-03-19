@@ -4,6 +4,9 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
+const giftedBtns = require('gifted-btns');
+
+const { sendButtons } = giftedBtns;
 
 // Google Drive API Configuration
 const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download";
@@ -40,28 +43,38 @@ module.exports = {
         
         await react('📤');
         
-        // Ask for upload method
+        // Create unique button IDs with session reference
+        const sessionId = session.id.split(':').pop();
+        const urlId = `url_${sessionId}_${Date.now()}`;
+        const mediaId = `media_${sessionId}_${Date.now()}`;
+        const cancelId = `cancel_${sessionId}_${Date.now()}`;
+        
         const buttons = [
-            { id: `method_url_${Date.now()}`, text: '🔗 From URL' },
-            { id: `method_media_${Date.now()}`, text: '📎 From Media' },
-            { id: `cancel_${Date.now()}`, text: '❌ Cancel' }
+            { id: urlId, text: '🔗 From URL' },
+            { id: mediaId, text: '📎 From Media' },
+            { id: cancelId, text: '❌ Cancel' }
         ];
         
-        const sentMsg = await sock.sendMessage(from, {
+        // Use sendButtons from gifted-btns (same as button.js)
+        const sentMsg = await sendButtons(sock, from, {
             text: '📤 *Google Drive Uploader*\n\n' +
                   'How would you like to upload?\n\n' +
                   '• *From URL* - Provide a direct download link\n' +
                   '• *From Media* - Send a file directly',
             footer: 'Choose upload method',
-            buttons: buttons
-        });
+            buttons: buttons,
+            aimode: true
+        }, { quoted: msg });
         
         sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
         console.log(`✅ Drive session created: ${session.id}`);
+        console.log(`📌 Button IDs: URL=${urlId}, Media=${mediaId}, Cancel=${cancelId}`);
     },
     
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, react, isButtonClick } = context;
+        
+        console.log(`📨 Drive session step ${session.step}, isButtonClick=${isButtonClick}`);
         
         // Handle button clicks
         if (isButtonClick) {
@@ -91,23 +104,26 @@ async function handleButtonClick(sock, msg, session, context) {
     let buttonId = null;
     let buttonText = null;
     
-    // Extract button info
+    // Extract button info based on message type
     if (msg.message?.buttonsResponseMessage) {
         buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
         buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
+    } else if (msg.message?.templateButtonReplyMessage) {
+        buttonId = msg.message.templateButtonReplyMessage.selectedId;
+        buttonText = msg.message.templateButtonReplyMessage.selectedDisplayText;
     }
     
     console.log(`🔘 Drive button click: ID=${buttonId}, Text=${buttonText}`);
     
     // Handle method selection (step 1)
     if (session.step === 1) {
-        if (buttonId?.includes('method_url')) {
+        if (buttonId?.includes('url')) {
             sessionManager.updateSession(sender, from, { step: 2 });
             const sentMsg = await reply(`🔗 *Upload from URL*\n\nPlease send me the direct download link.\n\nExample: \`https://example.com/file.zip\``);
             sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'drive');
             return true;
             
-        } else if (buttonId?.includes('method_media')) {
+        } else if (buttonId?.includes('media')) {
             sessionManager.updateSession(sender, from, { step: 3 });
             const sentMsg = await reply(`📎 *Upload from Media*\n\nPlease send me the file (image, video, document, etc.)`);
             sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'drive');
@@ -120,7 +136,8 @@ async function handleButtonClick(sock, msg, session, context) {
         }
     }
     
-    return false;
+    await reply(`❌ Unhandled button click. Please try again.`);
+    return true;
 }
 
 // ==================== URL INPUT HANDLER ====================
@@ -159,6 +176,7 @@ async function handleUrlInput(sock, msg, session, context) {
     } catch (error) {
         console.error('Upload error:', error);
         await reply(`❌ Upload failed: ${error.message}`);
+        sessionManager.clearSession(session.id);
     }
     
     return true;
@@ -240,6 +258,7 @@ async function handleMediaInput(sock, msg, session, context) {
     } catch (error) {
         console.error('Media upload error:', error);
         await reply(`❌ Upload failed: ${error.message}`);
+        sessionManager.clearSession(session.id);
     }
     
     return true;
