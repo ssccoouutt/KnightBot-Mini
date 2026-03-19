@@ -168,7 +168,7 @@ class GoogleDrive {
      * List files/folders in a directory
      */
     async listFiles(folderId = 'root') {
-        return await this.request({
+        const result = await this.request({
             method: 'GET',
             url: FILE_URL,
             params: {
@@ -177,6 +177,7 @@ class GoogleDrive {
                 pageSize: 100
             }
         });
+        return result.files;
     }
 
     /**
@@ -214,9 +215,15 @@ class GoogleDrive {
         formData.append('metadata', JSON.stringify({ 
             name: filename, 
             parents: [folderId] 
-        }), { contentType: 'application/json' });
+        }), { 
+            contentType: 'application/json',
+            filename: 'metadata.json' 
+        });
         
-        formData.append('file', fs.createReadStream(filePath));
+        formData.append('file', fs.createReadStream(filePath), {
+            filename: filename,
+            contentType: 'application/octet-stream'
+        });
         
         const response = await axios.post(`${UPLOAD_URL}?uploadType=multipart`, formData, {
             headers: {
@@ -383,7 +390,9 @@ class GoogleDrive {
         const tempDir = path.join(process.cwd(), 'temp');
         if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
         
-        const tempFile = path.join(tempDir, `edit_${Date.now()}_${filename}`);
+        // Sanitize filename for temp storage (remove spaces)
+        const safeFilename = filename.replace(/\s+/g, '_');
+        const tempFile = path.join(tempDir, `edit_${Date.now()}_${safeFilename}`);
         fs.writeFileSync(tempFile, newContent, 'utf8');
         
         // Read the file content
@@ -394,7 +403,6 @@ class GoogleDrive {
         
         try {
             // Method 1: Update using media upload (simplest for text files)
-            // This updates the content WITHOUT changing the file ID
             await axios.patch(`${FILE_URL}/${fileId}?uploadType=media`, fileBuffer, {
                 headers: {
                     'Authorization': `Bearer ${token}`,
@@ -403,17 +411,25 @@ class GoogleDrive {
                 }
             });
             
-            console.log(`✅ File content updated successfully (ID preserved: ${fileId})`);
+            console.log(`✅ File updated via media upload (ID preserved: ${fileId})`);
             
-        } catch (error) {
+        } catch (mediaError) {
             console.log('Media update failed, trying multipart update...');
             
             try {
-                // Method 2: Fallback to multipart update
+                // Method 2: Multipart update with proper metadata
                 const formData = new FormData();
-                formData.append('file', fileBuffer, { 
-                    filename: filename,
-                    contentType: mimeType 
+                
+                // Add metadata
+                formData.append('metadata', JSON.stringify({ name: filename }), {
+                    contentType: 'application/json; charset=UTF-8',
+                    filename: 'metadata.json'
+                });
+                
+                // Add file content
+                formData.append('file', fileBuffer, {
+                    filename: filename, // Keep original filename with spaces
+                    contentType: mimeType
                 });
                 
                 await axios.patch(`${FILE_URL}/${fileId}?uploadType=multipart`, formData, {
@@ -425,9 +441,24 @@ class GoogleDrive {
                 
                 console.log(`✅ File updated via multipart (ID preserved: ${fileId})`);
                 
-            } catch (patchError) {
-                // If both updates fail, throw error
-                throw new Error(`Failed to update file: ${patchError.message}`);
+            } catch (multipartError) {
+                console.error('Multipart update failed:', multipartError.message);
+                
+                // Method 3: Simple content update without metadata
+                try {
+                    await axios.patch(`${FILE_URL}/${fileId}?uploadType=media`, fileBuffer, {
+                        headers: {
+                            'Authorization': `Bearer ${token}`,
+                            'Content-Type': 'text/plain',
+                            'Content-Length': fileBuffer.length
+                        }
+                    });
+                    
+                    console.log(`✅ File updated via simple upload (ID preserved: ${fileId})`);
+                    
+                } catch (simpleError) {
+                    throw new Error(`Failed to update file: ${simpleError.message}`);
+                }
             }
         }
         
@@ -498,7 +529,6 @@ class GoogleDrive {
                 fields: 'files(id, name, mimeType, size, webViewLink)'
             }
         });
-        
         return result.files;
     }
 }
