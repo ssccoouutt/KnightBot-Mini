@@ -33,10 +33,14 @@ module.exports = {
         
         await react('📋');
         
-        // Send welcome message with native buttons
+        // Create unique button IDs that include session reference
+        const sessionId = session.id.split(':').pop();
+        const startId = `start_${sessionId}_${Date.now()}`;
+        const cancelId = `cancel_${sessionId}_${Date.now()}`;
+        
         const buttons = [
-            { id: `start_${Date.now()}`, text: '✅ Start Survey' },
-            { id: `cancel_${Date.now()}`, text: '❌ Cancel' }
+            { id: startId, text: '✅ Start Survey' },
+            { id: cancelId, text: '❌ Cancel' }
         ];
         
         const sentMsg = await sendButtons(sock, from, {
@@ -48,6 +52,7 @@ module.exports = {
         
         sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
         console.log(`✅ Survey session created: ${session.id}`);
+        console.log(`📌 Button IDs: Start=${startId}, Cancel=${cancelId}`);
     },
     
     async handleSession(sock, msg, session, context) {
@@ -138,9 +143,11 @@ module.exports = {
 async function handleButtonClick(sock, msg, session, context) {
     const { from, sender, reply } = context;
     
-    // Extract button info
+    // Extract button info - IMPROVED VERSION
     let buttonId = null;
     let buttonText = null;
+    
+    console.log('🔍 Raw message structure:', Object.keys(msg.message || {}));
     
     // Method 1: buttonsResponseMessage (native buttons)
     if (msg.message?.buttonsResponseMessage) {
@@ -172,66 +179,93 @@ async function handleButtonClick(sock, msg, session, context) {
         }
     }
     
-    // Fallback to message text
+    // If still no buttonId, try to get from quoted message
     if (!buttonId) {
-        buttonId = msg.message?.conversation || 
-                   msg.message?.extendedTextMessage?.text || 
-                   'unknown';
-        console.log('⚠️ Using text as buttonId:', buttonId);
+        const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
+        if (contextInfo?.quotedMessage) {
+            console.log('🔍 Found quoted message, checking for button info');
+            // Try to extract from quoted message if needed
+        }
     }
     
-    console.log(`🔘 Button clicked: ID=${buttonId}, Text=${buttonText}`);
+    // Last resort: use message text
+    if (!buttonId && (msg.message?.conversation || msg.message?.extendedTextMessage?.text)) {
+        buttonId = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
+        console.log('⚠️ Using message text as buttonId:', buttonId);
+    }
+    
+    console.log(`🔘 Final button info: ID=${buttonId}, Text=${buttonText}`);
     
     // Handle based on current step
     switch (session.step) {
         case 1: // Start/Cancel buttons
-            if (buttonText?.toLowerCase().includes('start') || buttonId?.toLowerCase().includes('start')) {
+            if (buttonId?.toLowerCase().includes('start')) {
+                // Move to name input
                 sessionManager.updateSession(sender, from, { step: 2 });
                 const sentMsg = await reply(`📋 *Step 1/13:* What's your name?`);
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
-            } else if (buttonText?.toLowerCase().includes('cancel') || buttonId?.toLowerCase().includes('cancel')) {
+                return true;
+            } else if (buttonId?.toLowerCase().includes('cancel')) {
                 sessionManager.clearSession(session.id);
                 await reply('❌ Survey cancelled. You can start again with `.survey`');
+                return true;
             }
             break;
             
         case 4: // Gender selection
+            // Gender buttons have IDs like "gender_male_xxx", "gender_female_xxx", etc.
+            if (buttonId?.includes('gender_male')) {
+                buttonText = 'Male';
+            } else if (buttonId?.includes('gender_female')) {
+                buttonText = 'Female';
+            } else if (buttonId?.includes('gender_other')) {
+                buttonText = 'Other';
+            } else if (buttonId?.includes('gender_prefer_not')) {
+                buttonText = 'Prefer not to say';
+            }
+            
             const gender = buttonText || 'Not specified';
             sessionManager.updateSession(sender, from, {
                 answers: { ...session.data.answers, gender }
             });
+            
             const sentMsg1 = await reply(`✅ Gender recorded: *${gender}*\n\nStep 5/13: What's your favorite color?`);
             sessionManager.addPendingMessage(sender, from, sentMsg1.key.id, 'survey');
-            break;
+            return true;
             
-        case 6: // Country selection
-            let country = buttonId || buttonText || 'Unknown';
-            if (country.startsWith('country_')) {
-                country = country.replace('country_', '');
+        case 6: // Country selection - handle list button response
+            // For list buttons, the selected row ID contains the country
+            if (buttonId) {
+                let country = buttonId;
+                if (country.startsWith('country_')) {
+                    country = country.replace('country_', '');
+                }
+                // Capitalize first letter
+                country = country.charAt(0).toUpperCase() + country.slice(1);
+                
+                sessionManager.updateSession(sender, from, {
+                    answers: { ...session.data.answers, country }
+                });
+                
+                const buttons = [
+                    { id: `url_${Date.now()}`, text: '🔗 Try URL Button' },
+                    { id: `skip_url_${Date.now()}`, text: '⏩ Skip' }
+                ];
+                
+                const sentMsg2 = await sendButtons(sock, from, {
+                    text: `✅ Country selected: *${country}*\n\nStep 7/13: Let's try a URL button demo. Click below:`,
+                    footer: 'URL Button Demo',
+                    buttons: buttons,
+                    aimode: global.aiMode.get(from) || false
+                }, {});
+                sessionManager.addPendingMessage(sender, from, sentMsg2.key.id, 'survey');
+                return true;
             }
-            country = country.charAt(0).toUpperCase() + country.slice(1);
-            
-            sessionManager.updateSession(sender, from, {
-                answers: { ...session.data.answers, country }
-            });
-            
-            const buttons = [
-                { id: `url_demo_${Date.now()}`, text: '🔗 Try URL Button' },
-                { id: `skip_url_${Date.now()}`, text: '⏩ Skip' }
-            ];
-            
-            const sentMsg2 = await sendButtons(sock, from, {
-                text: `✅ Country selected: *${country}*\n\nStep 7/13: Let's try a URL button demo. Click below:`,
-                footer: 'URL Button Demo',
-                buttons: buttons,
-                aimode: global.aiMode.get(from) || false
-            }, {});
-            sessionManager.addPendingMessage(sender, from, sentMsg2.key.id, 'survey');
             break;
             
-        case 7: // URL button demo
-            if (buttonText?.includes('URL') || buttonId?.includes('url')) {
-                // Send actual URL button
+        case 7: // URL button demo choice
+            if (buttonId?.includes('url')) {
+                // User wants to try URL button
                 const urlButtons = [{
                     name: 'cta_url',
                     buttonParamsJson: JSON.stringify({
@@ -247,10 +281,13 @@ async function handleButtonClick(sock, msg, session, context) {
                 }, {});
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
                 
-                // Move to next step after a short delay
+                // Move to next step
+                sessionManager.updateSession(sender, from, { step: 8 });
+                
+                // Send next options
                 setTimeout(async () => {
                     const nextButtons = [
-                        { id: `call_demo_${Date.now()}`, text: '📞 Try Call Button' },
+                        { id: `call_${Date.now()}`, text: '📞 Try Call Button' },
                         { id: `skip_call_${Date.now()}`, text: '⏩ Skip' }
                     ];
                     const nextMsg = await sendButtons(sock, from, {
@@ -260,13 +297,13 @@ async function handleButtonClick(sock, msg, session, context) {
                         aimode: global.aiMode.get(from) || false
                     }, {});
                     sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
-                    sessionManager.updateSession(sender, from, { step: 8 });
                 }, 2000);
+                return true;
             } else {
                 // Skip to next step
                 sessionManager.updateSession(sender, from, { step: 8 });
                 const nextButtons = [
-                    { id: `call_demo_${Date.now()}`, text: '📞 Try Call Button' },
+                    { id: `call_${Date.now()}`, text: '📞 Try Call Button' },
                     { id: `skip_call_${Date.now()}`, text: '⏩ Skip' }
                 ];
                 const nextMsg = await sendButtons(sock, from, {
@@ -276,11 +313,11 @@ async function handleButtonClick(sock, msg, session, context) {
                     aimode: global.aiMode.get(from) || false
                 }, {});
                 sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
+                return true;
             }
-            break;
             
-        case 8: // Call button demo
-            if (buttonText?.includes('Call') || buttonId?.includes('call')) {
+        case 8: // Call button demo choice
+            if (buttonId?.includes('call')) {
                 // Send actual call button
                 const callButtons = [{
                     name: 'cta_call',
@@ -297,9 +334,11 @@ async function handleButtonClick(sock, msg, session, context) {
                 }, {});
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
                 
+                sessionManager.updateSession(sender, from, { step: 9 });
+                
                 setTimeout(async () => {
                     const nextButtons = [
-                        { id: `copy_demo_${Date.now()}`, text: '📋 Try Copy Button' },
+                        { id: `copy_${Date.now()}`, text: '📋 Try Copy Button' },
                         { id: `skip_copy_${Date.now()}`, text: '⏩ Skip' }
                     ];
                     const nextMsg = await sendButtons(sock, from, {
@@ -309,12 +348,12 @@ async function handleButtonClick(sock, msg, session, context) {
                         aimode: global.aiMode.get(from) || false
                     }, {});
                     sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
-                    sessionManager.updateSession(sender, from, { step: 9 });
                 }, 2000);
+                return true;
             } else {
                 sessionManager.updateSession(sender, from, { step: 9 });
                 const nextButtons = [
-                    { id: `copy_demo_${Date.now()}`, text: '📋 Try Copy Button' },
+                    { id: `copy_${Date.now()}`, text: '📋 Try Copy Button' },
                     { id: `skip_copy_${Date.now()}`, text: '⏩ Skip' }
                 ];
                 const nextMsg = await sendButtons(sock, from, {
@@ -324,11 +363,11 @@ async function handleButtonClick(sock, msg, session, context) {
                     aimode: global.aiMode.get(from) || false
                 }, {});
                 sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
+                return true;
             }
-            break;
             
-        case 9: // Copy button demo
-            if (buttonText?.includes('Copy') || buttonId?.includes('copy')) {
+        case 9: // Copy button demo choice
+            if (buttonId?.includes('copy')) {
                 // Send actual copy button
                 const copyButtons = [{
                     name: 'cta_copy',
@@ -345,9 +384,11 @@ async function handleButtonClick(sock, msg, session, context) {
                 }, {});
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
                 
+                sessionManager.updateSession(sender, from, { step: 10 });
+                
                 setTimeout(async () => {
                     const nextButtons = [
-                        { id: `location_demo_${Date.now()}`, text: '📍 Try Location Button' },
+                        { id: `location_${Date.now()}`, text: '📍 Try Location Button' },
                         { id: `skip_location_${Date.now()}`, text: '⏩ Skip' }
                     ];
                     const nextMsg = await sendButtons(sock, from, {
@@ -357,12 +398,12 @@ async function handleButtonClick(sock, msg, session, context) {
                         aimode: global.aiMode.get(from) || false
                     }, {});
                     sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
-                    sessionManager.updateSession(sender, from, { step: 10 });
                 }, 2000);
+                return true;
             } else {
                 sessionManager.updateSession(sender, from, { step: 10 });
                 const nextButtons = [
-                    { id: `location_demo_${Date.now()}`, text: '📍 Try Location Button' },
+                    { id: `location_${Date.now()}`, text: '📍 Try Location Button' },
                     { id: `skip_location_${Date.now()}`, text: '⏩ Skip' }
                 ];
                 const nextMsg = await sendButtons(sock, from, {
@@ -372,11 +413,11 @@ async function handleButtonClick(sock, msg, session, context) {
                     aimode: global.aiMode.get(from) || false
                 }, {});
                 sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
+                return true;
             }
-            break;
             
-        case 10: // Location button demo
-            if (buttonText?.includes('Location') || buttonId?.includes('location')) {
+        case 10: // Location button demo choice
+            if (buttonId?.includes('location')) {
                 // Send actual location button
                 const locationButtons = [{
                     name: 'cta_location',
@@ -394,22 +435,27 @@ async function handleButtonClick(sock, msg, session, context) {
                 }, {});
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'survey');
                 
+                sessionManager.updateSession(sender, from, { step: 11 });
+                
                 setTimeout(async () => {
                     const nextMsg = await reply(`Step 11/13: Now please send a photo (or type "skip"):`);
                     sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
-                    sessionManager.updateSession(sender, from, { step: 11 });
                 }, 2000);
+                return true;
             } else {
                 sessionManager.updateSession(sender, from, { step: 11 });
                 const nextMsg = await reply(`Step 11/13: Please send a photo (or type "skip"):`);
                 sessionManager.addPendingMessage(sender, from, nextMsg.key.id, 'survey');
+                return true;
             }
-            break;
             
         default:
             await reply(`❌ Button not expected at this step. Please follow the instructions.`);
+            return true;
     }
     
+    // If we get here, button wasn't handled
+    await reply(`❌ Unhandled button click. Please try again.`);
     return true;
 }
 
@@ -464,11 +510,12 @@ async function handleAgeInput(sock, msg, session, context) {
     });
     
     // Gender selection buttons
+    const sessionId = session.id.split(':').pop();
     const buttons = [
-        { id: `gender_male_${Date.now()}`, text: '👨 Male' },
-        { id: `gender_female_${Date.now()}`, text: '👩 Female' },
-        { id: `gender_other_${Date.now()}`, text: '⚧ Other' },
-        { id: `gender_prefer_not_${Date.now()}`, text: '🔳 Prefer not' }
+        { id: `gender_male_${sessionId}_${Date.now()}`, text: '👨 Male' },
+        { id: `gender_female_${sessionId}_${Date.now()}`, text: '👩 Female' },
+        { id: `gender_other_${sessionId}_${Date.now()}`, text: '⚧ Other' },
+        { id: `gender_prefer_not_${sessionId}_${Date.now()}`, text: '🔳 Prefer not' }
     ];
     
     const sentMsg = await sendButtons(sock, from, {
@@ -774,9 +821,10 @@ async function handleFinalConfirmation(sock, msg, session, context) {
     sessionManager.clearSession(session.id);
     
     // Final buttons
+    const sessionId = Date.now();
     const buttons = [
-        { id: `new_survey_${Date.now()}`, text: '🔄 New Survey' },
-        { id: `menu_${Date.now()}`, text: '📋 Main Menu' }
+        { id: `new_survey_${sessionId}`, text: '🔄 New Survey' },
+        { id: `menu_${sessionId}`, text: '📋 Main Menu' }
     ];
     
     await sendButtons(sock, from, {
