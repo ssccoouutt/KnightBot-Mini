@@ -67,12 +67,16 @@ module.exports = {
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, react, isButtonClick } = context;
         
+        // Log what we received
+        console.log(`📨 Drive session handling - isButtonClick from context: ${isButtonClick}`);
+        
         // Get the button ID from the message if this is a button click
         let buttonId = null;
         let buttonText = null;
         
+        // EXACT same extraction as survey.js
         if (isButtonClick) {
-            // Extract button ID based on message type - EXACTLY like survey.js
+            // Extract button ID based on message type
             if (msg.message?.buttonsResponseMessage) {
                 buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
                 buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
@@ -131,7 +135,7 @@ module.exports = {
         
         console.log(`📨 Drive session step ${session.step}: text="${text}", hasMedia=${hasMedia}, isButtonClick=${isButtonClick}, buttonId=${buttonId}`);
         
-        // Handle button clicks based on current step - EXACTLY like survey.js
+        // Handle button clicks based on current step - EXACT same as survey.js
         if (isButtonClick && buttonId) {
             return await handleButtonClick(sock, msg, session, context, buttonId, buttonText);
         }
