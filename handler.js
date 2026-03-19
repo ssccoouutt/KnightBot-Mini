@@ -770,62 +770,24 @@ const handleMessage = async (sock, msg) => {
     // WhatsApp sends button clicks as messages with buttonsResponseMessage, listResponseMessage, or interactiveResponseMessage
     const isButtonClick = !!(msg.message?.buttonsResponseMessage || 
                             msg.message?.listResponseMessage || 
-                            msg.message?.interactiveResponseMessage);
+                            msg.message?.interactiveResponseMessage ||
+                            msg.message?.templateButtonReplyMessage ||
+                            msg.message?.buttonsMessage);
 
-    // Also check for interactive response messages (common in newer versions)
-    const interactiveResponse = msg.message?.interactiveResponseMessage;
-    const nativeFlowResponse = interactiveResponse?.nativeFlowResponseMessage;
-
+    // Log for debugging
     if (isButtonClick) {
-        // This is a BUTTON CLICK - it will have a quoted message ID
-        console.log(`🔘 BUTTON CLICK detected!`);
-        
-        // Button clicks always quote the original message
-        if (quotedMessageId) {
-            const sessionInfo = sessionManager.findSessionByRepliedMessage(quotedMessageId, sender);
-            
-            if (sessionInfo) {
-                const { session, pendingInfo } = sessionInfo;
-                
-                console.log(`💬 Button click routed to session: ${pendingInfo.command} (step ${session.step})`);
-                
-                // Activate this session
-                sessionManager.activateSession(sender, from, session.id);
-                
-                const sessionCommand = commands.get(pendingInfo.command);
-                
-                if (sessionCommand && typeof sessionCommand.handleSession === 'function') {
-                    // Pass isButtonClick=true to the command
-                    const handled = await sessionCommand.handleSession(sock, msg, session, {
-                        from,
-                        sender,
-                        isGroup,
-                        groupMetadata,
-                        isOwner: isOwner(sender),
-                        isAdmin: await isAdmin(sock, sender, from, groupMetadata),
-                        isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
-                        isMod: isMod(sender),
-                        isButtonClick: true, // This is definitely a button click
-                        reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
-                        react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
-                    });
-                    
-                    if (handled) {
-                        return;
-                    }
-                }
-            }
-        }
+        console.log(`🔘 BUTTON CLICK DETECTED!`);
     }
 
-    // If not a button click, check for regular replies
-    if (quotedMessageId && !isButtonClick) {
-        // This is a REGULAR REPLY to some message
+    if (quotedMessageId) {
+        // This is a REPLY to some message
         console.log(`🔍 Checking reply to message ID: ${quotedMessageId}`);
         
+        // Find which session has this message ID in its pendingMessages
         const sessionInfo = sessionManager.findSessionByRepliedMessage(quotedMessageId, sender);
         
         if (sessionInfo) {
+            // Found a session - this reply belongs to it
             const { session, pendingInfo } = sessionInfo;
             
             // Check if session exists (not expired)
@@ -838,8 +800,10 @@ const handleMessage = async (sock, msg) => {
             
             console.log(`💬 REPLY routed to CORRECT session: ${pendingInfo.command} (step ${session.step})`);
             
+            // IMPORTANT: Activate this session and freeze others
             sessionManager.activateSession(sender, from, session.id);
             
+            // Get the command that owns this session
             const sessionCommand = commands.get(pendingInfo.command);
             
             if (sessionCommand && typeof sessionCommand.handleSession === 'function') {
@@ -852,13 +816,13 @@ const handleMessage = async (sock, msg) => {
                     isAdmin: await isAdmin(sock, sender, from, groupMetadata),
                     isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
                     isMod: isMod(sender),
-                    isButtonClick: false, // This is a regular reply, not a button click
+                    isButtonClick: isButtonClick, // Pass whether this is a button click
                     reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
                     react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
                 });
                 
                 if (handled) {
-                    return;
+                    return; // Message handled by session
                 }
             }
         } else {
@@ -867,44 +831,41 @@ const handleMessage = async (sock, msg) => {
         }
     }
 
-    // If we get here, it's NOT a reply or button click
+    // If we get here, it's NOT a reply to any bot message
     const isCommand = body.startsWith(config.prefix);
 
     if (!isCommand) {
         // This is a DIRECT MESSAGE
+        // Only get the latest session if it exists and is ACTIVE (not frozen)
         const latestSession = sessionManager.getLatestSession(sender, from);
         
-        if (latestSession) {
-            // Only route direct messages to the latest session if it exists and is active
-            // Don't automatically activate frozen sessions from direct messages
-            if (!sessionManager.isSessionFrozen(latestSession.id)) {
-                console.log(`💬 DIRECT MESSAGE routed to latest session: ${latestSession.command} (step ${latestSession.step})`);
+        if (latestSession && !sessionManager.isSessionFrozen(latestSession.id)) {
+            console.log(`💬 DIRECT MESSAGE routed to latest ACTIVE session: ${latestSession.command} (step ${latestSession.step})`);
+            
+            const sessionCommand = commands.get(latestSession.command);
+            
+            if (sessionCommand && typeof sessionCommand.handleSession === 'function') {
+                const handled = await sessionCommand.handleSession(sock, msg, latestSession, {
+                    from,
+                    sender,
+                    isGroup,
+                    groupMetadata,
+                    isOwner: isOwner(sender),
+                    isAdmin: await isAdmin(sock, sender, from, groupMetadata),
+                    isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
+                    isMod: isMod(sender),
+                    isButtonClick: false,
+                    reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+                    react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
+                });
                 
-                const sessionCommand = commands.get(latestSession.command);
-                
-                if (sessionCommand && typeof sessionCommand.handleSession === 'function') {
-                    const handled = await sessionCommand.handleSession(sock, msg, latestSession, {
-                        from,
-                        sender,
-                        isGroup,
-                        groupMetadata,
-                        isOwner: isOwner(sender),
-                        isAdmin: await isAdmin(sock, sender, from, groupMetadata),
-                        isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
-                        isMod: isMod(sender),
-                        isButtonClick: false,
-                        reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
-                        react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
-                    });
-                    
-                    if (handled) {
-                        return;
-                    }
+                if (handled) {
+                    return; // Message handled by session
                 }
-            } else {
-                console.log(`💬 Latest session is frozen - direct message ignored`);
-                // Let it fall through to normal message handling (no response)
             }
+        } else if (latestSession) {
+            console.log(`💬 Latest session exists but is FROZEN - direct message ignored`);
+            // Let it fall through to normal message handling (no response)
         }
     }
     // ===== END UNIVERSAL SESSION DETECTION =====
