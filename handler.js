@@ -19,6 +19,16 @@ const CACHE_TTL = 60000; // 1 minute cache
 // Load all commands
 const commands = loadCommands();
 
+// Helper function to convert stream to buffer
+const streamToBuffer = async (stream) => {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    stream.on('data', chunk => chunks.push(chunk));
+    stream.on('end', () => resolve(Buffer.concat(chunks)));
+    stream.on('error', reject);
+  });
+};
+
 // Unwrap WhatsApp containers (ephemeral, view once, etc.)
 const getMessageContent = (msg) => {
   if (!msg || !msg.message) return null;
@@ -371,6 +381,277 @@ const isSystemJid = (jid) => {
          jid.includes('@newsletter.');
 };
 
+// ===== GROUP FORWARDING FEATURE =====
+const checkAndForwardMessage = async (sock, msg, from, content) => {
+  try {
+    // Only forward messages from groups
+    if (!from.endsWith('@g.us')) return;
+    
+    // Get forwarding configuration for this source group
+    const forwardingConfig = database.getGroupForwarding(from);
+    
+    // Check if forwarding is enabled
+    if (!forwardingConfig || !forwardingConfig.enabled) return;
+    
+    const targetGroupId = forwardingConfig.targetGroupId;
+    if (!targetGroupId) return;
+    
+    // Don't forward messages from the bot itself (to avoid loops)
+    if (msg.key.fromMe) return;
+    
+    // Don't forward system messages
+    const isSystem = from.includes('@broadcast') || 
+                     from.includes('status.broadcast') || 
+                     from.includes('@newsletter');
+    if (isSystem) return;
+    
+    // Get message content
+    const messageContent = content || getMessageContent(msg);
+    if (!messageContent) return;
+    
+    // Get sender info
+    const sender = msg.key.participant || msg.key.remoteJid;
+    const senderNumber = sender.split('@')[0];
+    
+    // Get sender's name if possible
+    let senderName = senderNumber;
+    try {
+      // Try to get from contact store
+      if (sock.store && sock.store.contacts && sock.store.contacts[sender]) {
+        const contact = sock.store.contacts[sender];
+        if (contact.notify && contact.notify.trim() && !contact.notify.match(/^\d+$/)) {
+          senderName = contact.notify.trim();
+        } else if (contact.name && contact.name.trim() && !contact.name.match(/^\d+$/)) {
+          senderName = contact.name.trim();
+        }
+      }
+      
+      // If still number, try onWhatsApp
+      if (senderName === senderNumber) {
+        const contactInfo = await sock.onWhatsApp(sender);
+        if (contactInfo && contactInfo[0] && contactInfo[0].name) {
+          senderName = contactInfo[0].name;
+        }
+      }
+    } catch (err) {
+      // Use number if name not found
+    }
+    
+    // Get source group name
+    let sourceGroupName = from;
+    try {
+      const groupMeta = await getCachedGroupMetadata(sock, from);
+      if (groupMeta && groupMeta.subject) {
+        sourceGroupName = groupMeta.subject;
+      }
+    } catch (err) {
+      // Use JID if name not found
+    }
+    
+    // Prepare forwarded message header
+    const header = `📨 *Forwarded from Group*\n` +
+                   `👤 *From:* ${senderName}\n` +
+                   `🆔 *Sender:* ${senderNumber}\n` +
+                   `📌 *Source:* ${sourceGroupName}\n` +
+                   `⏰ *Time:* ${new Date().toLocaleString()}\n` +
+                   `━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    
+    try {
+      // Handle different message types
+      let forwarded = false;
+      
+      // Text message
+      if (messageContent.conversation) {
+        const text = header + messageContent.conversation;
+        await sock.sendMessage(targetGroupId, { 
+          text: text,
+          contextInfo: {
+            forwardingScore: 1,
+            isForwarded: true,
+            forwardedNewsletterMessageInfo: {
+              newsletterJid: from,
+              newsletterName: sourceGroupName
+            }
+          }
+        });
+        forwarded = true;
+      }
+      // Extended text message
+      else if (messageContent.extendedTextMessage) {
+        const text = header + (messageContent.extendedTextMessage.text || '');
+        await sock.sendMessage(targetGroupId, { 
+          text: text,
+          contextInfo: {
+            forwardingScore: 1,
+            isForwarded: true
+          }
+        });
+        forwarded = true;
+      }
+      // Image message
+      else if (messageContent.imageMessage) {
+        const image = messageContent.imageMessage;
+        const caption = header + (image.caption || '');
+        
+        // Download the image
+        const stream = await sock.downloadMediaMessage(msg);
+        const buffer = Buffer.from(await streamToBuffer(stream));
+        
+        await sock.sendMessage(targetGroupId, {
+          image: buffer,
+          caption: caption,
+          contextInfo: {
+            forwardingScore: 1,
+            isForwarded: true
+          }
+        });
+        forwarded = true;
+      }
+      // Video message
+      else if (messageContent.videoMessage) {
+        const video = messageContent.videoMessage;
+        const caption = header + (video.caption || '');
+        
+        // Download the video
+        const stream = await sock.downloadMediaMessage(msg);
+        const buffer = Buffer.from(await streamToBuffer(stream));
+        
+        await sock.sendMessage(targetGroupId, {
+          video: buffer,
+          caption: caption,
+          mimetype: video.mimetype,
+          contextInfo: {
+            forwardingScore: 1,
+            isForwarded: true
+          }
+        });
+        forwarded = true;
+      }
+      // Audio message
+      else if (messageContent.audioMessage) {
+        const audio = messageContent.audioMessage;
+        
+        // Download the audio
+        const stream = await sock.downloadMediaMessage(msg);
+        const buffer = Buffer.from(await streamToBuffer(stream));
+        
+        await sock.sendMessage(targetGroupId, {
+          audio: buffer,
+          mimetype: audio.mimetype,
+          ptt: audio.ptt || false,
+          contextInfo: {
+            forwardingScore: 1,
+            isForwarded: true
+          }
+        });
+        
+        // Send header separately for audio
+        await sock.sendMessage(targetGroupId, { text: header });
+        forwarded = true;
+      }
+      // Document message
+      else if (messageContent.documentMessage) {
+        const doc = messageContent.documentMessage;
+        const caption = header + (doc.caption || '');
+        
+        // Download the document
+        const stream = await sock.downloadMediaMessage(msg);
+        const buffer = Buffer.from(await streamToBuffer(stream));
+        
+        await sock.sendMessage(targetGroupId, {
+          document: buffer,
+          mimetype: doc.mimetype,
+          fileName: doc.fileName,
+          caption: caption,
+          contextInfo: {
+            forwardingScore: 1,
+            isForwarded: true
+          }
+        });
+        forwarded = true;
+      }
+      // Sticker message
+      else if (messageContent.stickerMessage) {
+        // Download the sticker
+        const stream = await sock.downloadMediaMessage(msg);
+        const buffer = Buffer.from(await streamToBuffer(stream));
+        
+        await sock.sendMessage(targetGroupId, {
+          sticker: buffer,
+          contextInfo: {
+            forwardingScore: 1,
+            isForwarded: true
+          }
+        });
+        
+        // Send header separately for sticker
+        await sock.sendMessage(targetGroupId, { text: header });
+        forwarded = true;
+      }
+      // Location message
+      else if (messageContent.locationMessage) {
+        const location = messageContent.locationMessage;
+        const text = header + `📍 *Location*\nLatitude: ${location.degreesLatitude}\nLongitude: ${location.degreesLongitude}`;
+        
+        await sock.sendMessage(targetGroupId, {
+          text: text,
+          contextInfo: {
+            forwardingScore: 1,
+            isForwarded: true
+          }
+        });
+        forwarded = true;
+      }
+      // Contact message
+      else if (messageContent.contactMessage) {
+        const contact = messageContent.contactMessage;
+        const text = header + `👤 *Contact*\nName: ${contact.displayName}\nNumber: ${contact.vcard ? 'See vCard' : ''}`;
+        
+        await sock.sendMessage(targetGroupId, {
+          text: text,
+          contextInfo: {
+            forwardingScore: 1,
+            isForwarded: true
+          }
+        });
+        
+        // Also forward vCard if available
+        if (contact.vcard) {
+          await sock.sendMessage(targetGroupId, {
+            text: contact.vcard
+          });
+        }
+        forwarded = true;
+      }
+      // Poll creation message
+      else if (messageContent.pollCreationMessage) {
+        const poll = messageContent.pollCreationMessage;
+        const text = header + `📊 *Poll*\nQuestion: ${poll.name}\nOptions:\n${poll.options.map(opt => `• ${opt.optionName}`).join('\n')}`;
+        
+        await sock.sendMessage(targetGroupId, {
+          text: text,
+          contextInfo: {
+            forwardingScore: 1,
+            isForwarded: true
+          }
+        });
+        forwarded = true;
+      }
+      
+      if (forwarded) {
+        console.log(`📤 Forwarded message from ${from} to ${targetGroupId}`);
+      }
+      
+    } catch (forwardError) {
+      console.error('Error forwarding message:', forwardError);
+      // Don't throw, just log error
+    }
+    
+  } catch (error) {
+    console.error('Error in checkAndForwardMessage:', error);
+  }
+};
+
 // Main message handler
 const handleMessage = async (sock, msg) => {
   try {
@@ -427,6 +708,11 @@ const handleMessage = async (sock, msg) => {
     // Unwrap containers first
     const content = getMessageContent(msg);
     // Note: We don't return early if content is null because forwarded status messages might not have content
+    
+    // ===== CHECK AND FORWARD MESSAGE (NEW FEATURE) =====
+    // This must run early to capture all messages before any other processing
+    await checkAndForwardMessage(sock, msg, from, content);
+    // ===== END FORWARDING CHECK =====
     
     // Still check for actual message content for regular processing
     let actualMessageTypes = [];
