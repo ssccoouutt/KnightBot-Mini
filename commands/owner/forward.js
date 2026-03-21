@@ -5,9 +5,6 @@
 
 const database = require('../../database');
 const config = require('../../config');
-const { jidDecode, jidEncode } = require('@whiskeysockets/baileys');
-const path = require('path');
-const fs = require('fs');
 
 // Helper function to normalize JID (extract phone number)
 const normalizeJid = (jid) => {
@@ -108,8 +105,8 @@ module.exports = {
         }
         
         // Verify bot is in source group
-        const botInSource = await isBotInGroup(sock, sourceGroupId);
-        if (!botInSource) {
+        const isSourceGroupValid = await isBotInGroup(sock, sourceGroupId);
+        if (!isSourceGroupValid) {
           return reply(`❌ Bot is not in the source group!\n\n` +
             `Source JID: ${sourceGroupId}\n\n` +
             `Please add the bot to the source group first.\n` +
@@ -117,8 +114,8 @@ module.exports = {
         }
         
         // Check if bot is in current group (target)
-        const botInTarget = await isBotInGroup(sock, currentGroup);
-        if (!botInTarget) {
+        const isTargetGroupValid = await isBotInGroup(sock, currentGroup);
+        if (!isTargetGroupValid) {
           return reply(`❌ Bot is not in the current group!\n\n` +
             `Make sure the bot is a member of this group.`);
         }
@@ -159,15 +156,15 @@ module.exports = {
         }
         
         // Verify bot is in current group (source)
-        const botInSource = await isBotInGroup(sock, currentGroup);
-        if (!botInSource) {
+        const isSourceValid = await isBotInGroup(sock, currentGroup);
+        if (!isSourceValid) {
           return reply(`❌ Bot is not in the current group!\n\n` +
             `Make sure the bot is a member of this group.`);
         }
         
         // Verify bot is in target group
-        const botInTarget = await isBotInGroup(sock, targetGroupId);
-        if (!botInTarget) {
+        const isTargetValid = await isBotInGroup(sock, targetGroupId);
+        if (!isTargetValid) {
           return reply(`❌ Bot is not in the target group!\n\n` +
             `Target JID: ${targetGroupId}\n\n` +
             `Please add the bot to the target group first.\n` +
@@ -176,16 +173,16 @@ module.exports = {
         }
         
         // Get group names
-        const sourceName = await getGroupName(sock, currentGroup);
-        const targetName = await getGroupName(sock, targetGroupId);
+        const sourceGroupName = await getGroupName(sock, currentGroup);
+        const targetGroupName = await getGroupName(sock, targetGroupId);
         
         // Save forwarding config
         database.setGroupForwarding(currentGroup, targetGroupId, true, sender);
         
         await react('✅');
         return reply(`✅ *Forwarding Configured Successfully*\n\n` +
-          `📤 *Source Group:* ${sourceName}\n` +
-          `📥 *Target Group:* ${targetName}\n` +
+          `📤 *Source Group:* ${sourceGroupName}\n` +
+          `📥 *Target Group:* ${targetGroupName}\n` +
           `🆔 *Source JID:* ${currentGroup}\n` +
           `🆔 *Target JID:* ${targetGroupId}\n` +
           `🔄 *Status:* ✅ Active\n` +
@@ -206,11 +203,11 @@ module.exports = {
         
         for (const f of forwardings) {
           // Get group names
-          const sourceName = await getGroupName(sock, f.sourceGroupId);
-          const targetName = await getGroupName(sock, f.targetGroupId);
+          const srcName = await getGroupName(sock, f.sourceGroupId);
+          const tgtName = await getGroupName(sock, f.targetGroupId);
           
-          listMsg += `${count}. *${sourceName}*\n`;
-          listMsg += `   ➡️ → ${targetName}\n`;
+          listMsg += `${count}. *${srcName}*\n`;
+          listMsg += `   ➡️ → ${tgtName}\n`;
           listMsg += `   🆔 Source: \`${f.sourceGroupId}\`\n`;
           listMsg += `   🆔 Target: \`${f.targetGroupId}\`\n`;
           listMsg += `   🔘 Status: ${f.enabled ? '✅ Active' : '⏸️ Disabled'}\n`;
@@ -269,10 +266,10 @@ module.exports = {
         
         await react(newState ? '✅' : '⏸️');
         
-        const sourceName = await getGroupName(sock, sourceToToggle);
+        const toggledGroupName = await getGroupName(sock, sourceToToggle);
         
         return reply(`✅ *Forwarding ${newState ? 'Enabled' : 'Disabled'}*\n\n` +
-          `📤 Source: ${sourceName}\n` +
+          `📤 Source: ${toggledGroupName}\n` +
           `📥 Target: ${currentConfig.targetGroupId}\n` +
           `🔄 Status: ${newState ? '✅ Active' : '⏸️ Disabled'}`);
         
