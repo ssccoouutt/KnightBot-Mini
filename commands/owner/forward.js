@@ -5,18 +5,69 @@
 
 const database = require('../../database');
 const config = require('../../config');
+const { jidDecode, jidEncode } = require('@whiskeysockets/baileys');
+const path = require('path');
+const fs = require('fs');
+
+// Helper function to normalize JID (extract phone number)
+const normalizeJid = (jid) => {
+  if (!jid) return null;
+  if (typeof jid !== 'string') return null;
+  
+  // Remove device ID if present
+  if (jid.includes(':')) {
+    return jid.split(':')[0];
+  }
+  // Remove domain if present
+  if (jid.includes('@')) {
+    return jid.split('@')[0];
+  }
+  return jid;
+};
+
+// Helper to check if bot is in group (more reliable)
+const isBotInGroup = async (sock, groupId) => {
+  try {
+    const metadata = await sock.groupMetadata(groupId);
+    if (!metadata || !metadata.participants) return false;
+    
+    const botJid = sock.user.id;
+    const botNumber = normalizeJid(botJid);
+    
+    // Check all participants for bot's JID
+    const found = metadata.participants.some(p => {
+      const participantNumber = normalizeJid(p.id);
+      return participantNumber === botNumber || p.id === botJid;
+    });
+    
+    return found;
+  } catch (error) {
+    console.error('Error checking bot in group:', error);
+    return false;
+  }
+};
+
+// Helper to get group name safely
+const getGroupName = async (sock, groupId) => {
+  try {
+    const metadata = await sock.groupMetadata(groupId);
+    return metadata.subject || groupId;
+  } catch (err) {
+    return groupId;
+  }
+};
 
 module.exports = {
   name: 'forward',
   description: 'Setup automatic message forwarding between groups',
   usage: '.forward <source|target|list|remove|toggle|stats> [args]',
-  ownerOnly: true, // Owner only command for security
+  ownerOnly: true,
   aliases: ['fwd', 'groupforward', 'forwarding'],
   
   async execute(sock, msg, args, context) {
-    const { from, reply, react, sender, isGroup } = context;
+    const { from, reply, react, sender } = context;
     
-    // Check if command is being used in a group for source/target commands
+    // Get current group JID
     const currentGroup = from.endsWith('@g.us') ? from : null;
     
     if (!args.length) {
@@ -30,10 +81,10 @@ module.exports = {
         `⏸️ \`.forward toggle <source_jid>\` - Enable/disable forwarding\n` +
         `📊 \`.forward stats\` - Show forwarding statistics\n\n` +
         `*Examples:*\n` +
-        `• \`.forward target 123456789@g.us\` - Forward this group to target\n` +
-        `• \`.forward source 987654321@g.us\` - Forward source group to this group\n` +
-        `• \`.forward list\` - Show all active rules\n\n` +
-        `*Note:* Bot must be admin in both groups for full functionality`);
+        `• \`.forward target 120363123456789@g.us\`\n` +
+        `• \`.forward source 120363987654321@g.us\`\n` +
+        `• \`.forward list\`\n\n` +
+        `*Note:* Bot must be in both groups for forwarding to work`);
     }
     
     const subCommand = args[0].toLowerCase();
@@ -47,8 +98,8 @@ module.exports = {
         
         const sourceGroupId = args[1];
         if (!sourceGroupId || !sourceGroupId.endsWith('@g.us')) {
-          return reply('❌ Please provide a valid source group JID (e.g., 123456789@g.us)\n\n' +
-            'To get a group JID, enable debug mode or use .jid command in that group.');
+          return reply('❌ Please provide a valid source group JID (e.g., 120363123456789@g.us)\n\n' +
+            'To get a group JID, send a message in the group and check the logs.');
         }
         
         // Check if source and target are the same
@@ -56,47 +107,39 @@ module.exports = {
           return reply('❌ Source and target groups cannot be the same!');
         }
         
-        // Verify source group exists and bot is in it
-        try {
-          const sourceMetadata = await sock.groupMetadata(sourceGroupId);
-          if (!sourceMetadata) {
-            return reply('❌ Cannot fetch source group metadata. Make sure bot is in that group.');
-          }
-          
-          // Check if bot is in source group
-          const botId = sock.user.id;
-          const botInSource = sourceMetadata.participants.some(p => 
-            p.id === botId || p.id === botId.split(':')[0] + '@s.whatsapp.net'
-          );
-          
-          if (!botInSource) {
-            return reply('❌ Bot is not in the source group! Please add bot to source group first.');
-          }
-          
-          // Get source group name for confirmation
-          const sourceName = sourceMetadata.subject || sourceGroupId;
-          
-          // Save forwarding config
-          const config = database.setGroupForwarding(sourceGroupId, currentGroup, true, sender);
-          
-          await react('✅');
-          return reply(`✅ *Forwarding Configured Successfully*\n\n` +
-            `📤 *Source Group:* ${sourceName}\n` +
-            `📥 *Target Group:* ${currentGroup}\n` +
-            `🆔 *Source JID:* ${sourceGroupId}\n` +
-            `🆔 *Target JID:* ${currentGroup}\n` +
-            `🔄 *Status:* ✅ Active\n` +
-            `👤 *Configured by:* ${sender.split('@')[0]}\n` +
-            `⏰ *Time:* ${new Date().toLocaleString()}\n\n` +
-            `All messages from the source group will now be forwarded to this group.`);
-            
-        } catch (err) {
-          return reply(`❌ Cannot access source group. Error: ${err.message || 'Group not found'}\n\n` +
-            `Make sure:\n` +
-            `• The group JID is correct\n` +
-            `• Bot is a member of the source group\n` +
-            `• The group exists`);
+        // Verify bot is in source group
+        const botInSource = await isBotInGroup(sock, sourceGroupId);
+        if (!botInSource) {
+          return reply(`❌ Bot is not in the source group!\n\n` +
+            `Source JID: ${sourceGroupId}\n\n` +
+            `Please add the bot to the source group first.\n` +
+            `Use .join command to add bot to the group.`);
         }
+        
+        // Check if bot is in current group (target)
+        const botInTarget = await isBotInGroup(sock, currentGroup);
+        if (!botInTarget) {
+          return reply(`❌ Bot is not in the current group!\n\n` +
+            `Make sure the bot is a member of this group.`);
+        }
+        
+        // Get group names
+        const sourceName = await getGroupName(sock, sourceGroupId);
+        const targetName = await getGroupName(sock, currentGroup);
+        
+        // Save forwarding config
+        database.setGroupForwarding(sourceGroupId, currentGroup, true, sender);
+        
+        await react('✅');
+        return reply(`✅ *Forwarding Configured Successfully*\n\n` +
+          `📤 *Source Group:* ${sourceName}\n` +
+          `📥 *Target Group:* ${targetName}\n` +
+          `🆔 *Source JID:* ${sourceGroupId}\n` +
+          `🆔 *Target JID:* ${currentGroup}\n` +
+          `🔄 *Status:* ✅ Active\n` +
+          `👤 *Configured by:* ${sender.split('@')[0]}\n` +
+          `⏰ *Time:* ${new Date().toLocaleString()}\n\n` +
+          `All messages from the source group will now be forwarded to this group.`);
         
       case 'target':
         // Set current group as source, forward to specified target
@@ -106,8 +149,8 @@ module.exports = {
         
         const targetGroupId = args[1];
         if (!targetGroupId || !targetGroupId.endsWith('@g.us')) {
-          return reply('❌ Please provide a valid target group JID (e.g., 123456789@g.us)\n\n' +
-            'To get a group JID, enable debug mode or use .jid command in that group.');
+          return reply('❌ Please provide a valid target group JID (e.g., 120363123456789@g.us)\n\n' +
+            'To get a group JID, send a message in the group and check the logs.');
         }
         
         // Check if source and target are the same
@@ -115,49 +158,40 @@ module.exports = {
           return reply('❌ Source and target groups cannot be the same!');
         }
         
-        // Verify target group exists and bot is in it
-        try {
-          const targetMetadata = await sock.groupMetadata(targetGroupId);
-          if (!targetMetadata) {
-            return reply('❌ Cannot fetch target group metadata. Make sure bot is in that group.');
-          }
-          
-          // Check if bot is admin in target group (optional but recommended)
-          const botId = sock.user.id;
-          const botInTarget = targetMetadata.participants.find(p => 
-            p.id === botId || p.id === botId.split(':')[0] + '@s.whatsapp.net'
-          );
-          
-          if (!botInTarget) {
-            return reply('❌ Bot is not in the target group! Please add bot to target group first.');
-          }
-          
-          const isAdmin = botInTarget.admin === 'admin' || botInTarget.admin === 'superadmin';
-          const adminWarning = isAdmin ? '' : '\n\n⚠️ *Note:* Bot is not admin in target group. Some features may be limited.';
-          
-          // Get target group name for confirmation
-          const targetName = targetMetadata.subject || targetGroupId;
-          
-          // Save forwarding config
-          const config = database.setGroupForwarding(currentGroup, targetGroupId, true, sender);
-          
-          await react('✅');
-          return reply(`✅ *Forwarding Configured Successfully*\n\n` +
-            `📤 *Source Group:* ${currentGroup}\n` +
-            `📥 *Target Group:* ${targetName}\n` +
-            `🆔 *Source JID:* ${currentGroup}\n` +
-            `🆔 *Target JID:* ${targetGroupId}\n` +
-            `🔄 *Status:* ✅ Active\n` +
-            `👤 *Configured by:* ${sender.split('@')[0]}\n` +
-            `⏰ *Time:* ${new Date().toLocaleString()}${adminWarning}`);
-            
-        } catch (err) {
-          return reply(`❌ Cannot access target group. Error: ${err.message || 'Group not found'}\n\n` +
-            `Make sure:\n` +
-            `• The group JID is correct\n` +
-            `• Bot is a member of the target group\n` +
-            `• The group exists`);
+        // Verify bot is in current group (source)
+        const botInSource = await isBotInGroup(sock, currentGroup);
+        if (!botInSource) {
+          return reply(`❌ Bot is not in the current group!\n\n` +
+            `Make sure the bot is a member of this group.`);
         }
+        
+        // Verify bot is in target group
+        const botInTarget = await isBotInGroup(sock, targetGroupId);
+        if (!botInTarget) {
+          return reply(`❌ Bot is not in the target group!\n\n` +
+            `Target JID: ${targetGroupId}\n\n` +
+            `Please add the bot to the target group first.\n` +
+            `Use .join command to add bot to the group.\n\n` +
+            `Once added, run this command again.`);
+        }
+        
+        // Get group names
+        const sourceName = await getGroupName(sock, currentGroup);
+        const targetName = await getGroupName(sock, targetGroupId);
+        
+        // Save forwarding config
+        database.setGroupForwarding(currentGroup, targetGroupId, true, sender);
+        
+        await react('✅');
+        return reply(`✅ *Forwarding Configured Successfully*\n\n` +
+          `📤 *Source Group:* ${sourceName}\n` +
+          `📥 *Target Group:* ${targetName}\n` +
+          `🆔 *Source JID:* ${currentGroup}\n` +
+          `🆔 *Target JID:* ${targetGroupId}\n` +
+          `🔄 *Status:* ✅ Active\n` +
+          `👤 *Configured by:* ${sender.split('@')[0]}\n` +
+          `⏰ *Time:* ${new Date().toLocaleString()}\n\n` +
+          `All messages from this group will be forwarded to the target group.`);
         
       case 'list':
         const forwardings = database.getAllGroupForwardings();
@@ -171,23 +205,9 @@ module.exports = {
         let count = 1;
         
         for (const f of forwardings) {
-          // Try to get group names
-          let sourceName = f.sourceGroupId;
-          let targetName = f.targetGroupId;
-          
-          try {
-            const sourceMeta = await sock.groupMetadata(f.sourceGroupId);
-            if (sourceMeta) sourceName = sourceMeta.subject;
-          } catch (err) {
-            // Use JID if name can't be fetched
-          }
-          
-          try {
-            const targetMeta = await sock.groupMetadata(f.targetGroupId);
-            if (targetMeta) targetName = targetMeta.subject;
-          } catch (err) {
-            // Use JID if name can't be fetched
-          }
+          // Get group names
+          const sourceName = await getGroupName(sock, f.sourceGroupId);
+          const targetName = await getGroupName(sock, f.targetGroupId);
           
           listMsg += `${count}. *${sourceName}*\n`;
           listMsg += `   ➡️ → ${targetName}\n`;
@@ -196,14 +216,14 @@ module.exports = {
           listMsg += `   🔘 Status: ${f.enabled ? '✅ Active' : '⏸️ Disabled'}\n`;
           listMsg += `   👤 Setup by: ${f.forwarderJid?.split('@')[0] || 'Unknown'}\n`;
           listMsg += `   📅 Created: ${new Date(f.createdAt).toLocaleString()}\n`;
-          listMsg += `   🕒 Updated: ${new Date(f.updatedAt).toLocaleString()}\n`;
           listMsg += `   ━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
           count++;
-        }
-        
-        // Truncate if too long (WhatsApp message limit ~4096 chars)
-        if (listMsg.length > 4000) {
-          listMsg = listMsg.substring(0, 3900) + '\n... (truncated, too many rules)';
+          
+          // Prevent message too long
+          if (listMsg.length > 3800) {
+            listMsg += `\n... and ${forwardings.length - count + 1} more rules`;
+            break;
+          }
         }
         
         return reply(listMsg);
@@ -212,13 +232,8 @@ module.exports = {
         const sourceToRemove = args[1];
         if (!sourceToRemove) {
           return reply('❌ Please provide source group JID to remove forwarding.\n\n' +
-            'Usage: `.forward remove 123456789@g.us`\n\n' +
+            'Usage: `.forward remove 120363123456789@g.us`\n\n' +
             'Use `.forward list` to see all active source JIDs.');
-        }
-        
-        // Validate JID format
-        if (!sourceToRemove.endsWith('@g.us')) {
-          return reply('❌ Invalid group JID format. Must end with @g.us');
         }
         
         const existingConfig = database.getGroupForwarding(sourceToRemove);
@@ -241,13 +256,7 @@ module.exports = {
         const sourceToToggle = args[1];
         if (!sourceToToggle) {
           return reply('❌ Please provide source group JID to toggle.\n\n' +
-            'Usage: `.forward toggle 123456789@g.us`\n\n' +
-            'Use `.forward list` to see all active source JIDs.');
-        }
-        
-        // Validate JID format
-        if (!sourceToToggle.endsWith('@g.us')) {
-          return reply('❌ Invalid group JID format. Must end with @g.us');
+            'Usage: `.forward toggle 120363123456789@g.us`');
         }
         
         const currentConfig = database.getGroupForwarding(sourceToToggle);
@@ -260,64 +269,46 @@ module.exports = {
         
         await react(newState ? '✅' : '⏸️');
         
-        // Try to get group name
-        let sourceName = sourceToToggle;
-        try {
-          const sourceMeta = await sock.groupMetadata(sourceToToggle);
-          if (sourceMeta) sourceName = sourceMeta.subject;
-        } catch (err) {
-          // Use JID if name can't be fetched
-        }
+        const sourceName = await getGroupName(sock, sourceToToggle);
         
         return reply(`✅ *Forwarding ${newState ? 'Enabled' : 'Disabled'}*\n\n` +
           `📤 Source: ${sourceName}\n` +
           `📥 Target: ${currentConfig.targetGroupId}\n` +
-          `🔄 Status: ${newState ? '✅ Active' : '⏸️ Disabled'}\n\n` +
-          `Messages from this group will ${newState ? 'now' : 'no longer'} be forwarded.`);
+          `🔄 Status: ${newState ? '✅ Active' : '⏸️ Disabled'}`);
         
       case 'stats':
         const stats = database.getForwardingStats();
         
-        const statsMsg = `📊 *Forwarding Statistics*\n\n` +
+        return reply(`📊 *Forwarding Statistics*\n\n` +
           `📋 Total Rules: ${stats.total}\n` +
           `✅ Active Rules: ${stats.active}\n` +
           `⏸️ Disabled Rules: ${stats.disabled}\n` +
           `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-          `*Rule Details:*\n` +
-          stats.configs.map((cfg, idx) => {
-            return `${idx + 1}. Source: ${cfg.source.substring(0, 20)}...\n` +
-                   `   Status: ${cfg.enabled ? '✅ Active' : '⏸️ Disabled'}\n` +
-                   `   Age: ${Math.floor(cfg.age / (1000 * 60 * 60 * 24))} days old`;
-          }).join('\n\n') || '  No rules configured';
-        
-        return reply(statsMsg);
+          `*Database Location:* database/group_forwarding.json\n` +
+          `*Bot JID:* ${sock.user.id || 'Unknown'}`);
         
       case 'help':
         return reply(`📚 *Forward Command Help*\n\n` +
           `*Setup Commands:*\n` +
-          `• \`.forward source <source_jid>\` - Set current group as target for source\n` +
-          `• \`.forward target <target_jid>\` - Set current group as source to target\n\n` +
-          `*Management Commands:*\n` +
+          `• \`.forward source <source_jid>\` - Forward from source to this group\n` +
+          `• \`.forward target <target_jid>\` - Forward from this group to target\n\n` +
+          `*Management:*\n` +
           `• \`.forward list\` - List all forwarding rules\n` +
-          `• \`.forward remove <source_jid>\` - Remove a forwarding rule\n` +
+          `• \`.forward remove <source_jid>\` - Remove a rule\n` +
           `• \`.forward toggle <source_jid>\` - Enable/disable a rule\n` +
-          `• \`.forward stats\` - Show forwarding statistics\n` +
-          `• \`.forward help\` - Show this help message\n\n` +
-          `*Important Notes:*\n` +
-          `• Bot must be in both groups\n` +
-          `• Admin privileges recommended for target group\n` +
-          `• All message types (text, images, videos, etc.) are forwarded\n` +
-          `• Forwarded messages include sender info and timestamp\n` +
-          `• Rules are persistent across bot restarts\n\n` +
-          `*Example Setup:*\n` +
-          `1. Add bot to both groups\n` +
-          `2. In source group, type: \`.forward target 123456789@g.us\`\n` +
-          `3. All messages will now be forwarded!`);
+          `• \`.forward stats\` - Show statistics\n` +
+          `• \`.forward help\` - This help\n\n` +
+          `*Requirements:*\n` +
+          `• Bot must be in BOTH groups\n` +
+          `• Use the exact group JID (starts with 120363...)\n` +
+          `• Admin privileges are optional but recommended\n\n` +
+          `*Getting Group JID:*\n` +
+          `Send any message in the group, then use .jid command in DM`);
         
       default:
         return reply('❌ Invalid subcommand.\n\n' +
-          'Available commands: source, target, list, remove, toggle, stats, help\n\n' +
-          'Use `.forward help` for detailed usage information.');
+          'Available: source, target, list, remove, toggle, stats, help\n\n' +
+          'Use `.forward help` for detailed usage.');
     }
   }
 };
