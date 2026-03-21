@@ -172,7 +172,7 @@ module.exports = {
     }
     
     switch (subCommand) {
-      case 'source':
+      case 'source': {
         // Set current group as target, receive from specified source
         if (!currentGroup) {
           return reply(`❌ This command must be used in a group to set it as the target!\n\n` +
@@ -201,9 +201,9 @@ module.exports = {
         
         // Verify bot is in source group with debugging
         console.log(`\n🔍 DEBUG: Checking source group: ${sourceGroupId}`);
-        const sourceValid = await isBotInGroup(sock, sourceGroupId, true);
+        const isSourceValid = await isBotInGroup(sock, sourceGroupId, true);
         
-        if (!sourceValid) {
+        if (!isSourceValid) {
           const groupName = await getGroupName(sock, sourceGroupId);
           return reply(`❌ *Bot is not in the source group!*\n\n` +
             `Source Group: ${groupName}\n` +
@@ -221,9 +221,9 @@ module.exports = {
         
         // Check if bot is in current group (target)
         console.log(`\n🔍 DEBUG: Checking target group: ${currentGroup}`);
-        const targetValid = await isBotInGroup(sock, currentGroup, true);
+        const isTargetValid = await isBotInGroup(sock, currentGroup, true);
         
-        if (!targetValid) {
+        if (!isTargetValid) {
           return reply(`❌ *Bot is not in the current group!*\n\n` +
             `Current Group: ${currentGroup}\n\n` +
             `Bot JID: ${botInfo.jid}\n` +
@@ -233,24 +233,25 @@ module.exports = {
         }
         
         // Get group names
-        const sourceName = await getGroupName(sock, sourceGroupId);
-        const targetName = await getGroupName(sock, currentGroup);
+        const sourceGroupName = await getGroupName(sock, sourceGroupId);
+        const targetGroupName = await getGroupName(sock, currentGroup);
         
         // Save forwarding config
         database.setGroupForwarding(sourceGroupId, currentGroup, true, sender);
         
         await react('✅');
         return reply(`✅ *Forwarding Configured Successfully*\n\n` +
-          `📤 *Source Group:* ${sourceName}\n` +
-          `📥 *Target Group:* ${targetName}\n` +
+          `📤 *Source Group:* ${sourceGroupName}\n` +
+          `📥 *Target Group:* ${targetGroupName}\n` +
           `🆔 *Source JID:* ${sourceGroupId}\n` +
           `🆔 *Target JID:* ${currentGroup}\n` +
           `🔄 *Status:* ✅ Active\n` +
           `👤 *Configured by:* ${sender.split('@')[0]}\n` +
           `⏰ *Time:* ${new Date().toLocaleString()}\n\n` +
           `All messages from the source group will now be forwarded to this group.`);
-        
-      case 'target':
+      }
+      
+      case 'target': {
         // Set current group as source, forward to specified target
         if (!currentGroup) {
           return reply(`❌ This command must be used in a group to set it as the source!\n\n` +
@@ -279,9 +280,9 @@ module.exports = {
         
         // Verify bot is in current group (source)
         console.log(`\n🔍 DEBUG: Checking source group: ${currentGroup}`);
-        const sourceValid = await isBotInGroup(sock, currentGroup, true);
+        const isSourceValid = await isBotInGroup(sock, currentGroup, true);
         
-        if (!sourceValid) {
+        if (!isSourceValid) {
           return reply(`❌ *Bot is not in the current group!*\n\n` +
             `Current Group: ${currentGroup}\n\n` +
             `Bot JID: ${botInfo.jid}\n` +
@@ -292,9 +293,9 @@ module.exports = {
         
         // Verify bot is in target group
         console.log(`\n🔍 DEBUG: Checking target group: ${targetGroupId}`);
-        const targetValid = await isBotInGroup(sock, targetGroupId, true);
+        const isTargetValid = await isBotInGroup(sock, targetGroupId, true);
         
-        if (!targetValid) {
+        if (!isTargetValid) {
           const groupName = await getGroupName(sock, targetGroupId);
           return reply(`❌ *Bot is not in the target group!*\n\n` +
             `Target Group: ${groupName}\n` +
@@ -327,8 +328,9 @@ module.exports = {
           `👤 *Configured by:* ${sender.split('@')[0]}\n` +
           `⏰ *Time:* ${new Date().toLocaleString()}\n\n` +
           `All messages from this group will be forwarded to the target group.`);
-        
-      case 'list':
+      }
+      
+      case 'list': {
         const forwardings = database.getAllGroupForwardings();
         
         if (forwardings.length === 0) {
@@ -362,8 +364,9 @@ module.exports = {
         }
         
         return reply(listMsg);
-        
-      case 'remove':
+      }
+      
+      case 'remove': {
         const sourceToRemove = args[1];
         if (!sourceToRemove) {
           return reply('❌ Please provide source group JID to remove forwarding.\n\n' +
@@ -386,8 +389,9 @@ module.exports = {
         } else {
           return reply(`❌ Failed to remove forwarding rule for ${sourceToRemove}`);
         }
-        
-      case 'toggle':
+      }
+      
+      case 'toggle': {
         const sourceToToggle = args[1];
         if (!sourceToToggle) {
           return reply('❌ Please provide source group JID to toggle.\n\n' +
@@ -410,8 +414,9 @@ module.exports = {
           `📤 Source: ${toggledGroupName}\n` +
           `📥 Target: ${currentConfig.targetGroupId}\n` +
           `🔄 Status: ${newState ? '✅ Active' : '⏸️ Disabled'}`);
-        
-      case 'stats':
+      }
+      
+      case 'stats': {
         const stats = database.getForwardingStats();
         
         return reply(`📊 *Forwarding Statistics*\n\n` +
@@ -424,7 +429,8 @@ module.exports = {
           `Number: ${botInfo.number}\n` +
           `LID: ${botInfo.lid || 'None'}\n\n` +
           `*Database:* database/group_forwarding.json`);
-        
+      }
+      
       default:
         return reply('❌ Invalid subcommand.\n\n' +
           'Available: source, target, list, remove, toggle, stats, debug, help\n\n' +
