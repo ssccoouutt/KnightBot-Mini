@@ -1,231 +1,301 @@
 /**
- * Group Forwarding Command - Simplified Version
- * Allows owner to set up automatic message forwarding between groups
+ * Group Forwarding Command - Universal Version
+ * Can be used from any chat to set up forwarding between groups
  */
 
 const database = require('../../database');
+const fs = require('fs');
+const path = require('path');
 
 module.exports = {
   name: 'forward',
   description: 'Setup automatic message forwarding between groups',
-  usage: '.forward <source|target|list|remove|toggle|stats> [args]',
+  usage: '.forward <source_jid> <target_jid>',
   ownerOnly: true,
-  aliases: ['fwd', 'groupforward', 'forwarding'],
+  aliases: ['fwd', 'groupforward'],
   
   async execute(sock, msg, args, context) {
     const { from, reply, react, sender } = context;
     
-    // Get current group JID
-    const currentGroup = from.endsWith('@g.us') ? from : null;
-    
-    if (!args.length) {
+    if (args.length < 2) {
       return reply(`📤 *Group Forwarding Commands*\n\n` +
-        `*Setup Methods:*\n` +
-        `1. In source group: \`.forward target <target_jid>\`\n` +
-        `2. In target group: \`.forward source <source_jid>\`\n\n` +
+        `*Setup:*\n` +
+        `.forward <source_jid> <target_jid>\n\n` +
         `*Management:*\n` +
-        `📋 \`.forward list\` - List all active forwarding rules\n` +
-        `🗑️ \`.forward remove <source_jid>\` - Remove forwarding rule\n` +
-        `⏸️ \`.forward toggle <source_jid>\` - Enable/disable forwarding\n` +
-        `📊 \`.forward stats\` - Show forwarding statistics\n\n` +
-        `*Note:* Bot must be in both groups for forwarding to work`);
+        `📋 \`.forward list\` - List all active rules\n` +
+        `🗑️ \`.forward remove <source_jid>\` - Remove a rule\n` +
+        `⏸️ \`.forward toggle <source_jid>\` - Enable/disable a rule\n` +
+        `📊 \`.forward stats\` - Show statistics\n` +
+        `🐛 \`.forward debug <source_jid>\` - Debug group\n\n` +
+        `*Examples:*\n` +
+        `.forward 120363408035540146@g.us 120363421227499361@g.us\n` +
+        `.forward list\n` +
+        `.forward debug 120363408035540146@g.us\n\n` +
+        `*Note:* Bot must be in BOTH groups for forwarding to work`);
     }
     
     const subCommand = args[0].toLowerCase();
     
-    switch (subCommand) {
-      case 'source': {
-        // Set current group as target, receive from specified source
-        if (!currentGroup) {
-          return reply(`❌ This command must be used in a group to set it as the target!\n\n` +
-            `Please go to the group you want to use as the TARGET and run this command there.`);
-        }
-        
-        const sourceGroupId = args[1];
-        if (!sourceGroupId || !sourceGroupId.endsWith('@g.us')) {
-          return reply('❌ Please provide a valid source group JID (e.g., 120363123456789@g.us)');
-        }
-        
-        // Check if source and target are the same
-        if (sourceGroupId === currentGroup) {
-          return reply('❌ Source and target groups cannot be the same!');
-        }
-        
-        // Try to get source group name (optional, won't fail if can't)
-        let sourceName = sourceGroupId;
-        try {
-          const metadata = await sock.groupMetadata(sourceGroupId);
-          sourceName = metadata.subject || sourceGroupId;
-        } catch (err) {
-          // Continue even if can't get metadata
-        }
-        
-        const targetName = currentGroup;
-        
-        // Save forwarding config
-        database.setGroupForwarding(sourceGroupId, currentGroup, true, sender);
-        
-        await react('✅');
-        return reply(`✅ *Forwarding Configured Successfully*\n\n` +
-          `📤 *Source Group:* ${sourceName}\n` +
-          `📥 *Target Group:* ${targetName}\n` +
-          `🆔 *Source JID:* ${sourceGroupId}\n` +
-          `🆔 *Target JID:* ${currentGroup}\n` +
-          `🔄 *Status:* ✅ Active\n` +
-          `👤 *Configured by:* ${sender.split('@')[0]}\n` +
-          `⏰ *Time:* ${new Date().toLocaleString()}\n\n` +
-          `All messages from the source group will now be forwarded to this group.`);
+    // Handle management commands
+    if (subCommand === 'list') {
+      const forwardings = database.getAllGroupForwardings();
+      
+      if (forwardings.length === 0) {
+        return reply('📭 *No Active Forwarding Rules*\n\n' +
+          'Use `.forward source_jid target_jid` to set up forwarding.');
       }
       
-      case 'target': {
-        // Set current group as source, forward to specified target
-        if (!currentGroup) {
-          return reply(`❌ This command must be used in a group to set it as the source!\n\n` +
-            `Please go to the group you want to use as the SOURCE and run this command there.`);
-        }
+      let listMsg = '📤 *Active Group Forwarding Rules*\n\n';
+      let count = 1;
+      
+      for (const f of forwardings) {
+        // Try to get group names (optional)
+        let sourceName = f.sourceGroupId;
+        let targetName = f.targetGroupId;
         
-        const targetGroupId = args[1];
-        if (!targetGroupId || !targetGroupId.endsWith('@g.us')) {
-          return reply('❌ Please provide a valid target group JID (e.g., 120363123456789@g.us)');
-        }
-        
-        // Check if source and target are the same
-        if (targetGroupId === currentGroup) {
-          return reply('❌ Source and target groups cannot be the same!');
-        }
-        
-        // Try to get target group name (optional)
-        let targetName = targetGroupId;
         try {
-          const metadata = await sock.groupMetadata(targetGroupId);
-          targetName = metadata.subject || targetGroupId;
-        } catch (err) {
-          // Continue even if can't get metadata
+          const srcMeta = await sock.groupMetadata(f.sourceGroupId);
+          if (srcMeta) sourceName = srcMeta.subject || f.sourceGroupId;
+        } catch (err) {}
+        
+        try {
+          const tgtMeta = await sock.groupMetadata(f.targetGroupId);
+          if (tgtMeta) targetName = tgtMeta.subject || f.targetGroupId;
+        } catch (err) {}
+        
+        listMsg += `${count}. *${sourceName}*\n`;
+        listMsg += `   ➡️ → ${targetName}\n`;
+        listMsg += `   🆔 Source: \`${f.sourceGroupId}\`\n`;
+        listMsg += `   🆔 Target: \`${f.targetGroupId}\`\n`;
+        listMsg += `   🔘 Status: ${f.enabled ? '✅ Active' : '⏸️ Disabled'}\n`;
+        listMsg += `   👤 Setup by: ${f.forwarderJid?.split('@')[0] || 'Unknown'}\n`;
+        listMsg += `   📅 Created: ${new Date(f.createdAt).toLocaleString()}\n`;
+        listMsg += `   ━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+        count++;
+        
+        if (listMsg.length > 3800) {
+          listMsg += `\n... and ${forwardings.length - count + 1} more rules`;
+          break;
         }
-        
-        const sourceName = currentGroup;
-        
-        // Save forwarding config
-        database.setGroupForwarding(currentGroup, targetGroupId, true, sender);
-        
-        await react('✅');
-        return reply(`✅ *Forwarding Configured Successfully*\n\n` +
-          `📤 *Source Group:* ${sourceName}\n` +
-          `📥 *Target Group:* ${targetName}\n` +
-          `🆔 *Source JID:* ${currentGroup}\n` +
-          `🆔 *Target JID:* ${targetGroupId}\n` +
-          `🔄 *Status:* ✅ Active\n` +
-          `👤 *Configured by:* ${sender.split('@')[0]}\n` +
-          `⏰ *Time:* ${new Date().toLocaleString()}\n\n` +
-          `All messages from this group will be forwarded to the target group.`);
       }
       
-      case 'list': {
-        const forwardings = database.getAllGroupForwardings();
+      return reply(listMsg);
+    }
+    
+    if (subCommand === 'remove') {
+      const sourceToRemove = args[1];
+      if (!sourceToRemove || !sourceToRemove.endsWith('@g.us')) {
+        return reply('❌ Please provide valid source group JID\n\n' +
+          'Usage: `.forward remove 120363123456789@g.us`');
+      }
+      
+      const existingConfig = database.getGroupForwarding(sourceToRemove);
+      if (!existingConfig) {
+        return reply(`❌ No forwarding rule found for source group ${sourceToRemove}`);
+      }
+      
+      const removed = database.removeGroupForwarding(sourceToRemove);
+      if (removed) {
+        await react('🗑️');
+        return reply(`✅ *Forwarding Rule Removed*\n\n` +
+          `Source: ${sourceToRemove}\n` +
+          `Target: ${existingConfig.targetGroupId}`);
+      }
+      return reply(`❌ Failed to remove forwarding rule`);
+    }
+    
+    if (subCommand === 'toggle') {
+      const sourceToToggle = args[1];
+      if (!sourceToToggle || !sourceToToggle.endsWith('@g.us')) {
+        return reply('❌ Please provide valid source group JID\n\n' +
+          'Usage: `.forward toggle 120363123456789@g.us`');
+      }
+      
+      const currentConfig = database.getGroupForwarding(sourceToToggle);
+      if (!currentConfig) {
+        return reply(`❌ No forwarding rule found for source group ${sourceToToggle}`);
+      }
+      
+      const newState = !currentConfig.enabled;
+      database.toggleGroupForwarding(sourceToToggle, newState);
+      
+      await react(newState ? '✅' : '⏸️');
+      return reply(`✅ *Forwarding ${newState ? 'Enabled' : 'Disabled'}*\n\n` +
+        `Source: ${sourceToToggle}\n` +
+        `Target: ${currentConfig.targetGroupId}`);
+    }
+    
+    if (subCommand === 'stats') {
+      const stats = database.getForwardingStats();
+      const botNumber = sock.user.id.split(':')[0];
+      
+      return reply(`📊 *Forwarding Statistics*\n\n` +
+        `📋 Total Rules: ${stats.total}\n` +
+        `✅ Active Rules: ${stats.active}\n` +
+        `⏸️ Disabled Rules: ${stats.disabled}\n` +
+        `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `*Bot:* ${botNumber}\n` +
+        `*Database:* database/group_forwarding.json`);
+    }
+    
+    if (subCommand === 'debug') {
+      const groupToDebug = args[1];
+      if (!groupToDebug || !groupToDebug.endsWith('@g.us')) {
+        return reply('❌ Please provide valid group JID\n\n' +
+          'Usage: `.forward debug 120363123456789@g.us`');
+      }
+      
+      try {
+        const metadata = await sock.groupMetadata(groupToDebug);
+        const botJid = sock.user.id;
+        const botNumber = normalizeJid(botJid);
         
-        if (forwardings.length === 0) {
-          return reply('📭 *No Active Forwarding Rules*\n\n' +
-            'Use `.forward source <jid>` or `.forward target <jid>` to set up forwarding.');
-        }
+        // Check if bot is in group
+        let isBotMember = false;
+        let botRole = null;
         
-        let listMsg = '📤 *Active Group Forwarding Rules*\n\n';
-        let count = 1;
-        
-        for (const f of forwardings) {
-          // Try to get group names (optional)
-          let sourceName = f.sourceGroupId;
-          let targetName = f.targetGroupId;
+        for (const p of metadata.participants) {
+          const participantId = p.id;
+          const participantNumber = participantId.split('@')[0];
           
-          try {
-            const srcMeta = await sock.groupMetadata(f.sourceGroupId);
-            if (srcMeta) sourceName = srcMeta.subject || f.sourceGroupId;
-          } catch (err) {}
-          
-          try {
-            const tgtMeta = await sock.groupMetadata(f.targetGroupId);
-            if (tgtMeta) targetName = tgtMeta.subject || f.targetGroupId;
-          } catch (err) {}
-          
-          listMsg += `${count}. *${sourceName}*\n`;
-          listMsg += `   ➡️ → ${targetName}\n`;
-          listMsg += `   🔘 Status: ${f.enabled ? '✅ Active' : '⏸️ Disabled'}\n`;
-          listMsg += `   📅 Created: ${new Date(f.createdAt).toLocaleString()}\n`;
-          listMsg += `   ━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-          count++;
-          
-          // Prevent message too long
-          if (listMsg.length > 3800) {
-            listMsg += `\n... and ${forwardings.length - count + 1} more rules`;
+          if (participantNumber === botNumber || participantId === botJid) {
+            isBotMember = true;
+            botRole = p.admin === 'admin' ? 'Admin' : p.admin === 'superadmin' ? 'Super Admin' : 'Member';
             break;
           }
         }
         
-        return reply(listMsg);
-      }
-      
-      case 'remove': {
-        const sourceToRemove = args[1];
-        if (!sourceToRemove) {
-          return reply('❌ Please provide source group JID to remove forwarding.\n\n' +
-            'Usage: `.forward remove 120363123456789@g.us`');
-        }
+        const forwardingConfig = database.getGroupForwarding(groupToDebug);
         
-        const existingConfig = database.getGroupForwarding(sourceToRemove);
-        if (!existingConfig) {
-          return reply(`❌ No forwarding rule found for source group ${sourceToRemove}`);
-        }
+        let debugMsg = `🐛 *Group Debug Information*\n\n` +
+          `*Group:* ${metadata.subject || groupToDebug}\n` +
+          `🆔 JID: ${groupToDebug}\n` +
+          `👥 Members: ${metadata.participants.length}\n` +
+          `👑 Admins: ${metadata.participants.filter(p => p.admin).length}\n\n` +
+          `*Bot Status:*\n` +
+          `🤖 JID: ${botJid}\n` +
+          `📱 Number: ${botNumber}\n` +
+          `✅ Member: ${isBotMember ? 'YES' : 'NO'}\n` +
+          `👑 Role: ${botRole || 'Not a member'}\n\n`;
         
-        const removed = database.removeGroupForwarding(sourceToRemove);
-        if (removed) {
-          await react('🗑️');
-          return reply(`✅ *Forwarding Rule Removed*\n\n` +
-            `Source: ${sourceToRemove}\n` +
-            `Target: ${existingConfig.targetGroupId}\n\n` +
-            `Messages from this group will no longer be forwarded.`);
+        if (forwardingConfig) {
+          debugMsg += `*Forwarding Config:*\n` +
+            `📤 As Source: YES\n` +
+            `📥 Forwards to: ${forwardingConfig.targetGroupId}\n` +
+            `🔘 Status: ${forwardingConfig.enabled ? 'Active' : 'Disabled'}\n`;
         } else {
-          return reply(`❌ Failed to remove forwarding rule for ${sourceToRemove}`);
-        }
-      }
-      
-      case 'toggle': {
-        const sourceToToggle = args[1];
-        if (!sourceToToggle) {
-          return reply('❌ Please provide source group JID to toggle.\n\n' +
-            'Usage: `.forward toggle 120363123456789@g.us`');
-        }
-        
-        const currentConfig = database.getGroupForwarding(sourceToToggle);
-        if (!currentConfig) {
-          return reply(`❌ No forwarding rule found for source group ${sourceToToggle}`);
+          // Check if this group is a target
+          const allForwardings = database.getAllGroupForwardingsIncludingDisabled();
+          const asTarget = allForwardings.find(f => f.targetGroupId === groupToDebug);
+          
+          if (asTarget) {
+            debugMsg += `*Forwarding Config:*\n` +
+              `📥 As Target: YES\n` +
+              `📤 Receives from: ${asTarget.sourceGroupId}\n` +
+              `🔘 Status: ${asTarget.enabled ? 'Active' : 'Disabled'}\n`;
+          } else {
+            debugMsg += `*Forwarding Config:* None\n`;
+          }
         }
         
-        const newState = !currentConfig.enabled;
-        database.toggleGroupForwarding(sourceToToggle, newState);
+        debugMsg += `\n*Recent Messages (last 5 from logs will show in console):*\n` +
+          `Check terminal for real-time message logs`;
         
-        await react(newState ? '✅' : '⏸️');
-        
-        return reply(`✅ *Forwarding ${newState ? 'Enabled' : 'Disabled'}*\n\n` +
-          `Source: ${sourceToToggle}\n` +
-          `Target: ${currentConfig.targetGroupId}\n` +
-          `Status: ${newState ? 'Active' : 'Disabled'}`);
+        return reply(debugMsg);
+      } catch (err) {
+        return reply(`❌ Error debugging group: ${err.message}`);
       }
-      
-      case 'stats': {
-        const stats = database.getForwardingStats();
-        
-        return reply(`📊 *Forwarding Statistics*\n\n` +
-          `📋 Total Rules: ${stats.total}\n` +
-          `✅ Active Rules: ${stats.active}\n` +
-          `⏸️ Disabled Rules: ${stats.disabled}\n` +
-          `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-          `*Database:* database/group_forwarding.json`);
-      }
-      
-      default:
-        return reply('❌ Invalid subcommand.\n\n' +
-          'Available: source, target, list, remove, toggle, stats\n\n' +
-          'Use `.forward target <jid>` in source group\n' +
-          'Or `.forward source <jid>` in target group');
     }
+    
+    // Main setup: forward source_jid target_jid
+    const sourceJid = args[0];
+    const targetJid = args[1];
+    
+    // Validate JIDs
+    if (!sourceJid.endsWith('@g.us') || !targetJid.endsWith('@g.us')) {
+      return reply('❌ Both source and target must be valid group JIDs (ending with @g.us)');
+    }
+    
+    if (sourceJid === targetJid) {
+      return reply('❌ Source and target groups cannot be the same!');
+    }
+    
+    await reply(`🔍 *Setting up forwarding...*\n\n` +
+      `Source: ${sourceJid}\n` +
+      `Target: ${targetJid}\n\n` +
+      `Checking bot membership...`);
+    
+    // Check bot in source group
+    let sourceValid = false;
+    let sourceName = sourceJid;
+    let sourceError = null;
+    
+    try {
+      const sourceMeta = await sock.groupMetadata(sourceJid);
+      sourceName = sourceMeta.subject || sourceJid;
+      sourceValid = true;
+      console.log(`✅ Source group found: ${sourceName} (${sourceJid})`);
+    } catch (err) {
+      sourceError = err.message;
+      console.log(`❌ Source group error: ${err.message}`);
+    }
+    
+    // Check bot in target group
+    let targetValid = false;
+    let targetName = targetJid;
+    let targetError = null;
+    
+    try {
+      const targetMeta = await sock.groupMetadata(targetJid);
+      targetName = targetMeta.subject || targetJid;
+      targetValid = true;
+      console.log(`✅ Target group found: ${targetName} (${targetJid})`);
+    } catch (err) {
+      targetError = err.message;
+      console.log(`❌ Target group error: ${err.message}`);
+    }
+    
+    // Show debug info
+    let statusMsg = `📊 *Verification Results*\n\n` +
+      `*Source Group:* ${sourceName}\n` +
+      `🆔 ${sourceJid}\n` +
+      `✅ Access: ${sourceValid ? 'Yes' : 'No - ' + sourceError}\n\n` +
+      `*Target Group:* ${targetName}\n` +
+      `🆔 ${targetJid}\n` +
+      `✅ Access: ${targetValid ? 'Yes' : 'No - ' + targetError}\n\n`;
+    
+    if (!sourceValid || !targetValid) {
+      statusMsg += `⚠️ *Warning:* Bot cannot access one or both groups.\n` +
+        `Forwarding may not work until bot is added to both groups.`;
+      await reply(statusMsg);
+    } else {
+      await reply(statusMsg + `✅ Both groups accessible. Setting up forwarding...`);
+    }
+    
+    // Save forwarding config
+    database.setGroupForwarding(sourceJid, targetJid, true, sender);
+    
+    await react('✅');
+    
+    const finalMsg = `✅ *Forwarding Configured Successfully*\n\n` +
+      `📤 *Source:* ${sourceName}\n` +
+      `📥 *Target:* ${targetName}\n` +
+      `🆔 ${sourceJid} → ${targetJid}\n` +
+      `🔄 Status: ✅ Active\n` +
+      `👤 By: ${sender.split('@')[0]}\n` +
+      `⏰ Time: ${new Date().toLocaleString()}\n\n` +
+      `*Debug Logs:* Check terminal for real-time message forwarding logs\n` +
+      `Messages from source will be forwarded to target with full details.`;
+    
+    return reply(finalMsg);
   }
+};
+
+// Helper function
+const normalizeJid = (jid) => {
+  if (!jid) return null;
+  if (typeof jid !== 'string') return null;
+  if (jid.includes(':')) return jid.split(':')[0];
+  if (jid.includes('@')) return jid.split('@')[0];
+  return jid;
 };
