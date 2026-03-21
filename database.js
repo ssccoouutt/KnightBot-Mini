@@ -11,6 +11,7 @@ const GROUPS_DB = path.join(DB_PATH, 'groups.json');
 const USERS_DB = path.join(DB_PATH, 'users.json');
 const WARNINGS_DB = path.join(DB_PATH, 'warnings.json');
 const MODS_DB = path.join(DB_PATH, 'mods.json');
+const GROUP_FORWARDING_DB = path.join(DB_PATH, 'group_forwarding.json');
 
 // Initialize database directory
 if (!fs.existsSync(DB_PATH)) {
@@ -28,6 +29,7 @@ initDB(GROUPS_DB, {});
 initDB(USERS_DB, {});
 initDB(WARNINGS_DB, {});
 initDB(MODS_DB, { moderators: [] });
+initDB(GROUP_FORWARDING_DB, {});
 
 // Read database
 const readDB = (filePath) => {
@@ -162,7 +164,170 @@ const isModerator = (userId) => {
   return mods.includes(userId);
 };
 
+// ===== GROUP FORWARDING SYSTEM =====
+
+// Group forwarding settings storage (cached in memory for performance)
+let groupForwardingCache = null;
+let lastCacheUpdate = 0;
+const CACHE_TTL = 5000; // 5 seconds cache TTL
+
+// Load group forwarding configs from database
+const loadGroupForwardingConfigs = () => {
+  const now = Date.now();
+  if (groupForwardingCache && (now - lastCacheUpdate) < CACHE_TTL) {
+    return groupForwardingCache;
+  }
+  
+  const data = readDB(GROUP_FORWARDING_DB);
+  groupForwardingCache = data;
+  lastCacheUpdate = now;
+  return data;
+};
+
+// Save group forwarding configs to database
+const saveGroupForwardingConfigs = (data) => {
+  const success = writeDB(GROUP_FORWARDING_DB, data);
+  if (success) {
+    groupForwardingCache = data;
+    lastCacheUpdate = Date.now();
+  }
+  return success;
+};
+
+// Set group forwarding configuration
+const setGroupForwarding = (sourceGroupId, targetGroupId, enabled = true, forwarderJid = null) => {
+  const configs = loadGroupForwardingConfigs();
+  
+  configs[sourceGroupId] = {
+    targetGroupId,
+    enabled,
+    forwarderJid,
+    createdAt: Date.now(),
+    updatedAt: Date.now()
+  };
+  
+  saveGroupForwardingConfigs(configs);
+  return configs[sourceGroupId];
+};
+
+// Get group forwarding configuration
+const getGroupForwarding = (sourceGroupId) => {
+  const configs = loadGroupForwardingConfigs();
+  return configs[sourceGroupId] || null;
+};
+
+// Remove group forwarding configuration
+const removeGroupForwarding = (sourceGroupId) => {
+  const configs = loadGroupForwardingConfigs();
+  
+  if (configs[sourceGroupId]) {
+    delete configs[sourceGroupId];
+    saveGroupForwardingConfigs(configs);
+    return true;
+  }
+  
+  return false;
+};
+
+// Toggle group forwarding (enable/disable)
+const toggleGroupForwarding = (sourceGroupId, enabled) => {
+  const configs = loadGroupForwardingConfigs();
+  
+  if (configs[sourceGroupId]) {
+    configs[sourceGroupId].enabled = enabled;
+    configs[sourceGroupId].updatedAt = Date.now();
+    saveGroupForwardingConfigs(configs);
+    return true;
+  }
+  
+  return false;
+};
+
+// Get all active group forwarding configs
+const getAllGroupForwardings = () => {
+  const configs = loadGroupForwardingConfigs();
+  
+  return Object.entries(configs)
+    .filter(([_, config]) => config.enabled === true)
+    .map(([source, config]) => ({
+      sourceGroupId: source,
+      targetGroupId: config.targetGroupId,
+      enabled: config.enabled,
+      forwarderJid: config.forwarderJid,
+      createdAt: config.createdAt,
+      updatedAt: config.updatedAt
+    }));
+};
+
+// Get all forwarding configs (including disabled)
+const getAllGroupForwardingsIncludingDisabled = () => {
+  const configs = loadGroupForwardingConfigs();
+  
+  return Object.entries(configs).map(([source, config]) => ({
+    sourceGroupId: source,
+    targetGroupId: config.targetGroupId,
+    enabled: config.enabled,
+    forwarderJid: config.forwarderJid,
+    createdAt: config.createdAt,
+    updatedAt: config.updatedAt
+  }));
+};
+
+// Check if a group has forwarding enabled
+const hasGroupForwarding = (sourceGroupId) => {
+  const config = getGroupForwarding(sourceGroupId);
+  return config !== null && config.enabled === true;
+};
+
+// Get target group for source group
+const getForwardingTarget = (sourceGroupId) => {
+  const config = getGroupForwarding(sourceGroupId);
+  return config && config.enabled ? config.targetGroupId : null;
+};
+
+// Update forwarding target
+const updateForwardingTarget = (sourceGroupId, newTargetGroupId) => {
+  const configs = loadGroupForwardingConfigs();
+  
+  if (configs[sourceGroupId]) {
+    configs[sourceGroupId].targetGroupId = newTargetGroupId;
+    configs[sourceGroupId].updatedAt = Date.now();
+    saveGroupForwardingConfigs(configs);
+    return true;
+  }
+  
+  return false;
+};
+
+// Clear all forwarding configs (owner only - for cleanup)
+const clearAllGroupForwardings = () => {
+  saveGroupForwardingConfigs({});
+  return true;
+};
+
+// Get forwarding statistics
+const getForwardingStats = () => {
+  const configs = loadGroupForwardingConfigs();
+  const total = Object.keys(configs).length;
+  const active = Object.values(configs).filter(c => c.enabled).length;
+  const disabled = total - active;
+  
+  return {
+    total,
+    active,
+    disabled,
+    configs: Object.entries(configs).map(([source, config]) => ({
+      source,
+      target: config.targetGroupId,
+      enabled: config.enabled,
+      age: Date.now() - config.createdAt
+    }))
+  };
+};
+
+// Export all functions
 module.exports = {
+  // Existing exports
   getGroupSettings,
   updateGroupSettings,
   getUser,
@@ -174,5 +339,18 @@ module.exports = {
   getModerators,
   addModerator,
   removeModerator,
-  isModerator
+  isModerator,
+  
+  // New forwarding exports
+  setGroupForwarding,
+  getGroupForwarding,
+  removeGroupForwarding,
+  toggleGroupForwarding,
+  getAllGroupForwardings,
+  getAllGroupForwardingsIncludingDisabled,
+  hasGroupForwarding,
+  getForwardingTarget,
+  updateForwardingTarget,
+  clearAllGroupForwardings,
+  getForwardingStats
 };
