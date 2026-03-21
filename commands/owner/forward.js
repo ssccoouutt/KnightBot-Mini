@@ -22,24 +22,67 @@ const normalizeJid = (jid) => {
   return jid;
 };
 
-// Helper to check if bot is in group (more reliable)
-const isBotInGroup = async (sock, groupId) => {
+// Helper to check if bot is in group with detailed debugging
+const isBotInGroup = async (sock, groupId, debug = true) => {
   try {
+    if (debug) console.log(`🔍 Checking if bot is in group: ${groupId}`);
+    
     const metadata = await sock.groupMetadata(groupId);
-    if (!metadata || !metadata.participants) return false;
+    if (!metadata || !metadata.participants) {
+      if (debug) console.log(`❌ No metadata or participants for group`);
+      return false;
+    }
     
     const botJid = sock.user.id;
     const botNumber = normalizeJid(botJid);
     
+    if (debug) {
+      console.log(`🤖 Bot JID: ${botJid}`);
+      console.log(`🤖 Bot Number: ${botNumber}`);
+      console.log(`📊 Total participants: ${metadata.participants.length}`);
+    }
+    
     // Check all participants for bot's JID
-    const found = metadata.participants.some(p => {
+    let found = false;
+    let matchedBy = null;
+    
+    for (const p of metadata.participants) {
       const participantNumber = normalizeJid(p.id);
-      return participantNumber === botNumber || p.id === botJid;
-    });
+      const participantJid = p.id;
+      
+      if (debug) {
+        console.log(`  Checking participant: ${participantJid} (number: ${participantNumber})`);
+      }
+      
+      if (participantNumber === botNumber) {
+        found = true;
+        matchedBy = 'number';
+        if (debug) console.log(`  ✅ Match found by number!`);
+        break;
+      }
+      
+      if (participantJid === botJid) {
+        found = true;
+        matchedBy = 'full_jid';
+        if (debug) console.log(`  ✅ Match found by full JID!`);
+        break;
+      }
+    }
+    
+    if (debug) {
+      if (found) {
+        console.log(`✅ Bot IS in group ${groupId} (matched by ${matchedBy})`);
+      } else {
+        console.log(`❌ Bot is NOT in group ${groupId}`);
+        console.log(`   Bot JID: ${botJid}`);
+        console.log(`   Bot Number: ${botNumber}`);
+        console.log(`   First 5 participants:`, metadata.participants.slice(0, 5).map(p => p.id));
+      }
+    }
     
     return found;
   } catch (error) {
-    console.error('Error checking bot in group:', error);
+    console.error(`❌ Error checking bot in group ${groupId}:`, error.message);
     return false;
   }
 };
@@ -54,10 +97,19 @@ const getGroupName = async (sock, groupId) => {
   }
 };
 
+// Helper to get bot info
+const getBotInfo = (sock) => {
+  return {
+    jid: sock.user.id,
+    number: normalizeJid(sock.user.id),
+    lid: sock.user.lid || null
+  };
+};
+
 module.exports = {
   name: 'forward',
   description: 'Setup automatic message forwarding between groups',
-  usage: '.forward <source|target|list|remove|toggle|stats> [args]',
+  usage: '.forward <source|target|list|remove|toggle|stats|debug> [args]',
   ownerOnly: true,
   aliases: ['fwd', 'groupforward', 'forwarding'],
   
@@ -66,6 +118,10 @@ module.exports = {
     
     // Get current group JID
     const currentGroup = from.endsWith('@g.us') ? from : null;
+    const isInGroup = currentGroup !== null;
+    
+    // Debug info
+    const botInfo = getBotInfo(sock);
     
     if (!args.length) {
       return reply(`📤 *Group Forwarding Commands*\n\n` +
@@ -76,7 +132,8 @@ module.exports = {
         `📋 \`.forward list\` - List all active forwarding rules\n` +
         `🗑️ \`.forward remove <source_jid>\` - Remove forwarding rule\n` +
         `⏸️ \`.forward toggle <source_jid>\` - Enable/disable forwarding\n` +
-        `📊 \`.forward stats\` - Show forwarding statistics\n\n` +
+        `📊 \`.forward stats\` - Show forwarding statistics\n` +
+        `🐛 \`.forward debug\` - Show debug information\n\n` +
         `*Examples:*\n` +
         `• \`.forward target 120363123456789@g.us\`\n` +
         `• \`.forward source 120363987654321@g.us\`\n` +
@@ -86,17 +143,49 @@ module.exports = {
     
     const subCommand = args[0].toLowerCase();
     
+    // Debug command
+    if (subCommand === 'debug') {
+      const groups = args[1] ? [args[1]] : (currentGroup ? [currentGroup] : []);
+      
+      let debugMsg = `🐛 *Debug Information*\n\n` +
+        `*Bot Info:*\n` +
+        `• JID: ${botInfo.jid}\n` +
+        `• Number: ${botInfo.number}\n` +
+        `• LID: ${botInfo.lid || 'None'}\n` +
+        `• In Group Command: ${isInGroup ? '✅ Yes' : '❌ No'}\n\n`;
+      
+      if (currentGroup) {
+        debugMsg += `*Current Group:*\n• JID: ${currentGroup}\n`;
+        const inCurrent = await isBotInGroup(sock, currentGroup, true);
+        debugMsg += `• Bot Member: ${inCurrent ? '✅ Yes' : '❌ No'}\n\n`;
+      }
+      
+      if (groups.length > 0) {
+        for (const groupId of groups) {
+          debugMsg += `*Checking Group:* ${groupId}\n`;
+          const inGroup = await isBotInGroup(sock, groupId, true);
+          debugMsg += `• Bot Member: ${inGroup ? '✅ Yes' : '❌ No'}\n\n`;
+        }
+      }
+      
+      return reply(debugMsg);
+    }
+    
     switch (subCommand) {
       case 'source':
         // Set current group as target, receive from specified source
         if (!currentGroup) {
-          return reply('❌ This command must be used in a group to set it as the target!');
+          return reply(`❌ This command must be used in a group to set it as the target!\n\n` +
+            `Current location: ${from}\n` +
+            `This is ${from.endsWith('@g.us') ? 'a group' : 'a private chat'}.\n\n` +
+            `Please go to the group you want to use as the TARGET and run this command there.`);
         }
         
         const sourceGroupId = args[1];
         if (!sourceGroupId || !sourceGroupId.endsWith('@g.us')) {
           return reply('❌ Please provide a valid source group JID (e.g., 120363123456789@g.us)\n\n' +
-            'To get a group JID, send a message in the group and check the logs.');
+            'To get a group JID, send a message in the group and check the logs.\n\n' +
+            `Example: .forward source ${currentGroup}`);
         }
         
         // Check if source and target are the same
@@ -104,20 +193,43 @@ module.exports = {
           return reply('❌ Source and target groups cannot be the same!');
         }
         
-        // Verify bot is in source group
-        const isSourceGroupValid = await isBotInGroup(sock, sourceGroupId);
-        if (!isSourceGroupValid) {
-          return reply(`❌ Bot is not in the source group!\n\n` +
+        // Show debugging info
+        await reply(`🔍 *Checking group membership...*\n\n` +
+          `Source: ${sourceGroupId}\n` +
+          `Target: ${currentGroup}\n\n` +
+          `Please wait while I verify bot membership...`);
+        
+        // Verify bot is in source group with debugging
+        console.log(`\n🔍 DEBUG: Checking source group: ${sourceGroupId}`);
+        const sourceValid = await isBotInGroup(sock, sourceGroupId, true);
+        
+        if (!sourceValid) {
+          const groupName = await getGroupName(sock, sourceGroupId);
+          return reply(`❌ *Bot is not in the source group!*\n\n` +
+            `Source Group: ${groupName}\n` +
             `Source JID: ${sourceGroupId}\n\n` +
+            `Bot JID: ${botInfo.jid}\n` +
+            `Bot Number: ${botInfo.number}\n\n` +
             `Please add the bot to the source group first.\n` +
-            `Use .join command to add bot to the group.`);
+            `Use .join command with the group invite link.\n\n` +
+            `*Troubleshooting:*\n` +
+            `1. Make sure the bot is actually in the group\n` +
+            `2. Check if the JID is correct\n` +
+            `3. Try using .debug command to verify\n\n` +
+            `Run: .forward debug ${sourceGroupId}`);
         }
         
         // Check if bot is in current group (target)
-        const isTargetGroupValid = await isBotInGroup(sock, currentGroup);
-        if (!isTargetGroupValid) {
-          return reply(`❌ Bot is not in the current group!\n\n` +
-            `Make sure the bot is a member of this group.`);
+        console.log(`\n🔍 DEBUG: Checking target group: ${currentGroup}`);
+        const targetValid = await isBotInGroup(sock, currentGroup, true);
+        
+        if (!targetValid) {
+          return reply(`❌ *Bot is not in the current group!*\n\n` +
+            `Current Group: ${currentGroup}\n\n` +
+            `Bot JID: ${botInfo.jid}\n` +
+            `Bot Number: ${botInfo.number}\n\n` +
+            `Please make sure the bot is a member of this group.\n` +
+            `Run: .forward debug ${currentGroup}`);
         }
         
         // Get group names
@@ -141,13 +253,17 @@ module.exports = {
       case 'target':
         // Set current group as source, forward to specified target
         if (!currentGroup) {
-          return reply('❌ This command must be used in a group to set it as the source!');
+          return reply(`❌ This command must be used in a group to set it as the source!\n\n` +
+            `Current location: ${from}\n` +
+            `This is ${from.endsWith('@g.us') ? 'a group' : 'a private chat'}.\n\n` +
+            `Please go to the group you want to use as the SOURCE and run this command there.`);
         }
         
         const targetGroupId = args[1];
         if (!targetGroupId || !targetGroupId.endsWith('@g.us')) {
           return reply('❌ Please provide a valid target group JID (e.g., 120363123456789@g.us)\n\n' +
-            'To get a group JID, send a message in the group and check the logs.');
+            'To get a group JID, send a message in the group and check the logs.\n\n' +
+            `Example: .forward target ${currentGroup}`);
         }
         
         // Check if source and target are the same
@@ -155,21 +271,43 @@ module.exports = {
           return reply('❌ Source and target groups cannot be the same!');
         }
         
+        // Show debugging info
+        await reply(`🔍 *Checking group membership...*\n\n` +
+          `Source: ${currentGroup}\n` +
+          `Target: ${targetGroupId}\n\n` +
+          `Please wait while I verify bot membership...`);
+        
         // Verify bot is in current group (source)
-        const isSourceValid = await isBotInGroup(sock, currentGroup);
-        if (!isSourceValid) {
-          return reply(`❌ Bot is not in the current group!\n\n` +
-            `Make sure the bot is a member of this group.`);
+        console.log(`\n🔍 DEBUG: Checking source group: ${currentGroup}`);
+        const sourceValid = await isBotInGroup(sock, currentGroup, true);
+        
+        if (!sourceValid) {
+          return reply(`❌ *Bot is not in the current group!*\n\n` +
+            `Current Group: ${currentGroup}\n\n` +
+            `Bot JID: ${botInfo.jid}\n` +
+            `Bot Number: ${botInfo.number}\n\n` +
+            `Please make sure the bot is a member of this group.\n` +
+            `Run: .forward debug ${currentGroup}`);
         }
         
         // Verify bot is in target group
-        const isTargetValid = await isBotInGroup(sock, targetGroupId);
-        if (!isTargetValid) {
-          return reply(`❌ Bot is not in the target group!\n\n` +
+        console.log(`\n🔍 DEBUG: Checking target group: ${targetGroupId}`);
+        const targetValid = await isBotInGroup(sock, targetGroupId, true);
+        
+        if (!targetValid) {
+          const groupName = await getGroupName(sock, targetGroupId);
+          return reply(`❌ *Bot is not in the target group!*\n\n` +
+            `Target Group: ${groupName}\n` +
             `Target JID: ${targetGroupId}\n\n` +
+            `Bot JID: ${botInfo.jid}\n` +
+            `Bot Number: ${botInfo.number}\n\n` +
             `Please add the bot to the target group first.\n` +
-            `Use .join command to add bot to the group.\n\n` +
-            `Once added, run this command again.`);
+            `Use .join command with the group invite link.\n\n` +
+            `*Troubleshooting:*\n` +
+            `1. Make sure the bot is actually in the group\n` +
+            `2. Check if the JID is correct\n` +
+            `3. Try using .debug command to verify\n\n` +
+            `Run: .forward debug ${targetGroupId}`);
         }
         
         // Get group names
@@ -281,30 +419,15 @@ module.exports = {
           `✅ Active Rules: ${stats.active}\n` +
           `⏸️ Disabled Rules: ${stats.disabled}\n` +
           `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-          `*Database Location:* database/group_forwarding.json\n` +
-          `*Bot JID:* ${sock.user.id || 'Unknown'}`);
-        
-      case 'help':
-        return reply(`📚 *Forward Command Help*\n\n` +
-          `*Setup Commands:*\n` +
-          `• \`.forward source <source_jid>\` - Forward from source to this group\n` +
-          `• \`.forward target <target_jid>\` - Forward from this group to target\n\n` +
-          `*Management:*\n` +
-          `• \`.forward list\` - List all forwarding rules\n` +
-          `• \`.forward remove <source_jid>\` - Remove a rule\n` +
-          `• \`.forward toggle <source_jid>\` - Enable/disable a rule\n` +
-          `• \`.forward stats\` - Show statistics\n` +
-          `• \`.forward help\` - This help\n\n` +
-          `*Requirements:*\n` +
-          `• Bot must be in BOTH groups\n` +
-          `• Use the exact group JID (starts with 120363...)\n` +
-          `• Admin privileges are optional but recommended\n\n` +
-          `*Getting Group JID:*\n` +
-          `Send any message in the group, then use .jid command in DM`);
+          `*Bot Info:*\n` +
+          `JID: ${botInfo.jid}\n` +
+          `Number: ${botInfo.number}\n` +
+          `LID: ${botInfo.lid || 'None'}\n\n` +
+          `*Database:* database/group_forwarding.json`);
         
       default:
         return reply('❌ Invalid subcommand.\n\n' +
-          'Available: source, target, list, remove, toggle, stats, help\n\n' +
+          'Available: source, target, list, remove, toggle, stats, debug, help\n\n' +
           'Use `.forward help` for detailed usage.');
     }
   }
