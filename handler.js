@@ -19,7 +19,7 @@ const CACHE_TTL = 60000; // 1 minute cache
 // Load all commands
 const commands = loadCommands();
 
-// Helper function to convert stream to buffer
+// Helper function to convert stream to buffer (fallback)
 const streamToBuffer = async (stream) => {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -357,262 +357,161 @@ const isSystemJid = (jid) => {
          jid.includes('@newsletter.');
 };
 
-// ===== GROUP FORWARDING FEATURE WITH DEBUGGING =====
+// ===== GROUP FORWARDING FEATURE - CLEAN FORWARDING (NO HEADERS) =====
 const checkAndForwardMessage = async (sock, msg, from, content) => {
   try {
-    console.log(`\n🔍 [FORWARD DEBUG] === START CHECK ===`);
-    console.log(`   From JID: ${from}`);
-    console.log(`   Is Group: ${from.endsWith('@g.us')}`);
-    console.log(`   Message ID: ${msg.key?.id}`);
-    console.log(`   From Me: ${msg.key?.fromMe}`);
-    console.log(`   Has Content: ${!!content}`);
-    
     // Only forward messages from groups
-    if (!from.endsWith('@g.us')) {
-      console.log(`   ⏭️ Not a group message, skipping`);
-      return;
-    }
+    if (!from.endsWith('@g.us')) return;
     
     // Get forwarding configuration for this source group
     const forwardingConfig = database.getGroupForwarding(from);
-    console.log(`   Forwarding Config: ${forwardingConfig ? JSON.stringify(forwardingConfig) : 'None'}`);
     
     // Check if forwarding is enabled
-    if (!forwardingConfig) {
-      console.log(`   ⏭️ No forwarding config for this group`);
-      return;
-    }
-    
-    if (!forwardingConfig.enabled) {
-      console.log(`   ⏭️ Forwarding is disabled for this group`);
-      return;
-    }
+    if (!forwardingConfig || !forwardingConfig.enabled) return;
     
     const targetGroupId = forwardingConfig.targetGroupId;
-    if (!targetGroupId) {
-      console.log(`   ❌ No target group ID in config`);
-      return;
-    }
-    
-    console.log(`   ✅ Forwarding enabled! Target: ${targetGroupId}`);
+    if (!targetGroupId) return;
     
     // Don't forward messages from the bot itself (to avoid loops)
-    if (msg.key.fromMe) {
-      console.log(`   ⏭️ Message from bot, skipping to avoid loop`);
-      return;
-    }
+    if (msg.key.fromMe) return;
     
     // Don't forward system messages
     const isSystem = from.includes('@broadcast') || 
                      from.includes('status.broadcast') || 
                      from.includes('@newsletter');
-    if (isSystem) {
-      console.log(`   ⏭️ System message, skipping`);
-      return;
-    }
+    if (isSystem) return;
     
     // Get message content
     const messageContent = content || getMessageContent(msg);
-    if (!messageContent) {
-      console.log(`   ❌ No message content found`);
-      return;
-    }
+    if (!messageContent) return;
     
-    console.log(`   📝 Message Type: ${Object.keys(messageContent)[0]}`);
-    
-    // Get sender info
-    const sender = msg.key.participant || msg.key.remoteJid;
-    const senderNumber = sender.split('@')[0];
-    console.log(`   👤 Sender: ${senderNumber}`);
-    
-    // Get sender's name if possible
-    let senderName = senderNumber;
-    try {
-      if (sock.store && sock.store.contacts && sock.store.contacts[sender]) {
-        const contact = sock.store.contacts[sender];
-        if (contact.notify && contact.notify.trim() && !contact.notify.match(/^\d+$/)) {
-          senderName = contact.notify.trim();
-          console.log(`   📛 Contact Name: ${senderName}`);
-        } else if (contact.name && contact.name.trim() && !contact.name.match(/^\d+$/)) {
-          senderName = contact.name.trim();
-          console.log(`   📛 Contact Name: ${senderName}`);
-        }
-      }
-    } catch (err) {}
-    
-    // Get source group name
-    let sourceGroupName = from;
-    try {
-      const groupMeta = await getCachedGroupMetadata(sock, from);
-      if (groupMeta && groupMeta.subject) {
-        sourceGroupName = groupMeta.subject;
-        console.log(`   📌 Source Group: ${sourceGroupName}`);
-      }
-    } catch (err) {}
-    
-    // Prepare forwarded message header
-    const header = `📨 *Forwarded from Group*\n` +
-                   `👤 *From:* ${senderName}\n` +
-                   `🆔 *Sender:* ${senderNumber}\n` +
-                   `📌 *Source:* ${sourceGroupName}\n` +
-                   `⏰ *Time:* ${new Date().toLocaleString()}\n` +
-                   `━━━━━━━━━━━━━━━━━━━━━\n\n`;
-    
-    console.log(`   📤 Attempting to forward to: ${targetGroupId}`);
+    console.log(`\n📤 [FORWARDING] From: ${from} to ${targetGroupId}`);
     
     try {
-      let forwarded = false;
+      // Handle different message types - FORWARD EXACTLY AS IS (NO HEADERS)
       
       // Text message
       if (messageContent.conversation) {
-        const text = header + messageContent.conversation;
-        console.log(`   📝 Forwarding text message: ${messageContent.conversation.substring(0, 50)}...`);
         await sock.sendMessage(targetGroupId, { 
-          text: text,
-          contextInfo: {
-            forwardingScore: 1,
-            isForwarded: true
-          }
+          text: messageContent.conversation
         });
-        forwarded = true;
+        console.log(`   ✅ Forwarded text: ${messageContent.conversation.substring(0, 50)}`);
       }
       // Extended text message
       else if (messageContent.extendedTextMessage) {
-        const text = header + (messageContent.extendedTextMessage.text || '');
-        console.log(`   📝 Forwarding extended text`);
         await sock.sendMessage(targetGroupId, { 
-          text: text,
-          contextInfo: {
-            forwardingScore: 1,
-            isForwarded: true
-          }
+          text: messageContent.extendedTextMessage.text || ''
         });
-        forwarded = true;
+        console.log(`   ✅ Forwarded extended text`);
       }
       // Image message
       else if (messageContent.imageMessage) {
         const image = messageContent.imageMessage;
-        const caption = header + (image.caption || '');
-        console.log(`   🖼️ Forwarding image${image.caption ? ' with caption' : ''}`);
-        const stream = await sock.downloadMediaMessage(msg);
-        const buffer = Buffer.from(await streamToBuffer(stream));
+        // Download image using Baileys method
+        const buffer = await sock.downloadMediaMessage(msg);
         await sock.sendMessage(targetGroupId, {
           image: buffer,
-          caption: caption,
-          contextInfo: {
-            forwardingScore: 1,
-            isForwarded: true
-          }
+          caption: image.caption || '',
+          mimetype: image.mimetype
         });
-        forwarded = true;
+        console.log(`   ✅ Forwarded image${image.caption ? ' with caption' : ''}`);
       }
       // Video message
       else if (messageContent.videoMessage) {
         const video = messageContent.videoMessage;
-        const caption = header + (video.caption || '');
-        console.log(`   🎥 Forwarding video${video.caption ? ' with caption' : ''}`);
-        const stream = await sock.downloadMediaMessage(msg);
-        const buffer = Buffer.from(await streamToBuffer(stream));
+        // Download video using Baileys method
+        const buffer = await sock.downloadMediaMessage(msg);
         await sock.sendMessage(targetGroupId, {
           video: buffer,
-          caption: caption,
-          mimetype: video.mimetype,
-          contextInfo: {
-            forwardingScore: 1,
-            isForwarded: true
-          }
+          caption: video.caption || '',
+          mimetype: video.mimetype
         });
-        forwarded = true;
+        console.log(`   ✅ Forwarded video${video.caption ? ' with caption' : ''}`);
       }
       // Audio message
       else if (messageContent.audioMessage) {
-        console.log(`   🎵 Forwarding audio`);
-        const stream = await sock.downloadMediaMessage(msg);
-        const buffer = Buffer.from(await streamToBuffer(stream));
+        const audio = messageContent.audioMessage;
+        // Download audio using Baileys method
+        const buffer = await sock.downloadMediaMessage(msg);
         await sock.sendMessage(targetGroupId, {
           audio: buffer,
-          mimetype: messageContent.audioMessage.mimetype,
-          ptt: messageContent.audioMessage.ptt || false,
-          contextInfo: {
-            forwardingScore: 1,
-            isForwarded: true
-          }
+          mimetype: audio.mimetype,
+          ptt: audio.ptt || false
         });
-        await sock.sendMessage(targetGroupId, { text: header });
-        forwarded = true;
+        console.log(`   ✅ Forwarded audio`);
       }
       // Document message
       else if (messageContent.documentMessage) {
         const doc = messageContent.documentMessage;
-        const caption = header + (doc.caption || '');
-        console.log(`   📄 Forwarding document: ${doc.fileName}`);
-        const stream = await sock.downloadMediaMessage(msg);
-        const buffer = Buffer.from(await streamToBuffer(stream));
+        // Download document using Baileys method
+        const buffer = await sock.downloadMediaMessage(msg);
         await sock.sendMessage(targetGroupId, {
           document: buffer,
           mimetype: doc.mimetype,
           fileName: doc.fileName,
-          caption: caption,
-          contextInfo: {
-            forwardingScore: 1,
-            isForwarded: true
-          }
+          caption: doc.caption || ''
         });
-        forwarded = true;
+        console.log(`   ✅ Forwarded document: ${doc.fileName}`);
       }
       // Sticker message
       else if (messageContent.stickerMessage) {
-        console.log(`   🔘 Forwarding sticker`);
-        const stream = await sock.downloadMediaMessage(msg);
-        const buffer = Buffer.from(await streamToBuffer(stream));
+        // Download sticker using Baileys method
+        const buffer = await sock.downloadMediaMessage(msg);
         await sock.sendMessage(targetGroupId, {
-          sticker: buffer,
-          contextInfo: {
-            forwardingScore: 1,
-            isForwarded: true
-          }
+          sticker: buffer
         });
-        await sock.sendMessage(targetGroupId, { text: header });
-        forwarded = true;
+        console.log(`   ✅ Forwarded sticker`);
       }
       // Location message
       else if (messageContent.locationMessage) {
         const location = messageContent.locationMessage;
-        const text = header + `📍 *Location*\nLat: ${location.degreesLatitude}\nLng: ${location.degreesLongitude}`;
-        console.log(`   📍 Forwarding location`);
-        await sock.sendMessage(targetGroupId, { text: text });
-        forwarded = true;
+        await sock.sendMessage(targetGroupId, {
+          location: {
+            degreesLatitude: location.degreesLatitude,
+            degreesLongitude: location.degreesLongitude
+          }
+        });
+        console.log(`   ✅ Forwarded location`);
       }
       // Contact message
       else if (messageContent.contactMessage) {
         const contact = messageContent.contactMessage;
-        const text = header + `👤 *Contact*\nName: ${contact.displayName}`;
-        console.log(`   👤 Forwarding contact`);
-        await sock.sendMessage(targetGroupId, { text: text });
-        if (contact.vcard) {
-          await sock.sendMessage(targetGroupId, { text: contact.vcard });
-        }
-        forwarded = true;
+        await sock.sendMessage(targetGroupId, {
+          contacts: {
+            displayName: contact.displayName,
+            vcard: contact.vcard
+          }
+        });
+        console.log(`   ✅ Forwarded contact: ${contact.displayName}`);
       }
       // Poll creation message
       else if (messageContent.pollCreationMessage) {
         const poll = messageContent.pollCreationMessage;
-        const text = header + `📊 *Poll*\nQuestion: ${poll.name}\nOptions:\n${poll.options.map(opt => `• ${opt.optionName}`).join('\n')}`;
-        console.log(`   📊 Forwarding poll`);
-        await sock.sendMessage(targetGroupId, { text: text });
-        forwarded = true;
+        await sock.sendMessage(targetGroupId, {
+          poll: {
+            name: poll.name,
+            options: poll.options.map(opt => opt.optionName),
+            selectableCount: poll.selectableCount || 1
+          }
+        });
+        console.log(`   ✅ Forwarded poll: ${poll.name}`);
       }
-      
-      if (forwarded) {
-        console.log(`\n✅ [FORWARD SUCCESS]`);
-        console.log(`   Source: ${from}`);
-        console.log(`   Target: ${targetGroupId}`);
-        console.log(`   Sender: ${senderNumber}`);
-        console.log(`   Type: ${Object.keys(messageContent)[0]}`);
-        console.log(`   Time: ${new Date().toLocaleString()}`);
-        console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
-      } else {
-        console.log(`   ⚠️ No forwarder found for message type: ${Object.keys(messageContent)}`);
+      // Button response message
+      else if (messageContent.buttonsResponseMessage) {
+        const btn = messageContent.buttonsResponseMessage;
+        await sock.sendMessage(targetGroupId, {
+          text: btn.selectedDisplayText || 'Button response'
+        });
+        console.log(`   ✅ Forwarded button response`);
+      }
+      // List response message
+      else if (messageContent.listResponseMessage) {
+        const list = messageContent.listResponseMessage;
+        const selected = list.singleSelectReply;
+        await sock.sendMessage(targetGroupId, {
+          text: selected?.title || 'List selection'
+        });
+        console.log(`   ✅ Forwarded list response`);
       }
       
     } catch (forwardError) {
@@ -666,9 +565,6 @@ const handleMessage = async (sock, msg) => {
     
     // Unwrap containers first
     const content = getMessageContent(msg);
-    
-    // Log received message
-    console.log(`\n📨 [MESSAGE RECEIVED] From: ${from}, Has Content: ${!!content}, From Me: ${msg.key?.fromMe}`);
     
     // ===== CHECK AND FORWARD MESSAGE =====
     await checkAndForwardMessage(sock, msg, from, content);
