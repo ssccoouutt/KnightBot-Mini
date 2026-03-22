@@ -360,7 +360,7 @@ const isSystemJid = (jid) => {
 // ===== GROUP FORWARDING FEATURE WITH DEBUGGING =====
 const checkAndForwardMessage = async (sock, msg, from, content) => {
   try {
-    console.log(`\n🔍 [FORWARD DEBUG] === START CHECK ===");
+    console.log(`\n🔍 [FORWARD DEBUG] === START CHECK ===`);
     console.log(`   From JID: ${from}`);
     console.log(`   Is Group: ${from.endsWith('@g.us')}`);
     console.log(`   Message ID: ${msg.key?.id}`);
