@@ -19,7 +19,7 @@ const CACHE_TTL = 60000; // 1 minute cache
 // Load all commands
 const commands = loadCommands();
 
-// Helper function to convert stream to buffer (fallback)
+// Helper function to convert stream to buffer
 const streamToBuffer = async (stream) => {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -27,6 +27,43 @@ const streamToBuffer = async (stream) => {
     stream.on('end', () => resolve(Buffer.concat(chunks)));
     stream.on('error', reject);
   });
+};
+
+// Helper function to download media from message
+const downloadMedia = async (sock, msg, messageContent, type) => {
+  try {
+    // Method 1: Using downloadMediaMessage (Baileys method)
+    if (sock.downloadMediaMessage && typeof sock.downloadMediaMessage === 'function') {
+      const buffer = await sock.downloadMediaMessage(msg);
+      return buffer;
+    }
+    
+    // Method 2: Using downloadContentFromMessage
+    if (sock.downloadContentFromMessage && typeof sock.downloadContentFromMessage === 'function') {
+      let mediaType = type;
+      if (type === 'image') mediaType = 'image';
+      else if (type === 'video') mediaType = 'video';
+      else if (type === 'audio') mediaType = 'audio';
+      else if (type === 'document') mediaType = 'document';
+      else if (type === 'sticker') mediaType = 'sticker';
+      
+      const stream = await sock.downloadContentFromMessage(messageContent, mediaType);
+      const buffer = await streamToBuffer(stream);
+      return buffer;
+    }
+    
+    // Method 3: Using msg.download
+    if (msg.download && typeof msg.download === 'function') {
+      const buffer = await msg.download();
+      return buffer;
+    }
+    
+    console.log(`   ⚠️ No download method available for ${type}`);
+    return null;
+  } catch (error) {
+    console.error(`   ❌ Download error for ${type}:`, error.message);
+    return null;
+  }
 };
 
 // Unwrap WhatsApp containers (ephemeral, view once, etc.)
@@ -407,60 +444,66 @@ const checkAndForwardMessage = async (sock, msg, from, content) => {
       // Image message
       else if (messageContent.imageMessage) {
         const image = messageContent.imageMessage;
-        // Download image using Baileys method
-        const buffer = await sock.downloadMediaMessage(msg);
-        await sock.sendMessage(targetGroupId, {
-          image: buffer,
-          caption: image.caption || '',
-          mimetype: image.mimetype
-        });
-        console.log(`   ✅ Forwarded image${image.caption ? ' with caption' : ''}`);
+        const buffer = await downloadMedia(sock, msg, image, 'image');
+        if (buffer) {
+          await sock.sendMessage(targetGroupId, {
+            image: buffer,
+            caption: image.caption || '',
+            mimetype: image.mimetype
+          });
+          console.log(`   ✅ Forwarded image${image.caption ? ' with caption' : ''}`);
+        }
       }
       // Video message
       else if (messageContent.videoMessage) {
         const video = messageContent.videoMessage;
-        // Download video using Baileys method
-        const buffer = await sock.downloadMediaMessage(msg);
-        await sock.sendMessage(targetGroupId, {
-          video: buffer,
-          caption: video.caption || '',
-          mimetype: video.mimetype
-        });
-        console.log(`   ✅ Forwarded video${video.caption ? ' with caption' : ''}`);
+        const buffer = await downloadMedia(sock, msg, video, 'video');
+        if (buffer) {
+          await sock.sendMessage(targetGroupId, {
+            video: buffer,
+            caption: video.caption || '',
+            mimetype: video.mimetype
+          });
+          console.log(`   ✅ Forwarded video${video.caption ? ' with caption' : ''}`);
+        }
       }
       // Audio message
       else if (messageContent.audioMessage) {
         const audio = messageContent.audioMessage;
-        // Download audio using Baileys method
-        const buffer = await sock.downloadMediaMessage(msg);
-        await sock.sendMessage(targetGroupId, {
-          audio: buffer,
-          mimetype: audio.mimetype,
-          ptt: audio.ptt || false
-        });
-        console.log(`   ✅ Forwarded audio`);
+        const buffer = await downloadMedia(sock, msg, audio, 'audio');
+        if (buffer) {
+          await sock.sendMessage(targetGroupId, {
+            audio: buffer,
+            mimetype: audio.mimetype,
+            ptt: audio.ptt || false
+          });
+          console.log(`   ✅ Forwarded audio`);
+        }
       }
       // Document message
       else if (messageContent.documentMessage) {
         const doc = messageContent.documentMessage;
-        // Download document using Baileys method
-        const buffer = await sock.downloadMediaMessage(msg);
-        await sock.sendMessage(targetGroupId, {
-          document: buffer,
-          mimetype: doc.mimetype,
-          fileName: doc.fileName,
-          caption: doc.caption || ''
-        });
-        console.log(`   ✅ Forwarded document: ${doc.fileName}`);
+        const buffer = await downloadMedia(sock, msg, doc, 'document');
+        if (buffer) {
+          await sock.sendMessage(targetGroupId, {
+            document: buffer,
+            mimetype: doc.mimetype,
+            fileName: doc.fileName,
+            caption: doc.caption || ''
+          });
+          console.log(`   ✅ Forwarded document: ${doc.fileName}`);
+        }
       }
       // Sticker message
       else if (messageContent.stickerMessage) {
-        // Download sticker using Baileys method
-        const buffer = await sock.downloadMediaMessage(msg);
-        await sock.sendMessage(targetGroupId, {
-          sticker: buffer
-        });
-        console.log(`   ✅ Forwarded sticker`);
+        const sticker = messageContent.stickerMessage;
+        const buffer = await downloadMedia(sock, msg, sticker, 'sticker');
+        if (buffer) {
+          await sock.sendMessage(targetGroupId, {
+            sticker: buffer
+          });
+          console.log(`   ✅ Forwarded sticker`);
+        }
       }
       // Location message
       else if (messageContent.locationMessage) {
