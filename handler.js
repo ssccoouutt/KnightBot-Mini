@@ -6,7 +6,7 @@ const config = require('./config');
 const database = require('./database');
 const { loadCommands } = require('./utils/commandLoader');
 const { addMessage } = require('./utils/groupstats');
-const { jidDecode, jidEncode } = require('@whiskeysockets/baileys');
+const { jidDecode, jidEncode, downloadContentFromMessage } = require('@whiskeysockets/baileys');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -27,43 +27,6 @@ const streamToBuffer = async (stream) => {
     stream.on('end', () => resolve(Buffer.concat(chunks)));
     stream.on('error', reject);
   });
-};
-
-// Helper function to download media from message
-const downloadMedia = async (sock, msg, messageContent, type) => {
-  try {
-    // Method 1: Using downloadMediaMessage (Baileys method)
-    if (sock.downloadMediaMessage && typeof sock.downloadMediaMessage === 'function') {
-      const buffer = await sock.downloadMediaMessage(msg);
-      return buffer;
-    }
-    
-    // Method 2: Using downloadContentFromMessage
-    if (sock.downloadContentFromMessage && typeof sock.downloadContentFromMessage === 'function') {
-      let mediaType = type;
-      if (type === 'image') mediaType = 'image';
-      else if (type === 'video') mediaType = 'video';
-      else if (type === 'audio') mediaType = 'audio';
-      else if (type === 'document') mediaType = 'document';
-      else if (type === 'sticker') mediaType = 'sticker';
-      
-      const stream = await sock.downloadContentFromMessage(messageContent, mediaType);
-      const buffer = await streamToBuffer(stream);
-      return buffer;
-    }
-    
-    // Method 3: Using msg.download
-    if (msg.download && typeof msg.download === 'function') {
-      const buffer = await msg.download();
-      return buffer;
-    }
-    
-    console.log(`   ⚠️ No download method available for ${type}`);
-    return null;
-  } catch (error) {
-    console.error(`   ❌ Download error for ${type}:`, error.message);
-    return null;
-  }
 };
 
 // Unwrap WhatsApp containers (ephemeral, view once, etc.)
@@ -444,65 +407,116 @@ const checkAndForwardMessage = async (sock, msg, from, content) => {
       // Image message
       else if (messageContent.imageMessage) {
         const image = messageContent.imageMessage;
-        const buffer = await downloadMedia(sock, msg, image, 'image');
-        if (buffer) {
+        console.log(`   📸 Downloading image...`);
+        
+        try {
+          // Use downloadContentFromMessage from Baileys (as used in survey.js)
+          const stream = await downloadContentFromMessage(image, 'image');
+          const buffer = [];
+          for await (const chunk of stream) {
+            buffer.push(chunk);
+          }
+          const imageBuffer = Buffer.concat(buffer);
+          
           await sock.sendMessage(targetGroupId, {
-            image: buffer,
+            image: imageBuffer,
             caption: image.caption || '',
             mimetype: image.mimetype
           });
           console.log(`   ✅ Forwarded image${image.caption ? ' with caption' : ''}`);
+        } catch (downloadErr) {
+          console.error(`   ❌ Failed to download image:`, downloadErr.message);
         }
       }
       // Video message
       else if (messageContent.videoMessage) {
         const video = messageContent.videoMessage;
-        const buffer = await downloadMedia(sock, msg, video, 'video');
-        if (buffer) {
+        console.log(`   🎥 Downloading video...`);
+        
+        try {
+          const stream = await downloadContentFromMessage(video, 'video');
+          const buffer = [];
+          for await (const chunk of stream) {
+            buffer.push(chunk);
+          }
+          const videoBuffer = Buffer.concat(buffer);
+          
           await sock.sendMessage(targetGroupId, {
-            video: buffer,
+            video: videoBuffer,
             caption: video.caption || '',
             mimetype: video.mimetype
           });
           console.log(`   ✅ Forwarded video${video.caption ? ' with caption' : ''}`);
+        } catch (downloadErr) {
+          console.error(`   ❌ Failed to download video:`, downloadErr.message);
         }
       }
       // Audio message
       else if (messageContent.audioMessage) {
         const audio = messageContent.audioMessage;
-        const buffer = await downloadMedia(sock, msg, audio, 'audio');
-        if (buffer) {
+        console.log(`   🎵 Downloading audio...`);
+        
+        try {
+          const stream = await downloadContentFromMessage(audio, 'audio');
+          const buffer = [];
+          for await (const chunk of stream) {
+            buffer.push(chunk);
+          }
+          const audioBuffer = Buffer.concat(buffer);
+          
           await sock.sendMessage(targetGroupId, {
-            audio: buffer,
+            audio: audioBuffer,
             mimetype: audio.mimetype,
             ptt: audio.ptt || false
           });
           console.log(`   ✅ Forwarded audio`);
+        } catch (downloadErr) {
+          console.error(`   ❌ Failed to download audio:`, downloadErr.message);
         }
       }
       // Document message
       else if (messageContent.documentMessage) {
         const doc = messageContent.documentMessage;
-        const buffer = await downloadMedia(sock, msg, doc, 'document');
-        if (buffer) {
+        console.log(`   📄 Downloading document: ${doc.fileName || 'unnamed'}`);
+        
+        try {
+          const stream = await downloadContentFromMessage(doc, 'document');
+          const buffer = [];
+          for await (const chunk of stream) {
+            buffer.push(chunk);
+          }
+          const docBuffer = Buffer.concat(buffer);
+          
           await sock.sendMessage(targetGroupId, {
-            document: buffer,
+            document: docBuffer,
             mimetype: doc.mimetype,
             fileName: doc.fileName,
             caption: doc.caption || ''
           });
           console.log(`   ✅ Forwarded document: ${doc.fileName}`);
+        } catch (downloadErr) {
+          console.error(`   ❌ Failed to download document:`, downloadErr.message);
         }
       }
       // Sticker message
       else if (messageContent.stickerMessage) {
         const sticker = messageContent.stickerMessage;
-        const buffer = await downloadMedia(sock, msg, sticker, 'sticker');
-        if (buffer) {
+        console.log(`   🔘 Downloading sticker...`);
+        
+        try {
+          const stream = await downloadContentFromMessage(sticker, 'sticker');
+          const buffer = [];
+          for await (const chunk of stream) {
+            buffer.push(chunk);
+          }
+          const stickerBuffer = Buffer.concat(buffer);
+          
           await sock.sendMessage(targetGroupId, {
-            sticker: buffer
+            sticker: stickerBuffer
           });
           console.log(`   ✅ Forwarded sticker`);
+        } catch (downloadErr) {
+          console.error(`   ❌ Failed to download sticker:`, downloadErr.message);
         }
       }
       // Location message
