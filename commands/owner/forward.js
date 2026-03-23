@@ -215,7 +215,7 @@ module.exports = {
       `*How it works:*\n` +
       `• All messages from source group will be forwarded to target group\n` +
       `• Media files (images, videos, audio, documents) are also forwarded\n` +
-      `• Sender info and timestamp are included\n` +
+      `• Messages are forwarded exactly as-is (no extra headers or tags)\n` +
       `• Check terminal for real-time forwarding logs\n\n` +
       `*Management:*\n` +
       `• \`.forward list\` - View all rules\n` +
