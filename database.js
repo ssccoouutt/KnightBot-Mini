@@ -1,17 +1,17 @@
 /**
- * Simple JSON-based Database for Group Settings
+ * JSON-based Database with Google Drive Sync
  */
 
 const fs = require('fs');
 const path = require('path');
 const config = require('./config');
+const driveStorage = require('./utils/driveStorage');
 
 const DB_PATH = path.join(__dirname, 'database');
 const GROUPS_DB = path.join(DB_PATH, 'groups.json');
 const USERS_DB = path.join(DB_PATH, 'users.json');
 const WARNINGS_DB = path.join(DB_PATH, 'warnings.json');
 const MODS_DB = path.join(DB_PATH, 'mods.json');
-const GROUP_FORWARDING_DB = path.join(DB_PATH, 'group_forwarding.json');
 
 // Initialize database directory
 if (!fs.existsSync(DB_PATH)) {
@@ -29,7 +29,6 @@ initDB(GROUPS_DB, {});
 initDB(USERS_DB, {});
 initDB(WARNINGS_DB, {});
 initDB(MODS_DB, { moderators: [] });
-initDB(GROUP_FORWARDING_DB, {});
 
 // Read database
 const readDB = (filePath) => {
@@ -164,165 +163,104 @@ const isModerator = (userId) => {
   return mods.includes(userId);
 };
 
-// ===== GROUP FORWARDING SYSTEM =====
+// ===== GROUP FORWARDING SYSTEM WITH GOOGLE DRIVE =====
 
-// Group forwarding settings storage (cached in memory for performance)
-let groupForwardingCache = null;
-let lastCacheUpdate = 0;
-const CACHE_TTL = 5000; // 5 seconds cache TTL
-
-// Load group forwarding configs from database
-const loadGroupForwardingConfigs = () => {
-  const now = Date.now();
-  if (groupForwardingCache && (now - lastCacheUpdate) < CACHE_TTL) {
-    return groupForwardingCache;
-  }
-  
-  const data = readDB(GROUP_FORWARDING_DB);
-  groupForwardingCache = data;
-  lastCacheUpdate = now;
-  return data;
+// Get forwarding configuration from Drive
+const getGroupForwarding = async (sourceGroupId) => {
+  return await driveStorage.getForwardingConfig(sourceGroupId);
 };
 
-// Save group forwarding configs to database
-const saveGroupForwardingConfigs = (data) => {
-  const success = writeDB(GROUP_FORWARDING_DB, data);
-  if (success) {
-    groupForwardingCache = data;
-    lastCacheUpdate = Date.now();
-  }
-  return success;
-};
-
-// Set group forwarding configuration
-const setGroupForwarding = (sourceGroupId, targetGroupId, enabled = true, forwarderJid = null) => {
-  const configs = loadGroupForwardingConfigs();
-  
-  configs[sourceGroupId] = {
+// Set group forwarding configuration with filters
+const setGroupForwarding = async (sourceGroupId, targetGroupId, enabled = true, forwarderJid = null, filters = null) => {
+  const config = {
     targetGroupId,
     enabled,
     forwarderJid,
     createdAt: Date.now(),
-    updatedAt: Date.now()
+    updatedAt: Date.now(),
+    filters: filters || {
+      types: ['text', 'image', 'video', 'audio', 'document', 'sticker', 'location', 'contact', 'poll'],
+      onlyWithCaption: false,
+      onlyWithoutCaption: false,
+      excludeMedia: false,
+      excludeText: false
+    }
   };
   
-  saveGroupForwardingConfigs(configs);
-  return configs[sourceGroupId];
-};
-
-// Get group forwarding configuration
-const getGroupForwarding = (sourceGroupId) => {
-  const configs = loadGroupForwardingConfigs();
-  return configs[sourceGroupId] || null;
+  const success = await driveStorage.saveForwardingConfig(sourceGroupId, config);
+  return success ? config : null;
 };
 
 // Remove group forwarding configuration
-const removeGroupForwarding = (sourceGroupId) => {
-  const configs = loadGroupForwardingConfigs();
-  
-  if (configs[sourceGroupId]) {
-    delete configs[sourceGroupId];
-    saveGroupForwardingConfigs(configs);
-    return true;
-  }
-  
-  return false;
+const removeGroupForwarding = async (sourceGroupId) => {
+  return await driveStorage.removeForwardingConfig(sourceGroupId);
 };
 
-// Toggle group forwarding (enable/disable)
-const toggleGroupForwarding = (sourceGroupId, enabled) => {
-  const configs = loadGroupForwardingConfigs();
-  
-  if (configs[sourceGroupId]) {
-    configs[sourceGroupId].enabled = enabled;
-    configs[sourceGroupId].updatedAt = Date.now();
-    saveGroupForwardingConfigs(configs);
-    return true;
-  }
-  
-  return false;
+// Toggle group forwarding
+const toggleGroupForwarding = async (sourceGroupId, enabled) => {
+  return await driveStorage.toggleForwardingConfig(sourceGroupId, enabled);
 };
 
 // Get all active group forwarding configs
-const getAllGroupForwardings = () => {
-  const configs = loadGroupForwardingConfigs();
-  
-  return Object.entries(configs)
-    .filter(([_, config]) => config.enabled === true)
-    .map(([source, config]) => ({
-      sourceGroupId: source,
-      targetGroupId: config.targetGroupId,
-      enabled: config.enabled,
-      forwarderJid: config.forwarderJid,
-      createdAt: config.createdAt,
-      updatedAt: config.updatedAt
-    }));
+const getAllGroupForwardings = async () => {
+  const allForwardings = await driveStorage.getAllForwardings();
+  return allForwardings.filter(f => f.enabled === true);
 };
 
-// Get all forwarding configs (including disabled)
-const getAllGroupForwardingsIncludingDisabled = () => {
-  const configs = loadGroupForwardingConfigs();
-  
-  return Object.entries(configs).map(([source, config]) => ({
-    sourceGroupId: source,
-    targetGroupId: config.targetGroupId,
-    enabled: config.enabled,
-    forwarderJid: config.forwarderJid,
-    createdAt: config.createdAt,
-    updatedAt: config.updatedAt
-  }));
+// Get all forwardings including disabled
+const getAllGroupForwardingsIncludingDisabled = async () => {
+  return await driveStorage.getAllForwardings();
 };
 
 // Check if a group has forwarding enabled
-const hasGroupForwarding = (sourceGroupId) => {
-  const config = getGroupForwarding(sourceGroupId);
+const hasGroupForwarding = async (sourceGroupId) => {
+  const config = await getGroupForwarding(sourceGroupId);
   return config !== null && config.enabled === true;
 };
 
 // Get target group for source group
-const getForwardingTarget = (sourceGroupId) => {
-  const config = getGroupForwarding(sourceGroupId);
+const getForwardingTarget = async (sourceGroupId) => {
+  const config = await getGroupForwarding(sourceGroupId);
   return config && config.enabled ? config.targetGroupId : null;
 };
 
-// Update forwarding target
-const updateForwardingTarget = (sourceGroupId, newTargetGroupId) => {
-  const configs = loadGroupForwardingConfigs();
+// Update forwarding filters
+const updateForwardingFilters = async (sourceGroupId, filters) => {
+  const config = await getGroupForwarding(sourceGroupId);
+  if (!config) return false;
   
-  if (configs[sourceGroupId]) {
-    configs[sourceGroupId].targetGroupId = newTargetGroupId;
-    configs[sourceGroupId].updatedAt = Date.now();
-    saveGroupForwardingConfigs(configs);
-    return true;
-  }
+  config.filters = { ...config.filters, ...filters };
+  config.updatedAt = Date.now();
   
-  return false;
-};
-
-// Clear all forwarding configs (owner only - for cleanup)
-const clearAllGroupForwardings = () => {
-  saveGroupForwardingConfigs({});
-  return true;
+  return await driveStorage.saveForwardingConfig(sourceGroupId, config);
 };
 
 // Get forwarding statistics
-const getForwardingStats = () => {
-  const configs = loadGroupForwardingConfigs();
-  const total = Object.keys(configs).length;
-  const active = Object.values(configs).filter(c => c.enabled).length;
+const getForwardingStats = async () => {
+  const forwardings = await driveStorage.getAllForwardings();
+  const total = forwardings.length;
+  const active = forwardings.filter(f => f.enabled).length;
   const disabled = total - active;
   
   return {
     total,
     active,
     disabled,
-    configs: Object.entries(configs).map(([source, config]) => ({
-      source,
-      target: config.targetGroupId,
-      enabled: config.enabled,
-      age: Date.now() - config.createdAt
+    configs: forwardings.map(f => ({
+      source: f.sourceGroupId,
+      target: f.targetGroupId,
+      enabled: f.enabled,
+      age: Date.now() - (f.createdAt || Date.now()),
+      filters: f.filters
     }))
   };
+};
+
+// Load all forwardings on startup
+const loadForwardingsOnStart = async () => {
+  console.log('\n📤 Loading forwarding configurations from Google Drive...');
+  const forwardings = await driveStorage.loadAllForwardings();
+  return forwardings;
 };
 
 // Export all functions
@@ -341,16 +279,16 @@ module.exports = {
   removeModerator,
   isModerator,
   
-  // New forwarding exports
-  setGroupForwarding,
+  // New Drive-based forwarding exports
   getGroupForwarding,
+  setGroupForwarding,
   removeGroupForwarding,
   toggleGroupForwarding,
   getAllGroupForwardings,
   getAllGroupForwardingsIncludingDisabled,
   hasGroupForwarding,
   getForwardingTarget,
-  updateForwardingTarget,
-  clearAllGroupForwardings,
-  getForwardingStats
+  updateForwardingFilters,
+  getForwardingStats,
+  loadForwardingsOnStart
 };
