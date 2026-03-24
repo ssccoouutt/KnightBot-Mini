@@ -24,6 +24,7 @@ const DEFAULT_CONFIG = {
 async function getAccessToken() {
     try {
         if (cachedToken && tokenExpiry && new Date() < tokenExpiry) {
+            console.log('✅ Using cached token (valid until:', tokenExpiry.toLocaleString(), ')');
             return cachedToken;
         }
         
@@ -51,9 +52,15 @@ async function getAccessToken() {
         const tokenData = JSON.parse(fs.readFileSync(tempTokenFile, 'utf8'));
         fs.unlinkSync(tempTokenFile);
         
+        console.log('📋 Token data loaded:', {
+            client_id: tokenData.client_id ? 'present' : 'missing',
+            token_uri: tokenData.token_uri,
+            expiry: tokenData.expiry
+        });
+        
         const expiryDate = new Date(tokenData.expiry);
         if (new Date() > expiryDate) {
-            console.log('🔄 Refreshing token...');
+            console.log('🔄 Token expired, refreshing...');
             const refreshData = {
                 client_id: tokenData.client_id,
                 client_secret: tokenData.client_secret,
@@ -63,16 +70,21 @@ async function getAccessToken() {
             const refreshResponse = await axios.post(tokenData.token_uri, refreshData);
             cachedToken = refreshResponse.data.access_token;
             tokenExpiry = new Date(Date.now() + 3600 * 1000);
+            console.log('✅ Token refreshed, expires at:', tokenExpiry.toLocaleString());
         } else {
             cachedToken = tokenData.token;
             tokenExpiry = new Date(expiryDate);
+            console.log('✅ Using existing token, expires at:', tokenExpiry.toLocaleString());
         }
         
-        console.log('✅ Google Drive token obtained');
         return cachedToken;
         
     } catch (error) {
         console.error('❌ Failed to get Google Drive token:', error.message);
+        if (error.response) {
+            console.error('   Response status:', error.response.status);
+            console.error('   Response data:', error.response.data);
+        }
         return null;
     }
 }
@@ -81,9 +93,9 @@ async function getAccessToken() {
 function configToText(config) {
     let text = '# KnightBot-Mini Forwarding Configuration\n';
     text += '# Format: SOURCE_JID -> TARGET_JID [enabled|disabled] [filters]\n';
-    text += '# Filters: types:text,image,video | caption:only | exclude:media\n';
+    text += '# Filters: types:text,image,video | caption:only | caption:without | exclude:media | exclude:text\n';
     text += '# Example: 120363408035540146@g.us -> 120363421227499361@g.us enabled types:text,image\n';
-    text += '# Last updated: ' + new Date(config.lastUpdated).toLocaleString() + '\n\n';
+    text += `# Last updated: ${new Date(config.lastUpdated).toLocaleString()}\n\n`;
     
     for (const [source, rule] of Object.entries(config.forwardings)) {
         let line = `${source} -> ${rule.targetGroupId}`;
@@ -115,22 +127,18 @@ function textToConfig(text) {
     const lines = text.split('\n');
     
     for (const line of lines) {
-        // Skip comments and empty lines
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#')) continue;
         
-        // Parse: SOURCE -> TARGET [enabled|disabled] [filters...]
         const arrowMatch = trimmed.match(/^([^\s]+)\s*->\s*([^\s]+)/);
         if (!arrowMatch) continue;
         
         const sourceJid = arrowMatch[1];
         const targetJid = arrowMatch[2];
         
-        // Parse remaining parts
         const remaining = trimmed.substring(arrowMatch[0].length).trim();
         const parts = remaining.split(/\s+/);
         
-        // Default values
         let enabled = true;
         const filters = {
             types: ['text', 'image', 'video', 'audio', 'document', 'sticker', 'location', 'contact', 'poll'],
@@ -179,9 +187,13 @@ function textToConfig(text) {
 async function readConfig() {
     try {
         const token = await getAccessToken();
-        if (!token) return DEFAULT_CONFIG;
+        if (!token) {
+            console.log('⚠️ No token available, using default config');
+            return DEFAULT_CONFIG;
+        }
         
         console.log('📖 Reading forwarding config from Google Drive...');
+        console.log(`   File ID: ${CONFIG_FILE_ID}`);
         
         try {
             const response = await axios({
@@ -194,18 +206,20 @@ async function readConfig() {
                 timeout: 30000
             });
             
-            const fileContent = response.data;
+            console.log(`✅ File downloaded, size: ${response.data.length} bytes`);
+            console.log(`   First 200 chars: ${response.data.substring(0, 200)}`);
             
-            // Check if it's JSON or text
+            // Try to parse as JSON first
             try {
-                const jsonConfig = JSON.parse(fileContent);
+                const jsonConfig = JSON.parse(response.data);
                 if (jsonConfig && jsonConfig.forwardings) {
-                    console.log(`✅ Loaded ${Object.keys(jsonConfig.forwardings).length} forwarding rules from Drive (JSON format)`);
+                    const ruleCount = Object.keys(jsonConfig.forwardings).length;
+                    console.log(`✅ Loaded ${ruleCount} forwarding rules from Drive (JSON format)`);
                     return jsonConfig;
                 }
             } catch (e) {
-                // Not JSON, treat as text
-                const config = textToConfig(fileContent);
+                console.log('📝 Not JSON, parsing as text format...');
+                const config = textToConfig(response.data);
                 const ruleCount = Object.keys(config.forwardings).length;
                 console.log(`✅ Loaded ${ruleCount} forwarding rules from Drive (Text format)`);
                 return config;
@@ -213,11 +227,16 @@ async function readConfig() {
             
         } catch (error) {
             if (error.response?.status === 404) {
-                console.log('📝 Config file not found, will create new one');
+                console.log('📝 Config file not found (404), will create new one');
                 return DEFAULT_CONFIG;
             } else if (error.response?.status === 403) {
-                console.log('⚠️ Cannot access file, will use local config');
+                console.log('⚠️ Cannot access file (403), will use local config');
                 return DEFAULT_CONFIG;
+            } else if (error.response?.status === 401) {
+                console.log('⚠️ Token expired (401), will refresh and retry');
+                cachedToken = null;
+                tokenExpiry = null;
+                return await readConfig(); // Retry with fresh token
             }
             throw error;
         }
@@ -226,6 +245,10 @@ async function readConfig() {
         
     } catch (error) {
         console.error('❌ Failed to read config from Drive:', error.message);
+        if (error.response) {
+            console.error('   Status:', error.response.status);
+            console.error('   Data:', error.response.data);
+        }
         return DEFAULT_CONFIG;
     }
 }
@@ -234,45 +257,117 @@ async function readConfig() {
 async function writeConfig(config) {
     try {
         const token = await getAccessToken();
-        if (!token) return false;
+        if (!token) {
+            console.log('⚠️ No token available, cannot save to Drive');
+            return false;
+        }
         
         console.log('💾 Saving forwarding config to Google Drive as text file...');
+        console.log(`   File ID: ${CONFIG_FILE_ID}`);
         
         // Convert to text format
         const textContent = configToText(config);
+        console.log(`   Content length: ${textContent.length} bytes`);
+        console.log(`   Rules count: ${Object.keys(config.forwardings).length}`);
         
-        // Update the file
+        // First, check if file exists
+        let fileExists = false;
+        try {
+            console.log('🔍 Checking if file exists...');
+            const fileInfo = await axios.get(`https://www.googleapis.com/drive/v3/files/${CONFIG_FILE_ID}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            fileExists = true;
+            console.log(`✅ File exists: ${fileInfo.data.name} (${fileInfo.data.mimeType})`);
+        } catch (e) {
+            if (e.response?.status === 404) {
+                console.log('📝 File does not exist, will create new');
+                fileExists = false;
+            } else if (e.response?.status === 401) {
+                console.log('⚠️ Token expired, refreshing...');
+                cachedToken = null;
+                tokenExpiry = null;
+                return await writeConfig(config); // Retry with fresh token
+            } else {
+                console.log(`⚠️ Error checking file: ${e.message}`);
+                fileExists = false;
+            }
+        }
+        
         const formData = new FormData();
-        formData.append('metadata', JSON.stringify({
+        const metadata = {
             name: 'forwarding_config.txt',
             mimeType: 'text/plain'
-        }), { contentType: 'application/json' });
+        };
+        
+        if (!fileExists) {
+            metadata.parents = ['root'];
+            console.log('📝 Will create new file in root folder');
+        } else {
+            console.log('📝 Will update existing file');
+        }
+        
+        console.log('📦 Preparing form data...');
+        formData.append('metadata', JSON.stringify(metadata), {
+            contentType: 'application/json'
+        });
         
         formData.append('file', Buffer.from(textContent, 'utf8'), {
             filename: 'forwarding_config.txt',
             contentType: 'text/plain'
         });
         
-        await axios.patch(`${FILE_URL}/${CONFIG_FILE_ID}?uploadType=multipart`, formData, {
+        let url;
+        if (fileExists) {
+            url = `${FILE_URL}/${CONFIG_FILE_ID}?uploadType=multipart`;
+            console.log(`📤 Updating file at: ${url}`);
+        } else {
+            url = UPLOAD_URL;
+            console.log(`📤 Creating new file at: ${url}`);
+        }
+        
+        console.log('🚀 Sending request to Google Drive...');
+        const response = await axios({
+            method: fileExists ? 'PATCH' : 'POST',
+            url: url,
+            data: formData,
             headers: {
                 'Authorization': `Bearer ${token}`,
                 ...formData.getHeaders()
-            }
+            },
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity
         });
         
-        console.log('✅ Config saved to Google Drive as text file');
+        console.log('✅ Config saved to Google Drive successfully!');
+        console.log(`   File ID: ${response.data.id}`);
+        console.log(`   File Name: ${response.data.name}`);
         return true;
         
     } catch (error) {
-        console.error('❌ Failed to write config to Drive:', error.message);
+        console.error('❌ Failed to write config to Drive:');
+        console.error(`   Message: ${error.message}`);
+        if (error.response) {
+            console.error(`   Status: ${error.response.status}`);
+            console.error(`   Status Text: ${error.response.statusText}`);
+            console.error(`   Data:`, JSON.stringify(error.response.data, null, 2));
+        }
+        if (error.request) {
+            console.error(`   Request made but no response received`);
+        }
+        console.error(`   Stack: ${error.stack}`);
         return false;
     }
 }
 
 // Save forwarding configuration
 async function saveForwardingConfig(sourceJid, config) {
+    console.log(`\n📝 Saving forwarding config for: ${sourceJid}`);
     const data = await readConfig();
-    if (!data) return false;
+    if (!data) {
+        console.log('❌ Failed to read existing config');
+        return false;
+    }
     
     if (!data.forwardings) data.forwardings = {};
     
@@ -281,6 +376,7 @@ async function saveForwardingConfig(sourceJid, config) {
         updatedAt: Date.now()
     };
     
+    console.log(`   Total rules after save: ${Object.keys(data.forwardings).length}`);
     return await writeConfig(data);
 }
 
@@ -303,18 +399,22 @@ async function getAllForwardings() {
 
 // Remove forwarding configuration
 async function removeForwardingConfig(sourceJid) {
+    console.log(`\n🗑️ Removing forwarding config for: ${sourceJid}`);
     const data = await readConfig();
     if (!data || !data.forwardings) return false;
     
     if (data.forwardings[sourceJid]) {
         delete data.forwardings[sourceJid];
+        console.log(`   Rules remaining: ${Object.keys(data.forwardings).length}`);
         return await writeConfig(data);
     }
+    console.log(`   Rule not found`);
     return false;
 }
 
 // Toggle forwarding configuration
 async function toggleForwardingConfig(sourceJid, enabled) {
+    console.log(`\n🔄 Toggling forwarding config for: ${sourceJid} -> ${enabled ? 'ENABLED' : 'DISABLED'}`);
     const data = await readConfig();
     if (!data || !data.forwardings) return false;
     
@@ -323,11 +423,13 @@ async function toggleForwardingConfig(sourceJid, enabled) {
         data.forwardings[sourceJid].updatedAt = Date.now();
         return await writeConfig(data);
     }
+    console.log(`   Rule not found`);
     return false;
 }
 
 // Update forwarding filters
 async function updateForwardingFilters(sourceJid, filters) {
+    console.log(`\n🔧 Updating filters for: ${sourceJid}`);
     const data = await readConfig();
     if (!data || !data.forwardings) return false;
     
@@ -344,8 +446,9 @@ async function updateForwardingFilters(sourceJid, filters) {
 
 // Initialize and load all forwardings on bot start
 async function loadAllForwardings() {
+    console.log('\n📤 Loading forwarding configurations from Google Drive...');
     const forwardings = await getAllForwardings();
-    console.log(`\n📤 Loading ${forwardings.length} forwarding rules from Google Drive...`);
+    console.log(`✅ Loaded ${forwardings.length} forwarding rules from Google Drive`);
     
     for (const f of forwardings) {
         console.log(`   • ${f.sourceGroupId} → ${f.targetGroupId} [${f.enabled ? 'ACTIVE' : 'DISABLED'}]`);
