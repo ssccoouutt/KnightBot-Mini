@@ -5,7 +5,7 @@ const path = require('path');
 const FormData = require('form-data');
 
 // Google Drive Configuration
-const CONFIG_FILE_ID = '1bK0_FSna8KzX-XgvlVlfHA9Al2M385qV';
+const CONFIG_FILE_ID = '1NIcD3sFVwilLdhgiPqZLeG7D8jiMO2aN';
 const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download";
 const UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
 const FILE_URL = "https://www.googleapis.com/drive/v3/files";
@@ -230,6 +230,22 @@ async function toggleForwardingConfig(sourceJid, enabled) {
     return false;
 }
 
+// Update forwarding filters
+async function updateForwardingFilters(sourceJid, filters) {
+    const data = await readConfig();
+    if (!data) return false;
+    
+    if (data.forwardings[sourceJid]) {
+        data.forwardings[sourceJid].filters = {
+            ...data.forwardings[sourceJid].filters,
+            ...filters
+        };
+        data.forwardings[sourceJid].updatedAt = Date.now();
+        return await writeConfig(data);
+    }
+    return false;
+}
+
 // Initialize and load all forwardings on bot start
 async function loadAllForwardings() {
     const forwardings = await getAllForwardings();
@@ -238,7 +254,15 @@ async function loadAllForwardings() {
     for (const f of forwardings) {
         console.log(`   • ${f.sourceGroupId} → ${f.targetGroupId} [${f.enabled ? 'ACTIVE' : 'DISABLED'}]`);
         if (f.filters) {
-            console.log(`     Filters: ${JSON.stringify(f.filters)}`);
+            const filterStr = [];
+            if (f.filters.types && f.filters.types.length > 0) filterStr.push(`types:${f.filters.types.join(',')}`);
+            if (f.filters.onlyWithCaption) filterStr.push('only with caption');
+            if (f.filters.onlyWithoutCaption) filterStr.push('only without caption');
+            if (f.filters.excludeMedia) filterStr.push('exclude media');
+            if (f.filters.excludeText) filterStr.push('exclude text');
+            if (filterStr.length > 0) {
+                console.log(`     Filters: ${filterStr.join(', ')}`);
+            }
         }
     }
     
@@ -253,5 +277,6 @@ module.exports = {
     getAllForwardings,
     removeForwardingConfig,
     toggleForwardingConfig,
+    updateForwardingFilters,
     loadAllForwardings
 };
