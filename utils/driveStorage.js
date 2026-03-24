@@ -2,6 +2,7 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const FormData = require('form-data');
 
 // Google Drive Configuration
 const CONFIG_FILE_ID = '1bK0_FSna8KzX-XgvlVlfHA9Al2M385qV'; // Your text file
@@ -51,11 +52,7 @@ async function getAccessToken() {
         const tokenData = JSON.parse(fs.readFileSync(tempTokenFile, 'utf8'));
         fs.unlinkSync(tempTokenFile);
         
-        console.log('📋 Token data loaded:', {
-            client_id: tokenData.client_id ? 'present' : 'missing',
-            token_uri: tokenData.token_uri,
-            expiry: tokenData.expiry
-        });
+        console.log('📋 Token data loaded');
         
         const expiryDate = new Date(tokenData.expiry);
         if (new Date() > expiryDate) {
@@ -80,10 +77,6 @@ async function getAccessToken() {
         
     } catch (error) {
         console.error('❌ Failed to get Google Drive token:', error.message);
-        if (error.response) {
-            console.error('   Response status:', error.response.status);
-            console.error('   Response data:', error.response.data);
-        }
         return null;
     }
 }
@@ -252,7 +245,7 @@ async function readConfig() {
     }
 }
 
-// Write configuration file to Google Drive (as text)
+// Write configuration file to Google Drive (as text) - FIXED VERSION
 async function writeConfig(config) {
     try {
         const token = await getAccessToken();
@@ -275,12 +268,11 @@ async function writeConfig(config) {
         // First, check if file exists
         let fileExists = false;
         try {
-            console.log('🔍 Checking if file exists...');
             const fileInfo = await axios.get(`https://www.googleapis.com/drive/v3/files/${CONFIG_FILE_ID}`, {
                 headers: { 'Authorization': `Bearer ${token}` }
             });
             fileExists = true;
-            console.log(`✅ File exists: ${fileInfo.data.name} (${fileInfo.data.mimeType})`);
+            console.log(`✅ File exists: ${fileInfo.data.name}`);
         } catch (e) {
             if (e.response?.status === 404) {
                 console.log('📝 File does not exist, will create new');
@@ -296,64 +288,52 @@ async function writeConfig(config) {
             }
         }
         
-        // Create multipart boundary
-        const boundary = '-------314159265358979323846';
-        const delimiter = `\r\n--${boundary}\r\n`;
-        const closeDelimiter = `\r\n--${boundary}--\r\n`;
-        
-        // Create metadata part
-        const metadata = {
-            name: 'forwarding_config.txt',
-            mimeType: 'text/plain'
-        };
-        
-        const metadataPart = delimiter + 
-            'Content-Type: application/json\r\n\r\n' +
-            JSON.stringify(metadata) + '\r\n';
-        
-        // Create file part
-        const filePart = delimiter + 
-            'Content-Type: text/plain\r\n' +
-            'Content-Transfer-Encoding: base64\r\n\r\n' +
-            fileBuffer.toString('base64') + '\r\n';
-        
-        // Combine parts
-        const requestBody = metadataPart + filePart + closeDelimiter;
-        
-        const headers = {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': `multipart/related; boundary=${boundary}`,
-            'Content-Length': Buffer.byteLength(requestBody)
-        };
-        
-        let url;
-        let method;
-        
-        if (fileExists) {
-            url = `${FILE_URL}/${CONFIG_FILE_ID}?uploadType=multipart`;
-            method = 'PATCH';
-            console.log(`📤 Updating file at: ${url}`);
-        } else {
-            url = UPLOAD_URL;
-            method = 'POST';
-            console.log(`📤 Creating new file at: ${url}`);
+        if (!fileExists) {
+            // Create new file
+            console.log('📤 Creating new file...');
+            const metadata = {
+                name: 'forwarding_config.txt',
+                mimeType: 'text/plain',
+                parents: ['root']
+            };
+            
+            const formData = new FormData();
+            formData.append('metadata', JSON.stringify(metadata), { contentType: 'application/json' });
+            formData.append('file', fileBuffer, { filename: 'forwarding_config.txt', contentType: 'text/plain' });
+            
+            const createResponse = await axios.post(UPLOAD_URL, formData, {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    ...formData.getHeaders()
+                }
+            });
+            
+            console.log('✅ New file created on Google Drive!');
+            console.log(`   File ID: ${createResponse.data.id}`);
+            return true;
         }
         
-        console.log('🚀 Sending request to Google Drive...');
+        // Update existing file - Use the simple upload method with media upload URL
+        const updateUrl = `https://www.googleapis.com/upload/drive/v3/files/${CONFIG_FILE_ID}?uploadType=media`;
+        
+        console.log(`📤 Updating file at: ${updateUrl}`);
+        
         const response = await axios({
-            method: method,
-            url: url,
-            data: requestBody,
-            headers: headers,
+            method: 'PATCH',
+            url: updateUrl,
+            data: fileBuffer,
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'text/plain',
+                'Content-Length': fileBuffer.length
+            },
             maxContentLength: Infinity,
             maxBodyLength: Infinity
         });
         
         console.log('✅ Config saved to Google Drive successfully!');
-        if (response.data) {
-            console.log(`   File ID: ${response.data.id}`);
-            console.log(`   File Name: ${response.data.name}`);
-        }
+        console.log(`   File ID: ${response.data.id}`);
+        console.log(`   File Name: ${response.data.name}`);
         return true;
         
     } catch (error) {
@@ -363,9 +343,6 @@ async function writeConfig(config) {
             console.error(`   Status: ${error.response.status}`);
             console.error(`   Status Text: ${error.response.statusText}`);
             console.error(`   Data:`, JSON.stringify(error.response.data, null, 2));
-        }
-        if (error.request) {
-            console.error(`   Request made but no response received`);
         }
         console.error(`   Stack: ${error.stack}`);
         return false;
