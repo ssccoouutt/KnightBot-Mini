@@ -5,13 +5,20 @@ const path = require('path');
 const FormData = require('form-data');
 
 // Google Drive Configuration
-const CONFIG_FILE_ID = '1NIcD3sFVwilLdhgiPqZLeG7D8jiMO2aN';
+const CONFIG_FILE_ID = '1bK0_FSna8KzX-XgvlVlfHA9Al2M385qV'; // Updated to your txt file
 const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download";
 const UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
 const FILE_URL = "https://www.googleapis.com/drive/v3/files";
 
 let cachedToken = null;
 let tokenExpiry = null;
+
+// Default empty config structure
+const DEFAULT_CONFIG = {
+    forwardings: {},
+    version: 1,
+    lastUpdated: Date.now()
+};
 
 // Get Google Drive access token
 async function getAccessToken() {
@@ -73,11 +80,11 @@ async function getAccessToken() {
     }
 }
 
-// Read configuration file from Google Drive
+// Read configuration file from Google Drive (handles both JSON and text files)
 async function readConfig() {
     try {
         const token = await getAccessToken();
-        if (!token) return null;
+        if (!token) return DEFAULT_CONFIG;
         
         console.log('📖 Reading forwarding config from Google Drive...');
         
@@ -92,21 +99,73 @@ async function readConfig() {
             timeout: 30000
         });
         
-        const config = JSON.parse(response.data);
-        console.log(`✅ Loaded ${Object.keys(config.forwardings || {}).length} forwarding rules from Drive`);
-        return config;
+        const fileContent = response.data;
+        
+        // Try to parse as JSON first
+        try {
+            const config = JSON.parse(fileContent);
+            // Check if it has the expected structure
+            if (config && typeof config === 'object') {
+                if (!config.forwardings) config.forwardings = {};
+                if (!config.version) config.version = 1;
+                console.log(`✅ Loaded ${Object.keys(config.forwardings || {}).length} forwarding rules from Drive`);
+                return config;
+            }
+        } catch (jsonError) {
+            // Not valid JSON, check if it's a text file with our format
+            console.log('📝 File is not JSON, checking if it contains forwarding data...');
+            
+            // Try to extract forwarding data from text content
+            const lines = fileContent.split('\n');
+            const forwardings = {};
+            
+            for (const line of lines) {
+                // Look for lines that might contain forwarding rules
+                // Format: source_jid -> target_jid [enabled] [filters]
+                const match = line.match(/(\d+@g\.us)\s*[-=]>?\s*(\d+@g\.us)/i);
+                if (match) {
+                    const sourceJid = match[1];
+                    const targetJid = match[2];
+                    const isEnabled = !line.toLowerCase().includes('disabled') && !line.toLowerCase().includes('inactive');
+                    
+                    forwardings[sourceJid] = {
+                        targetGroupId: targetJid,
+                        enabled: isEnabled,
+                        forwarderJid: null,
+                        createdAt: Date.now(),
+                        updatedAt: Date.now(),
+                        filters: {
+                            types: ['text', 'image', 'video', 'audio', 'document', 'sticker', 'location', 'contact', 'poll'],
+                            onlyWithCaption: false,
+                            onlyWithoutCaption: false,
+                            excludeMedia: false,
+                            excludeText: false
+                        }
+                    };
+                }
+            }
+            
+            if (Object.keys(forwardings).length > 0) {
+                console.log(`✅ Extracted ${Object.keys(forwardings).length} forwarding rules from text file`);
+                return { forwardings, version: 1, lastUpdated: Date.now() };
+            }
+        }
+        
+        // If no valid data found, return default config
+        console.log('📝 No valid forwarding data found, using empty config');
+        return DEFAULT_CONFIG;
         
     } catch (error) {
         if (error.response?.status === 404) {
             console.log('📝 Config file not found, creating new one...');
-            return { forwardings: {}, version: 1, lastUpdated: Date.now() };
+            return DEFAULT_CONFIG;
         }
         console.error('❌ Failed to read config from Drive:', error.message);
-        return null;
+        return DEFAULT_CONFIG;
     }
 }
 
-// Write configuration file to Google Drive
+// Write configuration file to Google Drive as JSON
 async function writeConfig(config) {
     try {
         const token = await getAccessToken();
@@ -180,6 +239,9 @@ async function saveForwardingConfig(sourceJid, config) {
     const data = await readConfig();
     if (!data) return false;
     
+    // Ensure forwardings object exists
+    if (!data.forwardings) data.forwardings = {};
+    
     data.forwardings[sourceJid] = {
         ...config,
         updatedAt: Date.now()
@@ -191,14 +253,14 @@ async function saveForwardingConfig(sourceJid, config) {
 // Get forwarding configuration
 async function getForwardingConfig(sourceJid) {
     const data = await readConfig();
-    if (!data) return null;
+    if (!data || !data.forwardings) return null;
     return data.forwardings[sourceJid] || null;
 }
 
 // Get all forwarding configurations
 async function getAllForwardings() {
     const data = await readConfig();
-    if (!data) return [];
+    if (!data || !data.forwardings) return [];
     return Object.entries(data.forwardings).map(([source, config]) => ({
         sourceGroupId: source,
         ...config
@@ -208,7 +270,7 @@ async function getAllForwardings() {
 // Remove forwarding configuration
 async function removeForwardingConfig(sourceJid) {
     const data = await readConfig();
-    if (!data) return false;
+    if (!data || !data.forwardings) return false;
     
     if (data.forwardings[sourceJid]) {
         delete data.forwardings[sourceJid];
@@ -220,7 +282,7 @@ async function removeForwardingConfig(sourceJid) {
 // Toggle forwarding configuration
 async function toggleForwardingConfig(sourceJid, enabled) {
     const data = await readConfig();
-    if (!data) return false;
+    if (!data || !data.forwardings) return false;
     
     if (data.forwardings[sourceJid]) {
         data.forwardings[sourceJid].enabled = enabled;
@@ -233,7 +295,7 @@ async function toggleForwardingConfig(sourceJid, enabled) {
 // Update forwarding filters
 async function updateForwardingFilters(sourceJid, filters) {
     const data = await readConfig();
-    if (!data) return false;
+    if (!data || !data.forwardings) return false;
     
     if (data.forwardings[sourceJid]) {
         data.forwardings[sourceJid].filters = {
@@ -255,7 +317,8 @@ async function loadAllForwardings() {
         console.log(`   • ${f.sourceGroupId} → ${f.targetGroupId} [${f.enabled ? 'ACTIVE' : 'DISABLED'}]`);
         if (f.filters) {
             const filterStr = [];
-            if (f.filters.types && f.filters.types.length > 0) filterStr.push(`types:${f.filters.types.join(',')}`);
+            if (f.filters.types && f.filters.types.length > 0 && f.filters.types.length < 10) 
+                filterStr.push(`types:${f.filters.types.join(',')}`);
             if (f.filters.onlyWithCaption) filterStr.push('only with caption');
             if (f.filters.onlyWithoutCaption) filterStr.push('only without caption');
             if (f.filters.excludeMedia) filterStr.push('exclude media');
