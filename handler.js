@@ -29,6 +29,52 @@ const streamToBuffer = async (stream) => {
   });
 };
 
+// Check if message should be forwarded based on filters
+const shouldForwardMessage = (messageContent, filters) => {
+  if (!filters) return true;
+  
+  const messageType = Object.keys(messageContent)[0];
+  
+  // Determine message type
+  let type = messageType;
+  if (type === 'conversation' || type === 'extendedTextMessage') type = 'text';
+  else if (type === 'imageMessage') type = 'image';
+  else if (type === 'videoMessage') type = 'video';
+  else if (type === 'audioMessage') type = 'audio';
+  else if (type === 'documentMessage') type = 'document';
+  else if (type === 'stickerMessage') type = 'sticker';
+  else if (type === 'locationMessage') type = 'location';
+  else if (type === 'contactMessage') type = 'contact';
+  else if (type === 'pollCreationMessage') type = 'poll';
+  else type = 'other';
+  
+  // Check if message type is allowed
+  if (filters.types && filters.types.length > 0 && !filters.types.includes(type)) {
+    return false;
+  }
+  
+  // Check caption filters
+  const hasCaption = messageContent.imageMessage?.caption || 
+                     messageContent.videoMessage?.caption || 
+                     messageContent.documentMessage?.caption;
+  
+  if (filters.onlyWithCaption && !hasCaption) return false;
+  if (filters.onlyWithoutCaption && hasCaption) return false;
+  
+  // Check exclude filters
+  const isMedia = messageContent.imageMessage || 
+                  messageContent.videoMessage || 
+                  messageContent.audioMessage || 
+                  messageContent.documentMessage ||
+                  messageContent.stickerMessage;
+  const isText = messageContent.conversation || messageContent.extendedTextMessage;
+  
+  if (filters.excludeMedia && isMedia) return false;
+  if (filters.excludeText && isText) return false;
+  
+  return true;
+};
+
 // Unwrap WhatsApp containers (ephemeral, view once, etc.)
 const getMessageContent = (msg) => {
   if (!msg || !msg.message) return null;
@@ -357,14 +403,14 @@ const isSystemJid = (jid) => {
          jid.includes('@newsletter.');
 };
 
-// ===== GROUP FORWARDING FEATURE - CLEAN FORWARDING (NO HEADERS) =====
+// ===== GROUP FORWARDING FEATURE WITH FILTERS AND DRIVE STORAGE =====
 const checkAndForwardMessage = async (sock, msg, from, content) => {
   try {
     // Only forward messages from groups
     if (!from.endsWith('@g.us')) return;
     
-    // Get forwarding configuration for this source group
-    const forwardingConfig = database.getGroupForwarding(from);
+    // Get forwarding configuration from Drive
+    const forwardingConfig = await database.getGroupForwarding(from);
     
     // Check if forwarding is enabled
     if (!forwardingConfig || !forwardingConfig.enabled) return;
@@ -385,7 +431,13 @@ const checkAndForwardMessage = async (sock, msg, from, content) => {
     const messageContent = content || getMessageContent(msg);
     if (!messageContent) return;
     
-    console.log(`\n📤 [FORWARDING] From: ${from} to ${targetGroupId}`);
+    // Check filters
+    const filters = forwardingConfig.filters;
+    const shouldForward = shouldForwardMessage(messageContent, filters);
+    
+    if (!shouldForward) {
+      return;
+    }
     
     try {
       // Handle different message types - FORWARD EXACTLY AS IS (NO HEADERS)
@@ -395,22 +447,18 @@ const checkAndForwardMessage = async (sock, msg, from, content) => {
         await sock.sendMessage(targetGroupId, { 
           text: messageContent.conversation
         });
-        console.log(`   ✅ Forwarded text: ${messageContent.conversation.substring(0, 50)}`);
       }
       // Extended text message
       else if (messageContent.extendedTextMessage) {
         await sock.sendMessage(targetGroupId, { 
           text: messageContent.extendedTextMessage.text || ''
         });
-        console.log(`   ✅ Forwarded extended text`);
       }
       // Image message
       else if (messageContent.imageMessage) {
         const image = messageContent.imageMessage;
-        console.log(`   📸 Downloading image...`);
         
         try {
-          // Use downloadContentFromMessage from Baileys (as used in survey.js)
           const stream = await downloadContentFromMessage(image, 'image');
           const buffer = [];
           for await (const chunk of stream) {
@@ -423,15 +471,13 @@ const checkAndForwardMessage = async (sock, msg, from, content) => {
             caption: image.caption || '',
             mimetype: image.mimetype
           });
-          console.log(`   ✅ Forwarded image${image.caption ? ' with caption' : ''}`);
         } catch (downloadErr) {
-          console.error(`   ❌ Failed to download image:`, downloadErr.message);
+          console.error(`❌ Failed to download image:`, downloadErr.message);
         }
       }
       // Video message
       else if (messageContent.videoMessage) {
         const video = messageContent.videoMessage;
-        console.log(`   🎥 Downloading video...`);
         
         try {
           const stream = await downloadContentFromMessage(video, 'video');
@@ -446,15 +492,13 @@ const checkAndForwardMessage = async (sock, msg, from, content) => {
             caption: video.caption || '',
             mimetype: video.mimetype
           });
-          console.log(`   ✅ Forwarded video${video.caption ? ' with caption' : ''}`);
         } catch (downloadErr) {
-          console.error(`   ❌ Failed to download video:`, downloadErr.message);
+          console.error(`❌ Failed to download video:`, downloadErr.message);
         }
       }
       // Audio message
       else if (messageContent.audioMessage) {
         const audio = messageContent.audioMessage;
-        console.log(`   🎵 Downloading audio...`);
         
         try {
           const stream = await downloadContentFromMessage(audio, 'audio');
@@ -469,15 +513,13 @@ const checkAndForwardMessage = async (sock, msg, from, content) => {
             mimetype: audio.mimetype,
             ptt: audio.ptt || false
           });
-          console.log(`   ✅ Forwarded audio`);
         } catch (downloadErr) {
-          console.error(`   ❌ Failed to download audio:`, downloadErr.message);
+          console.error(`❌ Failed to download audio:`, downloadErr.message);
         }
       }
       // Document message
       else if (messageContent.documentMessage) {
         const doc = messageContent.documentMessage;
-        console.log(`   📄 Downloading document: ${doc.fileName || 'unnamed'}`);
         
         try {
           const stream = await downloadContentFromMessage(doc, 'document');
@@ -493,15 +535,13 @@ const checkAndForwardMessage = async (sock, msg, from, content) => {
             fileName: doc.fileName,
             caption: doc.caption || ''
           });
-          console.log(`   ✅ Forwarded document: ${doc.fileName}`);
         } catch (downloadErr) {
-          console.error(`   ❌ Failed to download document:`, downloadErr.message);
+          console.error(`❌ Failed to download document:`, downloadErr.message);
         }
       }
       // Sticker message
       else if (messageContent.stickerMessage) {
         const sticker = messageContent.stickerMessage;
-        console.log(`   🔘 Downloading sticker...`);
         
         try {
           const stream = await downloadContentFromMessage(sticker, 'sticker');
@@ -514,9 +554,8 @@ const checkAndForwardMessage = async (sock, msg, from, content) => {
           await sock.sendMessage(targetGroupId, {
             sticker: stickerBuffer
           });
-          console.log(`   ✅ Forwarded sticker`);
         } catch (downloadErr) {
-          console.error(`   ❌ Failed to download sticker:`, downloadErr.message);
+          console.error(`❌ Failed to download sticker:`, downloadErr.message);
         }
       }
       // Location message
@@ -528,7 +567,6 @@ const checkAndForwardMessage = async (sock, msg, from, content) => {
             degreesLongitude: location.degreesLongitude
           }
         });
-        console.log(`   ✅ Forwarded location`);
       }
       // Contact message
       else if (messageContent.contactMessage) {
@@ -539,7 +577,6 @@ const checkAndForwardMessage = async (sock, msg, from, content) => {
             vcard: contact.vcard
           }
         });
-        console.log(`   ✅ Forwarded contact: ${contact.displayName}`);
       }
       // Poll creation message
       else if (messageContent.pollCreationMessage) {
@@ -551,7 +588,6 @@ const checkAndForwardMessage = async (sock, msg, from, content) => {
             selectableCount: poll.selectableCount || 1
           }
         });
-        console.log(`   ✅ Forwarded poll: ${poll.name}`);
       }
       // Button response message
       else if (messageContent.buttonsResponseMessage) {
@@ -559,7 +595,6 @@ const checkAndForwardMessage = async (sock, msg, from, content) => {
         await sock.sendMessage(targetGroupId, {
           text: btn.selectedDisplayText || 'Button response'
         });
-        console.log(`   ✅ Forwarded button response`);
       }
       // List response message
       else if (messageContent.listResponseMessage) {
@@ -568,7 +603,6 @@ const checkAndForwardMessage = async (sock, msg, from, content) => {
         await sock.sendMessage(targetGroupId, {
           text: selected?.title || 'List selection'
         });
-        console.log(`   ✅ Forwarded list response`);
       }
       
     } catch (forwardError) {
