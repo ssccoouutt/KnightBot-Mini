@@ -63,6 +63,7 @@ const {
 const qrcode = require('qrcode-terminal');
 const config = require('./config');
 const handler = require('./handler');
+const database = require('./database');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
@@ -312,6 +313,35 @@ async function startBot() {
 
       // Initialize anti-call feature
       handler.initializeAntiCall(sock);
+
+      // ===== LOAD FORWARDING CONFIGURATIONS FROM GOOGLE DRIVE =====
+      console.log('\n📤 Loading forwarding configurations from Google Drive...');
+      try {
+        const forwardings = await database.loadForwardingsOnStart();
+        console.log(`✅ Loaded ${forwardings.length} forwarding rules from Google Drive`);
+        
+        if (forwardings.length > 0) {
+          console.log('\n📋 Active Forwarding Rules:');
+          forwardings.forEach(f => {
+            console.log(`   • ${f.sourceGroupId} → ${f.targetGroupId} [${f.enabled ? 'ACTIVE' : 'DISABLED'}]`);
+            if (f.filters) {
+              const filterStr = [];
+              if (f.filters.types && f.filters.types.length > 0) filterStr.push(`types:${f.filters.types.join(',')}`);
+              if (f.filters.onlyWithCaption) filterStr.push('only with caption');
+              if (f.filters.onlyWithoutCaption) filterStr.push('only without caption');
+              if (f.filters.excludeMedia) filterStr.push('exclude media');
+              if (f.filters.excludeText) filterStr.push('exclude text');
+              if (filterStr.length > 0) {
+                console.log(`     Filters: ${filterStr.join(', ')}`);
+              }
+            }
+          });
+        }
+      } catch (driveError) {
+        console.error('❌ Failed to load forwarding configs from Google Drive:', driveError.message);
+        console.log('⚠️ Continuing without forwarding rules...');
+      }
+      // ===== END LOAD FORWARDINGS =====
 
       // ===== AUTO-START TELEGRAM BRIDGE =====
       if (config.autoStartTelegram) {
