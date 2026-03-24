@@ -5,7 +5,7 @@ const path = require('path');
 const FormData = require('form-data');
 
 // Google Drive Configuration
-const CONFIG_FILE_ID = '1bK0_FSna8KzX-XgvlVlfHA9Al2M385qV'; // Updated to your txt file
+const CONFIG_FILE_ID = '1bK0_FSna8KzX-XgvlVlfHA9Al2M385qV'; // Your text file
 const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download";
 const UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
 const FILE_URL = "https://www.googleapis.com/drive/v3/files";
@@ -13,7 +13,7 @@ const FILE_URL = "https://www.googleapis.com/drive/v3/files";
 let cachedToken = null;
 let tokenExpiry = null;
 
-// Default empty config structure
+// Default empty config
 const DEFAULT_CONFIG = {
     forwardings: {},
     version: 1,
@@ -23,14 +23,12 @@ const DEFAULT_CONFIG = {
 // Get Google Drive access token
 async function getAccessToken() {
     try {
-        // Check if cached token is still valid
         if (cachedToken && tokenExpiry && new Date() < tokenExpiry) {
             return cachedToken;
         }
         
         console.log('📥 Fetching Google Drive token...');
         
-        // Download token.json from the provided link
         const tokenResponse = await axios({
             method: 'GET',
             url: TOKEN_URL,
@@ -53,7 +51,6 @@ async function getAccessToken() {
         const tokenData = JSON.parse(fs.readFileSync(tempTokenFile, 'utf8'));
         fs.unlinkSync(tempTokenFile);
         
-        // Check if token needs refresh
         const expiryDate = new Date(tokenData.expiry);
         if (new Date() > expiryDate) {
             console.log('🔄 Refreshing token...');
@@ -65,7 +62,7 @@ async function getAccessToken() {
             };
             const refreshResponse = await axios.post(tokenData.token_uri, refreshData);
             cachedToken = refreshResponse.data.access_token;
-            tokenExpiry = new Date(Date.now() + 3600 * 1000); // 1 hour
+            tokenExpiry = new Date(Date.now() + 3600 * 1000);
         } else {
             cachedToken = tokenData.token;
             tokenExpiry = new Date(expiryDate);
@@ -80,7 +77,105 @@ async function getAccessToken() {
     }
 }
 
-// Read configuration file from Google Drive (handles both JSON and text files)
+// Convert config object to text format
+function configToText(config) {
+    let text = '# KnightBot-Mini Forwarding Configuration\n';
+    text += '# Format: SOURCE_JID -> TARGET_JID [enabled|disabled] [filters]\n';
+    text += '# Filters: types:text,image,video | caption:only | exclude:media\n';
+    text += '# Example: 120363408035540146@g.us -> 120363421227499361@g.us enabled types:text,image\n';
+    text += '# Last updated: ' + new Date(config.lastUpdated).toLocaleString() + '\n\n';
+    
+    for (const [source, rule] of Object.entries(config.forwardings)) {
+        let line = `${source} -> ${rule.targetGroupId}`;
+        line += rule.enabled ? ' enabled' : ' disabled';
+        
+        if (rule.filters) {
+            const filters = [];
+            if (rule.filters.types && rule.filters.types.length > 0 && rule.filters.types.length < 10) {
+                filters.push(`types:${rule.filters.types.join(',')}`);
+            }
+            if (rule.filters.onlyWithCaption) filters.push('caption:only');
+            if (rule.filters.onlyWithoutCaption) filters.push('caption:without');
+            if (rule.filters.excludeMedia) filters.push('exclude:media');
+            if (rule.filters.excludeText) filters.push('exclude:text');
+            if (filters.length > 0) {
+                line += ` ${filters.join(' ')}`;
+            }
+        }
+        
+        text += line + '\n';
+    }
+    
+    return text;
+}
+
+// Parse text format to config object
+function textToConfig(text) {
+    const forwardings = {};
+    const lines = text.split('\n');
+    
+    for (const line of lines) {
+        // Skip comments and empty lines
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        
+        // Parse: SOURCE -> TARGET [enabled|disabled] [filters...]
+        const arrowMatch = trimmed.match(/^([^\s]+)\s*->\s*([^\s]+)/);
+        if (!arrowMatch) continue;
+        
+        const sourceJid = arrowMatch[1];
+        const targetJid = arrowMatch[2];
+        
+        // Parse remaining parts
+        const remaining = trimmed.substring(arrowMatch[0].length).trim();
+        const parts = remaining.split(/\s+/);
+        
+        // Default values
+        let enabled = true;
+        const filters = {
+            types: ['text', 'image', 'video', 'audio', 'document', 'sticker', 'location', 'contact', 'poll'],
+            onlyWithCaption: false,
+            onlyWithoutCaption: false,
+            excludeMedia: false,
+            excludeText: false
+        };
+        
+        for (const part of parts) {
+            if (part === 'enabled') {
+                enabled = true;
+            } else if (part === 'disabled') {
+                enabled = false;
+            } else if (part.startsWith('types:')) {
+                filters.types = part.substring(6).split(',');
+            } else if (part === 'caption:only') {
+                filters.onlyWithCaption = true;
+            } else if (part === 'caption:without') {
+                filters.onlyWithoutCaption = true;
+            } else if (part === 'exclude:media') {
+                filters.excludeMedia = true;
+            } else if (part === 'exclude:text') {
+                filters.excludeText = true;
+            }
+        }
+        
+        forwardings[sourceJid] = {
+            targetGroupId: targetJid,
+            enabled: enabled,
+            forwarderJid: null,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            filters: filters
+        };
+    }
+    
+    return {
+        forwardings: forwardings,
+        version: 1,
+        lastUpdated: Date.now()
+    };
+}
+
+// Read configuration file from Google Drive
 async function readConfig() {
     try {
         const token = await getAccessToken();
@@ -88,144 +183,84 @@ async function readConfig() {
         
         console.log('📖 Reading forwarding config from Google Drive...');
         
-        // Download the file
-        const response = await axios({
-            method: 'GET',
-            url: `https://www.googleapis.com/drive/v3/files/${CONFIG_FILE_ID}?alt=media`,
-            headers: {
-                'Authorization': `Bearer ${token}`
-            },
-            responseType: 'text',
-            timeout: 30000
-        });
-        
-        const fileContent = response.data;
-        
-        // Try to parse as JSON first
         try {
-            const config = JSON.parse(fileContent);
-            // Check if it has the expected structure
-            if (config && typeof config === 'object') {
-                if (!config.forwardings) config.forwardings = {};
-                if (!config.version) config.version = 1;
-                console.log(`✅ Loaded ${Object.keys(config.forwardings || {}).length} forwarding rules from Drive`);
+            const response = await axios({
+                method: 'GET',
+                url: `https://www.googleapis.com/drive/v3/files/${CONFIG_FILE_ID}?alt=media`,
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                },
+                responseType: 'text',
+                timeout: 30000
+            });
+            
+            const fileContent = response.data;
+            
+            // Check if it's JSON or text
+            try {
+                const jsonConfig = JSON.parse(fileContent);
+                if (jsonConfig && jsonConfig.forwardings) {
+                    console.log(`✅ Loaded ${Object.keys(jsonConfig.forwardings).length} forwarding rules from Drive (JSON format)`);
+                    return jsonConfig;
+                }
+            } catch (e) {
+                // Not JSON, treat as text
+                const config = textToConfig(fileContent);
+                const ruleCount = Object.keys(config.forwardings).length;
+                console.log(`✅ Loaded ${ruleCount} forwarding rules from Drive (Text format)`);
                 return config;
             }
-        } catch (jsonError) {
-            // Not valid JSON, check if it's a text file with our format
-            console.log('📝 File is not JSON, checking if it contains forwarding data...');
             
-            // Try to extract forwarding data from text content
-            const lines = fileContent.split('\n');
-            const forwardings = {};
-            
-            for (const line of lines) {
-                // Look for lines that might contain forwarding rules
-                // Format: source_jid -> target_jid [enabled] [filters]
-                const match = line.match(/(\d+@g\.us)\s*[-=]>?\s*(\d+@g\.us)/i);
-                if (match) {
-                    const sourceJid = match[1];
-                    const targetJid = match[2];
-                    const isEnabled = !line.toLowerCase().includes('disabled') && !line.toLowerCase().includes('inactive');
-                    
-                    forwardings[sourceJid] = {
-                        targetGroupId: targetJid,
-                        enabled: isEnabled,
-                        forwarderJid: null,
-                        createdAt: Date.now(),
-                        updatedAt: Date.now(),
-                        filters: {
-                            types: ['text', 'image', 'video', 'audio', 'document', 'sticker', 'location', 'contact', 'poll'],
-                            onlyWithCaption: false,
-                            onlyWithoutCaption: false,
-                            excludeMedia: false,
-                            excludeText: false
-                        }
-                    };
-                }
+        } catch (error) {
+            if (error.response?.status === 404) {
+                console.log('📝 Config file not found, will create new one');
+                return DEFAULT_CONFIG;
+            } else if (error.response?.status === 403) {
+                console.log('⚠️ Cannot access file, will use local config');
+                return DEFAULT_CONFIG;
             }
-            
-            if (Object.keys(forwardings).length > 0) {
-                console.log(`✅ Extracted ${Object.keys(forwardings).length} forwarding rules from text file`);
-                return { forwardings, version: 1, lastUpdated: Date.now() };
-            }
+            throw error;
         }
         
-        // If no valid data found, return default config
-        console.log('📝 No valid forwarding data found, using empty config');
         return DEFAULT_CONFIG;
         
     } catch (error) {
-        if (error.response?.status === 404) {
-            console.log('📝 Config file not found, creating new one...');
-            return DEFAULT_CONFIG;
-        }
         console.error('❌ Failed to read config from Drive:', error.message);
         return DEFAULT_CONFIG;
     }
 }
 
-// Write configuration file to Google Drive as JSON
+// Write configuration file to Google Drive (as text)
 async function writeConfig(config) {
     try {
         const token = await getAccessToken();
         if (!token) return false;
         
-        console.log('💾 Saving forwarding config to Google Drive...');
+        console.log('💾 Saving forwarding config to Google Drive as text file...');
         
-        config.lastUpdated = Date.now();
-        const configContent = JSON.stringify(config, null, 2);
+        // Convert to text format
+        const textContent = configToText(config);
         
-        // First, check if file exists and get its metadata
-        let fileExists = false;
-        try {
-            await axios.get(`https://www.googleapis.com/drive/v3/files/${CONFIG_FILE_ID}`, {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
-            fileExists = true;
-        } catch (e) {
-            fileExists = false;
-        }
+        // Update the file
+        const formData = new FormData();
+        formData.append('metadata', JSON.stringify({
+            name: 'forwarding_config.txt',
+            mimeType: 'text/plain'
+        }), { contentType: 'application/json' });
         
-        if (fileExists) {
-            // Update existing file
-            const formData = new FormData();
-            formData.append('metadata', JSON.stringify({
-                name: 'forwarding_config.json',
-                mimeType: 'application/json'
-            }), { contentType: 'application/json' });
-            formData.append('file', Buffer.from(configContent, 'utf8'), {
-                filename: 'forwarding_config.json',
-                contentType: 'application/json'
-            });
-            
-            await axios.patch(`${FILE_URL}/${CONFIG_FILE_ID}?uploadType=multipart`, formData, {
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    ...formData.getHeaders()
-                }
-            });
-        } else {
-            // Create new file
-            const formData = new FormData();
-            formData.append('metadata', JSON.stringify({
-                name: 'forwarding_config.json',
-                parents: ['root']
-            }), { contentType: 'application/json' });
-            formData.append('file', Buffer.from(configContent, 'utf8'), {
-                filename: 'forwarding_config.json',
-                contentType: 'application/json'
-            });
-            
-            await axios.post(UPLOAD_URL, formData, {
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    ...formData.getHeaders()
-                }
-            });
-        }
+        formData.append('file', Buffer.from(textContent, 'utf8'), {
+            filename: 'forwarding_config.txt',
+            contentType: 'text/plain'
+        });
         
-        console.log('✅ Config saved to Google Drive');
+        await axios.patch(`${FILE_URL}/${CONFIG_FILE_ID}?uploadType=multipart`, formData, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                ...formData.getHeaders()
+            }
+        });
+        
+        console.log('✅ Config saved to Google Drive as text file');
         return true;
         
     } catch (error) {
@@ -239,7 +274,6 @@ async function saveForwardingConfig(sourceJid, config) {
     const data = await readConfig();
     if (!data) return false;
     
-    // Ensure forwardings object exists
     if (!data.forwardings) data.forwardings = {};
     
     data.forwardings[sourceJid] = {
@@ -319,12 +353,12 @@ async function loadAllForwardings() {
             const filterStr = [];
             if (f.filters.types && f.filters.types.length > 0 && f.filters.types.length < 10) 
                 filterStr.push(`types:${f.filters.types.join(',')}`);
-            if (f.filters.onlyWithCaption) filterStr.push('only with caption');
-            if (f.filters.onlyWithoutCaption) filterStr.push('only without caption');
-            if (f.filters.excludeMedia) filterStr.push('exclude media');
-            if (f.filters.excludeText) filterStr.push('exclude text');
+            if (f.filters.onlyWithCaption) filterStr.push('caption:only');
+            if (f.filters.onlyWithoutCaption) filterStr.push('caption:without');
+            if (f.filters.excludeMedia) filterStr.push('exclude:media');
+            if (f.filters.excludeText) filterStr.push('exclude:text');
             if (filterStr.length > 0) {
-                console.log(`     Filters: ${filterStr.join(', ')}`);
+                console.log(`     Filters: ${filterStr.join(' ')}`);
             }
         }
     }
