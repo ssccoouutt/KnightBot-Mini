@@ -2,7 +2,6 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const FormData = require('form-data');
 
 // Google Drive Configuration
 const CONFIG_FILE_ID = '1bK0_FSna8KzX-XgvlVlfHA9Al2M385qV'; // Your text file
@@ -236,7 +235,7 @@ async function readConfig() {
                 console.log('⚠️ Token expired (401), will refresh and retry');
                 cachedToken = null;
                 tokenExpiry = null;
-                return await readConfig(); // Retry with fresh token
+                return await readConfig();
             }
             throw error;
         }
@@ -270,6 +269,9 @@ async function writeConfig(config) {
         console.log(`   Content length: ${textContent.length} bytes`);
         console.log(`   Rules count: ${Object.keys(config.forwardings).length}`);
         
+        // Prepare the file content
+        const fileBuffer = Buffer.from(textContent, 'utf8');
+        
         // First, check if file exists
         let fileExists = false;
         try {
@@ -287,61 +289,71 @@ async function writeConfig(config) {
                 console.log('⚠️ Token expired, refreshing...');
                 cachedToken = null;
                 tokenExpiry = null;
-                return await writeConfig(config); // Retry with fresh token
+                return await writeConfig(config);
             } else {
                 console.log(`⚠️ Error checking file: ${e.message}`);
                 fileExists = false;
             }
         }
         
-        const formData = new FormData();
+        // Create multipart boundary
+        const boundary = '-------314159265358979323846';
+        const delimiter = `\r\n--${boundary}\r\n`;
+        const closeDelimiter = `\r\n--${boundary}--\r\n`;
+        
+        // Create metadata part
         const metadata = {
             name: 'forwarding_config.txt',
             mimeType: 'text/plain'
         };
         
-        if (!fileExists) {
-            metadata.parents = ['root'];
-            console.log('📝 Will create new file in root folder');
-        } else {
-            console.log('📝 Will update existing file');
-        }
+        const metadataPart = delimiter + 
+            'Content-Type: application/json\r\n\r\n' +
+            JSON.stringify(metadata) + '\r\n';
         
-        console.log('📦 Preparing form data...');
-        formData.append('metadata', JSON.stringify(metadata), {
-            contentType: 'application/json'
-        });
+        // Create file part
+        const filePart = delimiter + 
+            'Content-Type: text/plain\r\n' +
+            'Content-Transfer-Encoding: base64\r\n\r\n' +
+            fileBuffer.toString('base64') + '\r\n';
         
-        formData.append('file', Buffer.from(textContent, 'utf8'), {
-            filename: 'forwarding_config.txt',
-            contentType: 'text/plain'
-        });
+        // Combine parts
+        const requestBody = metadataPart + filePart + closeDelimiter;
+        
+        const headers = {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': `multipart/related; boundary=${boundary}`,
+            'Content-Length': Buffer.byteLength(requestBody)
+        };
         
         let url;
+        let method;
+        
         if (fileExists) {
             url = `${FILE_URL}/${CONFIG_FILE_ID}?uploadType=multipart`;
+            method = 'PATCH';
             console.log(`📤 Updating file at: ${url}`);
         } else {
             url = UPLOAD_URL;
+            method = 'POST';
             console.log(`📤 Creating new file at: ${url}`);
         }
         
         console.log('🚀 Sending request to Google Drive...');
         const response = await axios({
-            method: fileExists ? 'PATCH' : 'POST',
+            method: method,
             url: url,
-            data: formData,
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                ...formData.getHeaders()
-            },
+            data: requestBody,
+            headers: headers,
             maxContentLength: Infinity,
             maxBodyLength: Infinity
         });
         
         console.log('✅ Config saved to Google Drive successfully!');
-        console.log(`   File ID: ${response.data.id}`);
-        console.log(`   File Name: ${response.data.name}`);
+        if (response.data) {
+            console.log(`   File ID: ${response.data.id}`);
+            console.log(`   File Name: ${response.data.name}`);
+        }
         return true;
         
     } catch (error) {
