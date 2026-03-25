@@ -88,8 +88,11 @@ module.exports = {
         // If Siputzx API didn't work, try ttdl method
         if (!videoUrl) {
           try {
+            console.log(`[TT-DEBUG] Calling ttdl with URL: ${url}`);
             let downloadData = await ttdl(url);
-            if (downloadData && downloadData.data && downloadData.data.length > 0) {
+            
+            // Handle both array-style and object-style responses
+            if (downloadData && downloadData.data && Array.isArray(downloadData.data)) {
               const mediaData = downloadData.data;
               for (let i = 0; i < Math.min(20, mediaData.length); i++) {
                 const media = mediaData[i];
@@ -110,9 +113,13 @@ module.exports = {
                 }
               }
               return;
+            } else if (downloadData && (downloadData.video || downloadData.video_hd || downloadData.video_wm)) {
+              // Handle single object response from ttdl
+              videoUrl = downloadData.video_hd || downloadData.video || downloadData.video_wm;
+              title = downloadData.title;
             }
           } catch (ttdlError) {
-            console.error('ttdl fallback also failed:', ttdlError.message);
+            console.error('[TT-DEBUG] ttdl fallback also failed:', ttdlError.message);
           }
         }
         
