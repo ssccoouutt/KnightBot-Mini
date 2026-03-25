@@ -2,7 +2,7 @@
  * Facebook Downloader - Download Facebook videos
  */
 
-const { facebookdl, facebookdlv2 } = require('@bochilteam/scraper-facebook');
+const { facebookdl, facebookdlv2 } = require('@bochilteam/scraper');
 const axios = require('axios');
 const config = require('../../config');
 
@@ -74,6 +74,24 @@ module.exports = {
           const videos = result.result;
           
           // Get best quality (HD first, then SD)
+          let bestVideo = videos.find(v => v.quality === 'HD') || videos[0];
+          console.log(`[FB-DEBUG] Selected video quality: ${bestVideo.quality}`);
+          
+          videoData = {
+            url: bestVideo.url || bestVideo.download,
+            title: result.title || 'Facebook Video'
+          };
+          
+          if (videoData.url) {
+            console.log('[FB-DEBUG] ✅ facebookdlv2 SUCCESS!');
+          } else {
+            console.log('[FB-DEBUG] ❌ No video URL found');
+            errors.push('facebookdlv2: No video URL');
+          }
+        } else if (result && result.video) {
+          console.log(`[FB-DEBUG] Found ${result.video.length} videos`);
+          const videos = result.video;
+          
           let bestVideo = videos.find(v => v.quality === 'HD') || videos[0];
           console.log(`[FB-DEBUG] Selected video quality: ${bestVideo.quality}`);
           
