@@ -19,9 +19,9 @@
     "author": "Your Name",
     "license": "MIT",
     "dependencies": {
-        "@bochilteam/scraper": "^5.0.1",
-        "@bochilteam/scraper-tiktok": "^5.0.0",
-        "@bochilteam/scraper-facebook": "^5.0.0",
+        "@bochilteam/scraper": "^4.2.0",
+        "@bochilteam/scraper-tiktok": "^4.2.0",
+        "@bochilteam/scraper-facebook": "^4.2.0",
         "@vitalets/google-translate-api": "^9.2.1",
         "@whiskeysockets/baileys": "^v7.0.0-rc.9",
         "axios": "^1.7.2",
