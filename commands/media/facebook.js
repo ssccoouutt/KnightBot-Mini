@@ -69,13 +69,18 @@ module.exports = {
         const result = await fbdl(url);
         console.log(`[FB-DEBUG] Result type: ${typeof result}`);
 
-        if (result && result.video) {
+        // Check for video array in the result
+        if (result && Array.isArray(result.video) && result.video.length > 0) {
           console.log(`[FB-DEBUG] Found ${result.video.length} videos`);
           const videos = result.video;
 
-          // Get best quality (HD first, then SD)
-          let bestVideo = videos.find(v => v.quality === "HD") || videos[0];
-          console.log(`[FB-DEBUG] Selected video quality: ${bestVideo.quality}`);
+          // Get best quality (HD first, then SD, then whatever is available)
+          let bestVideo = videos.find(v => v.resolution && v.resolution.includes("1080p")) || 
+                          videos.find(v => v.resolution && v.resolution.includes("720p")) ||
+                          videos.find(v => v.quality === "HD") || 
+                          videos[0];
+          
+          console.log(`[FB-DEBUG] Selected video resolution/quality: ${bestVideo.resolution || bestVideo.quality}`);
 
           videoData = {
             url: bestVideo.url || bestVideo.download,
@@ -85,12 +90,12 @@ module.exports = {
           if (videoData.url) {
             console.log("[FB-DEBUG] ✅ fbdl SUCCESS!");
           } else {
-            console.log("[FB-DEBUG] ❌ No video URL found");
-            errors.push("fbdl: No video URL");
+            console.log("[FB-DEBUG] ❌ No video URL found in bestVideo");
+            errors.push("fbdl: No video URL in result");
           }
         } else {
-          console.log("[FB-DEBUG] ❌ No video in response");
-          errors.push("fbdl: No video");
+          console.log("[FB-DEBUG] ❌ No video array or empty array in response");
+          errors.push("fbdl: No video found in response");
         }
       } catch (error) {
         console.log("[FB-DEBUG] ❌ fbdl ERROR:", error.message);
@@ -119,8 +124,14 @@ module.exports = {
 
       // Send video
       try {
+        // Handle relative URLs if any (though fbdl usually returns absolute)
+        let finalUrl = videoData.url;
+        if (finalUrl.startsWith("/")) {
+            finalUrl = "https://d.rapidcdn.app" + finalUrl;
+        }
+
         await sock.sendMessage(extra.from, {
-          video: { url: videoData.url },
+          video: { url: finalUrl },
           mimetype: "video/mp4",
           caption: caption
         }, { quoted: msg });
@@ -137,7 +148,12 @@ module.exports = {
         // Try to download and send as buffer
         try {
           console.log(`[FB-DEBUG] Trying to download video as buffer...`);
-          const videoResponse = await axios.get(videoData.url, {
+          let finalUrl = videoData.url;
+          if (finalUrl.startsWith("/")) {
+              finalUrl = "https://d.rapidcdn.app" + finalUrl;
+          }
+
+          const videoResponse = await axios.get(finalUrl, {
             responseType: "arraybuffer",
             timeout: 120000,
             headers: {
