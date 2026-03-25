@@ -2,157 +2,103 @@
  * Facebook Downloader - Download Facebook videos
  */
 
-const { facebookdl, facebookdlv2 } = require('@bochilteam/scraper');
-const axios = require('axios');
-const config = require('../../config');
+const { fbdl } = require("ruhend-scraper");
+const axios = require("axios");
+const config = require("../../config");
 
 // Store processed message IDs to prevent duplicates
 const processedMessages = new Set();
 
 module.exports = {
-  name: 'facebook',
-  aliases: ['fb', 'fbdl', 'facebookdl', 'fbvideo'],
-  category: 'media',
-  description: 'Download Facebook videos',
-  usage: '.facebook <Facebook URL>',
-  
+  name: "facebook",
+  aliases: ["fb", "fbdl", "facebookdl", "fbvideo"],
+  category: "media",
+  description: "Download Facebook videos",
+  usage: ".facebook <Facebook URL>",
+
   async execute(sock, msg, args, extra) {
-    console.log('\n🔍 [FB-DEBUG] ========== START ==========');
+    console.log("\n🔍 [FB-DEBUG] ========== START ==========");
     console.log(`[FB-DEBUG] Message ID: ${msg.key.id}`);
     console.log(`[FB-DEBUG] Args:`, args);
-    
+
     try {
       // Check if message has already been processed
       if (processedMessages.has(msg.key.id)) {
-        console.log('[FB-DEBUG] Message already processed, skipping');
+        console.log("[FB-DEBUG] Message already processed, skipping");
         return;
       }
-      
+
       // Add message ID to processed set
       processedMessages.add(msg.key.id);
-      
+
       // Clean up old message IDs after 5 minutes
       setTimeout(() => {
         processedMessages.delete(msg.key.id);
       }, 5 * 60 * 1000);
-      
+
       // Get the URL from args
-      const url = args.join(' ').trim();
+      const url = args.join(" ").trim();
       console.log(`[FB-DEBUG] Extracted URL: ${url}`);
-      
+
       if (!url) {
-        return await extra.reply('📱 *Facebook Video Downloader*\n\nUsage: .facebook <Facebook video URL>\n\nExample: .facebook https://www.facebook.com/watch/?v=123456789');
+        return await extra.reply("📱 *Facebook Video Downloader*\n\nUsage: .facebook <Facebook video URL>\n\nExample: .facebook https://www.facebook.com/watch/?v=123456789");
       }
-      
+
       // Check if it's a Facebook URL
-      const isFacebookUrl = url.includes('facebook.com') || url.includes('fb.com') || url.includes('fb.watch');
+      const isFacebookUrl = url.includes("facebook.com") || url.includes("fb.com") || url.includes("fb.watch");
       console.log(`[FB-DEBUG] Is Facebook URL: ${isFacebookUrl}`);
-      
+
       if (!isFacebookUrl) {
-        return await extra.reply('❌ That is not a valid Facebook link.');
+        return await extra.reply("❌ That is not a valid Facebook link.");
       }
-      
+
       // Send processing reaction
       await sock.sendMessage(extra.from, {
-        react: { text: '🔄', key: msg.key }
+        react: { text: "🔄", key: msg.key }
       });
-      
-      await extra.reply('📥 Downloading Facebook video... Please wait.');
-      
+
+      await extra.reply("📥 Downloading Facebook video... Please wait.");
+
       let videoData = null;
       let errors = [];
-      
-      // Try facebookdlv2 first (works better for reels)
-      console.log('\n[FB-DEBUG] === Trying facebookdlv2 ===');
+
+      // Try fbdl from ruhend-scraper
+      console.log("\n[FB-DEBUG] === Trying ruhend-scraper fbdl ===");
       try {
-        console.log(`[FB-DEBUG] Calling facebookdlv2 with URL: ${url}`);
-        const result = await facebookdlv2(url);
+        console.log(`[FB-DEBUG] Calling fbdl with URL: ${url}`);
+        const result = await fbdl(url);
         console.log(`[FB-DEBUG] Result type: ${typeof result}`);
-        
-        if (result && result.result) {
-          console.log(`[FB-DEBUG] Found ${result.result.length} videos`);
-          const videos = result.result;
-          
-          // Get best quality (HD first, then SD)
-          let bestVideo = videos.find(v => v.quality === 'HD') || videos[0];
-          console.log(`[FB-DEBUG] Selected video quality: ${bestVideo.quality}`);
-          
-          videoData = {
-            url: bestVideo.url || bestVideo.download,
-            title: result.title || 'Facebook Video'
-          };
-          
-          if (videoData.url) {
-            console.log('[FB-DEBUG] ✅ facebookdlv2 SUCCESS!');
-          } else {
-            console.log('[FB-DEBUG] ❌ No video URL found');
-            errors.push('facebookdlv2: No video URL');
-          }
-        } else if (result && result.video) {
+
+        if (result && result.video) {
           console.log(`[FB-DEBUG] Found ${result.video.length} videos`);
           const videos = result.video;
-          
-          let bestVideo = videos.find(v => v.quality === 'HD') || videos[0];
+
+          // Get best quality (HD first, then SD)
+          let bestVideo = videos.find(v => v.quality === "HD") || videos[0];
           console.log(`[FB-DEBUG] Selected video quality: ${bestVideo.quality}`);
-          
+
           videoData = {
             url: bestVideo.url || bestVideo.download,
-            title: result.title || 'Facebook Video'
+            title: result.title || "Facebook Video"
           };
-          
+
           if (videoData.url) {
-            console.log('[FB-DEBUG] ✅ facebookdlv2 SUCCESS!');
+            console.log("[FB-DEBUG] ✅ fbdl SUCCESS!");
           } else {
-            console.log('[FB-DEBUG] ❌ No video URL found');
-            errors.push('facebookdlv2: No video URL');
+            console.log("[FB-DEBUG] ❌ No video URL found");
+            errors.push("fbdl: No video URL");
           }
         } else {
-          console.log('[FB-DEBUG] ❌ No result in response');
-          errors.push('facebookdlv2: No result');
+          console.log("[FB-DEBUG] ❌ No video in response");
+          errors.push("fbdl: No video");
         }
       } catch (error) {
-        console.log('[FB-DEBUG] ❌ facebookdlv2 ERROR:', error.message);
-        errors.push(`facebookdlv2: ${error.message}`);
+        console.log("[FB-DEBUG] ❌ fbdl ERROR:", error.message);
+        errors.push(`fbdl: ${error.message}`);
       }
-      
-      // Try facebookdl if v2 failed
-      if (!videoData) {
-        console.log('\n[FB-DEBUG] === Trying facebookdl ===');
-        try {
-          console.log(`[FB-DEBUG] Calling facebookdl with URL: ${url}`);
-          const result = await facebookdl(url);
-          console.log(`[FB-DEBUG] Result type: ${typeof result}`);
-          
-          if (result && result.video) {
-            console.log(`[FB-DEBUG] Found ${result.video.length} videos`);
-            const videos = result.video;
-            
-            let bestVideo = videos.find(v => v.quality === 'HD') || videos[0];
-            console.log(`[FB-DEBUG] Selected video quality: ${bestVideo.quality}`);
-            
-            videoData = {
-              url: bestVideo.url || bestVideo.download,
-              title: result.title || 'Facebook Video'
-            };
-            
-            if (videoData.url) {
-              console.log('[FB-DEBUG] ✅ facebookdl SUCCESS!');
-            } else {
-              console.log('[FB-DEBUG] ❌ No video URL found');
-              errors.push('facebookdl: No video URL');
-            }
-          } else {
-            console.log('[FB-DEBUG] ❌ No video in response');
-            errors.push('facebookdl: No video');
-          }
-        } catch (error) {
-          console.log('[FB-DEBUG] ❌ facebookdl ERROR:', error.message);
-          errors.push(`facebookdl: ${error.message}`);
-        }
-      }
-      
-      console.log('\n[FB-DEBUG] === RESULTS ===');
-      console.log(`[FB-DEBUG] Success: ${videoData ? 'YES' : 'NO'}`);
+
+      console.log("\n[FB-DEBUG] === RESULTS ===");
+      console.log(`[FB-DEBUG] Success: ${videoData ? "YES" : "NO"}`);
       if (videoData) {
         console.log(`[FB-DEBUG] Video URL: ${videoData.url.substring(0, 100)}...`);
         console.log(`[FB-DEBUG] Title: ${videoData.title}`);
@@ -160,74 +106,74 @@ module.exports = {
         console.log(`[FB-DEBUG] Errors:`);
         errors.forEach(err => console.log(`[FB-DEBUG]   - ${err}`));
       }
-      
+
       if (!videoData || !videoData.url) {
-        await extra.reply(`❌ Failed to download Facebook video.\n\nAll methods failed:\n${errors.join('\n')}\n\nPlease try with a different Facebook video link.`);
+        await extra.reply(`❌ Failed to download Facebook video.\n\nAll methods failed:\n${errors.join("\n")}\n\nPlease try with a different Facebook video link.`);
         return;
       }
-      
+
       // Build caption
       const caption = `🎬 *${videoData.title}*\n\n> *Downloaded by ${config.botName}*`;
-      
+
       console.log(`[FB-DEBUG] Sending video...`);
-      
+
       // Send video
       try {
         await sock.sendMessage(extra.from, {
           video: { url: videoData.url },
-          mimetype: 'video/mp4',
+          mimetype: "video/mp4",
           caption: caption
         }, { quoted: msg });
-        
+
         console.log(`[FB-DEBUG] ✅ Video sent successfully!`);
-        
+
         await sock.sendMessage(extra.from, {
-          react: { text: '✅', key: msg.key }
+          react: { text: "✅", key: msg.key }
         });
-        
+
       } catch (urlError) {
         console.log(`[FB-DEBUG] URL send failed:`, urlError.message);
-        
+
         // Try to download and send as buffer
         try {
           console.log(`[FB-DEBUG] Trying to download video as buffer...`);
           const videoResponse = await axios.get(videoData.url, {
-            responseType: 'arraybuffer',
+            responseType: "arraybuffer",
             timeout: 120000,
             headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             }
           });
-          
+
           const videoBuffer = Buffer.from(videoResponse.data);
           console.log(`[FB-DEBUG] Downloaded ${videoBuffer.length} bytes`);
-          
+
           await sock.sendMessage(extra.from, {
             video: videoBuffer,
-            mimetype: 'video/mp4',
+            mimetype: "video/mp4",
             caption: caption
           }, { quoted: msg });
-          
+
           console.log(`[FB-DEBUG] ✅ Video sent as buffer!`);
-          
+
           await sock.sendMessage(extra.from, {
-            react: { text: '✅', key: msg.key }
+            react: { text: "✅", key: msg.key }
           });
-          
+
         } catch (bufferError) {
           console.log(`[FB-DEBUG] Buffer send failed:`, bufferError.message);
           await extra.reply(`❌ Failed to send video: ${urlError.message}`);
         }
       }
-      
-      console.log('[FB-DEBUG] ========== END ==========\n');
-      
+
+      console.log("[FB-DEBUG] ========== END ==========\n");
+
     } catch (error) {
-      console.error('[FB-DEBUG] ❌ FATAL ERROR:');
-      console.error('[FB-DEBUG] Error:', error.message);
-      console.error('[FB-DEBUG] Stack:', error.stack);
-      console.error('[FB-DEBUG] ========== END ==========\n');
-      
+      console.error("[FB-DEBUG] ❌ FATAL ERROR:");
+      console.error("[FB-DEBUG] Error:", error.message);
+      console.error("[FB-DEBUG] Stack:", error.stack);
+      console.error("[FB-DEBUG] ========== END ==========\n");
+
       await extra.reply(`❌ An error occurred.\n\nError: ${error.message}`);
     }
   }
