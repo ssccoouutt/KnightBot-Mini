@@ -2,7 +2,8 @@
  * Facebook Downloader - Download Facebook videos
  */
 
-const { facebookdl, facebookdlv2 } = require('@bochilteam/scraper');
+const { facebookdl, facebookdlv2 } = require('@bochilteam/scraper-facebook');
+const axios = require('axios');
 const config = require('../../config');
 
 // Store processed message IDs to prevent duplicates
@@ -61,135 +62,73 @@ module.exports = {
       let videoData = null;
       let errors = [];
       
-      // Try facebookdlv2 first (newer version)
+      // Try facebookdlv2 first (works better for reels)
       console.log('\n[FB-DEBUG] === Trying facebookdlv2 ===');
       try {
         console.log(`[FB-DEBUG] Calling facebookdlv2 with URL: ${url}`);
         const result = await facebookdlv2(url);
         console.log(`[FB-DEBUG] Result type: ${typeof result}`);
-        console.log(`[FB-DEBUG] Result keys:`, result ? Object.keys(result) : 'null');
         
-        if (result) {
-          // Handle different response structures
-          let videos = [];
-          let title = '';
-          let duration = '';
+        if (result && result.result) {
+          console.log(`[FB-DEBUG] Found ${result.result.length} videos`);
+          const videos = result.result;
           
-          if (result.result) {
-            videos = result.result;
-            title = result.title || 'Facebook Video';
-            duration = result.duration || '';
-            console.log(`[FB-DEBUG] Found result.result with ${videos.length} videos`);
-          } else if (result.video) {
-            videos = result.video;
-            title = result.title || 'Facebook Video';
-            duration = result.duration || '';
-            console.log(`[FB-DEBUG] Found result.video with ${videos.length} videos`);
-          } else if (Array.isArray(result)) {
-            videos = result;
-            title = 'Facebook Video';
-            console.log(`[FB-DEBUG] Result is array with ${videos.length} items`);
-          } else if (result.url) {
-            videos = [{ url: result.url, quality: 'HD' }];
-            title = result.title || 'Facebook Video';
-            console.log(`[FB-DEBUG] Result has direct url`);
-          }
+          // Get best quality (HD first, then SD)
+          let bestVideo = videos.find(v => v.quality === 'HD') || videos[0];
+          console.log(`[FB-DEBUG] Selected video quality: ${bestVideo.quality}`);
           
-          if (videos && videos.length > 0) {
-            // Find best quality video
-            let bestVideo = videos.find(v => v.quality && (v.quality.toLowerCase().includes('hd') || v.quality === '720p' || v.quality === '1080p'));
-            if (!bestVideo) bestVideo = videos[0];
-            
-            const videoUrl = bestVideo.url || bestVideo.download;
-            console.log(`[FB-DEBUG] Best video quality: ${bestVideo.quality || 'unknown'}`);
-            console.log(`[FB-DEBUG] Video URL: ${videoUrl ? videoUrl.substring(0, 100) : 'null'}`);
-            
-            if (videoUrl) {
-              videoData = {
-                url: videoUrl,
-                title: title,
-                quality: bestVideo.quality || 'SD',
-                duration: duration
-              };
-              console.log('[FB-DEBUG] ✅ facebookdlv2 SUCCESS!');
-            } else {
-              console.log('[FB-DEBUG] ❌ No video URL found');
-              errors.push('facebookdlv2: No video URL found');
-            }
+          videoData = {
+            url: bestVideo.url || bestVideo.download,
+            title: result.title || 'Facebook Video'
+          };
+          
+          if (videoData.url) {
+            console.log('[FB-DEBUG] ✅ facebookdlv2 SUCCESS!');
           } else {
-            console.log('[FB-DEBUG] ❌ No videos found');
-            errors.push('facebookdlv2: No videos found');
+            console.log('[FB-DEBUG] ❌ No video URL found');
+            errors.push('facebookdlv2: No video URL');
           }
         } else {
-          console.log('[FB-DEBUG] ❌ facebookdlv2 returned null');
-          errors.push('facebookdlv2: Returned null');
+          console.log('[FB-DEBUG] ❌ No result in response');
+          errors.push('facebookdlv2: No result');
         }
       } catch (error) {
-        console.log('[FB-DEBUG] ❌ facebookdlv2 ERROR:');
-        console.log(`[FB-DEBUG] Error name: ${error.name}`);
-        console.log(`[FB-DEBUG] Error message: ${error.message}`);
-        console.log(`[FB-DEBUG] Error stack:`, error.stack);
+        console.log('[FB-DEBUG] ❌ facebookdlv2 ERROR:', error.message);
         errors.push(`facebookdlv2: ${error.message}`);
       }
       
-      // If facebookdlv2 failed, try facebookdl
+      // Try facebookdl if v2 failed
       if (!videoData) {
         console.log('\n[FB-DEBUG] === Trying facebookdl ===');
         try {
           console.log(`[FB-DEBUG] Calling facebookdl with URL: ${url}`);
           const result = await facebookdl(url);
           console.log(`[FB-DEBUG] Result type: ${typeof result}`);
-          console.log(`[FB-DEBUG] Result keys:`, result ? Object.keys(result) : 'null');
           
-          if (result) {
-            let videos = [];
-            let title = '';
+          if (result && result.video) {
+            console.log(`[FB-DEBUG] Found ${result.video.length} videos`);
+            const videos = result.video;
             
-            if (result.video) {
-              videos = result.video;
-              title = result.title || 'Facebook Video';
-              console.log(`[FB-DEBUG] Found result.video with ${videos.length} videos`);
-            } else if (Array.isArray(result)) {
-              videos = result;
-              title = 'Facebook Video';
-              console.log(`[FB-DEBUG] Result is array with ${videos.length} items`);
-            } else if (result.url) {
-              videos = [{ url: result.url, quality: 'SD' }];
-              title = result.title || 'Facebook Video';
-              console.log(`[FB-DEBUG] Result has direct url`);
-            }
+            let bestVideo = videos.find(v => v.quality === 'HD') || videos[0];
+            console.log(`[FB-DEBUG] Selected video quality: ${bestVideo.quality}`);
             
-            if (videos && videos.length > 0) {
-              let bestVideo = videos.find(v => v.quality && (v.quality.toLowerCase().includes('hd') || v.quality === '720p' || v.quality === '1080p'));
-              if (!bestVideo) bestVideo = videos[0];
-              
-              const videoUrl = bestVideo.url || bestVideo.download;
-              console.log(`[FB-DEBUG] Video URL: ${videoUrl ? videoUrl.substring(0, 100) : 'null'}`);
-              
-              if (videoUrl) {
-                videoData = {
-                  url: videoUrl,
-                  title: title,
-                  quality: bestVideo.quality || 'SD'
-                };
-                console.log('[FB-DEBUG] ✅ facebookdl SUCCESS!');
-              } else {
-                console.log('[FB-DEBUG] ❌ No video URL found');
-                errors.push('facebookdl: No video URL found');
-              }
+            videoData = {
+              url: bestVideo.url || bestVideo.download,
+              title: result.title || 'Facebook Video'
+            };
+            
+            if (videoData.url) {
+              console.log('[FB-DEBUG] ✅ facebookdl SUCCESS!');
             } else {
-              console.log('[FB-DEBUG] ❌ No videos found');
-              errors.push('facebookdl: No videos found');
+              console.log('[FB-DEBUG] ❌ No video URL found');
+              errors.push('facebookdl: No video URL');
             }
           } else {
-            console.log('[FB-DEBUG] ❌ facebookdl returned null');
-            errors.push('facebookdl: Returned null');
+            console.log('[FB-DEBUG] ❌ No video in response');
+            errors.push('facebookdl: No video');
           }
         } catch (error) {
-          console.log('[FB-DEBUG] ❌ facebookdl ERROR:');
-          console.log(`[FB-DEBUG] Error name: ${error.name}`);
-          console.log(`[FB-DEBUG] Error message: ${error.message}`);
-          console.log(`[FB-DEBUG] Error stack:`, error.stack);
+          console.log('[FB-DEBUG] ❌ facebookdl ERROR:', error.message);
           errors.push(`facebookdl: ${error.message}`);
         }
       }
@@ -199,22 +138,18 @@ module.exports = {
       if (videoData) {
         console.log(`[FB-DEBUG] Video URL: ${videoData.url.substring(0, 100)}...`);
         console.log(`[FB-DEBUG] Title: ${videoData.title}`);
-        console.log(`[FB-DEBUG] Quality: ${videoData.quality}`);
       } else {
         console.log(`[FB-DEBUG] Errors:`);
         errors.forEach(err => console.log(`[FB-DEBUG]   - ${err}`));
       }
       
       if (!videoData || !videoData.url) {
-        const errorMsg = errors.join('\n');
-        await extra.reply(`❌ Failed to download Facebook video.\n\nAll methods failed:\n${errorMsg}\n\nPlease try with a different Facebook video link.`);
+        await extra.reply(`❌ Failed to download Facebook video.\n\nAll methods failed:\n${errors.join('\n')}\n\nPlease try with a different Facebook video link.`);
         return;
       }
       
       // Build caption
-      let caption = `🎬 *${videoData.title}*\n`;
-      if (videoData.quality) caption += `📹 Quality: ${videoData.quality}\n`;
-      caption += `\n> *Downloaded by ${config.botName}*`;
+      const caption = `🎬 *${videoData.title}*\n\n> *Downloaded by ${config.botName}*`;
       
       console.log(`[FB-DEBUG] Sending video...`);
       
@@ -237,7 +172,6 @@ module.exports = {
         
         // Try to download and send as buffer
         try {
-          const axios = require('axios');
           console.log(`[FB-DEBUG] Trying to download video as buffer...`);
           const videoResponse = await axios.get(videoData.url, {
             responseType: 'arraybuffer',
