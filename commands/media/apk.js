@@ -6,6 +6,7 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const config = require('../../config');
+const sessionManager = require('../../utils/sessionManager');
 
 // Store processed message IDs to prevent duplicates
 const processedMessages = new Set();
@@ -52,7 +53,6 @@ async function getAppByPackage(packageName) {
         });
         
         if (response.data) {
-            // Check different response structures
             if (response.data.datalist && response.data.datalist.list && response.data.datalist.list[0]) {
                 return response.data.datalist.list[0];
             }
@@ -126,14 +126,16 @@ module.exports = {
     usage: '.apk <app name or Play Store URL>',
     
     async execute(sock, msg, args, extra) {
-        console.log('\n📱 [APK-DEBUG] ========== START ==========');
-        console.log(`[APK-DEBUG] Message ID: ${msg.key.id}`);
-        console.log(`[APK-DEBUG] Args:`, args);
+        console.log('\n📱 [APK] ========== START ==========');
+        console.log(`[APK] Message ID: ${msg.key.id}`);
+        console.log(`[APK] Args:`, args);
         
         try {
+            const { from, sender, reply, react } = extra;
+            
             // Check if message has already been processed
             if (processedMessages.has(msg.key.id)) {
-                console.log('[APK-DEBUG] Message already processed, skipping');
+                console.log('[APK] Message already processed, skipping');
                 return;
             }
             
@@ -142,7 +144,7 @@ module.exports = {
             
             const query = args.join(' ').trim();
             if (!query) {
-                return extra.reply('📱 *APK Downloader*\n\n' +
+                return reply('📱 *APK Downloader*\n\n' +
                     'Search and download Android apps\n\n' +
                     'Usage: .apk <app name or Play Store URL>\n\n' +
                     'Examples:\n' +
@@ -151,7 +153,7 @@ module.exports = {
                     '• .apk https://play.google.com/store/apps/details?id=com.instagram.android');
             }
             
-            await extra.reply('🔍 Searching for app... Please wait.');
+            await reply('🔍 Searching for app... Please wait.');
             
             let appDetails = null;
             let searchResults = [];
@@ -160,14 +162,14 @@ module.exports = {
             if (isPlayStoreLink(query)) {
                 const packageName = extractPackageName(query);
                 if (!packageName) {
-                    return extra.reply('❌ Could not extract package name from the URL.');
+                    return reply('❌ Could not extract package name from the URL.');
                 }
                 
-                console.log(`[APK-DEBUG] Fetching app by package: ${packageName}`);
+                console.log(`[APK] Fetching app by package: ${packageName}`);
                 appDetails = await getAppByPackage(packageName);
                 
                 if (!appDetails) {
-                    return extra.reply(`❌ App with package '${packageName}' not found on Aptoide.\n\n` +
+                    return reply(`❌ App with package '${packageName}' not found on Aptoide.\n\n` +
                         `This could mean:\n` +
                         `• The app is not available\n` +
                         `• The app might be paid\n` +
@@ -175,17 +177,26 @@ module.exports = {
                 }
             } else {
                 // Search by name
-                console.log(`[APK-DEBUG] Searching for: ${query}`);
+                console.log(`[APK] Searching for: ${query}`);
                 searchResults = await searchApps(query);
                 
                 if (!searchResults || searchResults.length === 0) {
-                    return extra.reply(`❌ No apps found for "${query}".\n\nTry:\n• Different spelling\n• Shorter name\n• Package name\n• Play Store URL`);
+                    return reply(`❌ No apps found for "${query}".\n\nTry:\n• Different spelling\n• Shorter name\n• Package name\n• Play Store URL`);
                 }
                 
-                // If only one result, show it directly
+                // If only one result, download directly
                 if (searchResults.length === 1) {
                     appDetails = searchResults[0];
                 } else {
+                    // Create session for multiple results
+                    const session = sessionManager.createSession(sender, from, this.name, {
+                        step: 'selecting_app',
+                        results: searchResults,
+                        query: query
+                    });
+                    
+                    console.log(`[APK] Created session ${session.id} with ${searchResults.length} results`);
+                    
                     // Show search results
                     let resultText = `📱 *Search Results for "${query}"*\n\n`;
                     
@@ -197,130 +208,106 @@ module.exports = {
                         resultText += `   💾 ${formatSize(app.file.filesize)}\n\n`;
                     }
                     
-                    resultText += `Reply with the number to download (1-${Math.min(10, searchResults.length)}) or cancel.`;
+                    resultText += `Send the number (1-${Math.min(10, searchResults.length)}) to download.`;
                     
-                    // Store search results in session for later selection
-                    const sessionKey = `apk_search_${msg.key.id}`;
-                    global.apkSearchSessions = global.apkSearchSessions || {};
-                    global.apkSearchSessions[msg.key.id] = {
-                        results: searchResults,
-                        timestamp: Date.now(),
-                        from: extra.from
-                    };
+                    const sentMsg = await reply(resultText);
                     
-                    // Clean up old sessions
-                    for (const key in global.apkSearchSessions) {
-                        if (Date.now() - global.apkSearchSessions[key].timestamp > 300000) {
-                            delete global.apkSearchSessions[key];
-                        }
-                    }
+                    // Add pending message to session manager
+                    sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
                     
-                    return extra.reply(resultText);
+                    console.log('[APK] ========== END ==========\n');
+                    return;
                 }
             }
             
-            // Download the app
+            // Download the app if we have a single result
             if (appDetails) {
-                const filename = `${appDetails.name}_${appDetails.file.vername}.apk`.replace(/[^a-zA-Z0-9._-]/g, '_');
-                const tempDir = path.join(process.cwd(), 'temp');
-                if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-                
-                const filepath = path.join(tempDir, filename);
-                
-                await extra.reply(`📥 *Downloading*\n\n` +
-                    `📱 Name: ${appDetails.name}\n` +
-                    `📀 Version: ${appDetails.file.vername}\n` +
-                    `💾 Size: ${formatSize(appDetails.file.filesize)}\n` +
-                    `📦 Package: ${appDetails.package}\n\n` +
-                    `Please wait...`);
-                
-                console.log(`[APK-DEBUG] Downloading: ${filename}`);
-                await downloadApk(appDetails, filepath);
-                
-                const fileSize = fs.statSync(filepath).size;
-                console.log(`[APK-DEBUG] Downloaded ${formatSize(fileSize)}`);
-                
-                // Send the APK file
-                await sock.sendMessage(extra.from, {
-                    document: fs.readFileSync(filepath),
-                    mimetype: 'application/vnd.android.package-archive',
-                    fileName: filename,
-                    caption: `✅ *Download Complete*\n\n📱 ${appDetails.name}\n📀 ${appDetails.file.vername}\n💾 ${formatSize(fileSize)}\n\n> *Downloaded by ${config.botName}*`
-                }, { quoted: msg });
-                
-                // Clean up temp file
-                fs.unlinkSync(filepath);
-                console.log(`[APK-DEBUG] ✅ APK sent successfully`);
-                
-                await sock.sendMessage(extra.from, {
-                    react: { text: '✅', key: msg.key }
-                });
+                await downloadAndSendApp(sock, appDetails, extra, msg);
             }
             
-            console.log('[APK-DEBUG] ========== END ==========\n');
+            console.log('[APK] ========== END ==========\n');
             
         } catch (error) {
-            console.error('[APK-DEBUG] ❌ Error:', error.message);
-            console.error('[APK-DEBUG] Stack:', error.stack);
-            console.error('[APK-DEBUG] ========== END ==========\n');
+            console.error('[APK] ❌ Error:', error.message);
+            console.error('[APK] Stack:', error.stack);
+            console.error('[APK] ========== END ==========\n');
             
             await extra.reply(`❌ Failed to download APK.\n\nError: ${error.message}\n\nPlease try again later.`);
         }
     },
     
-    // Handle number selection from search results
-    async handleNumberSelection(sock, msg, number, extra) {
-        try {
-            const sessionKey = `apk_search_${msg.key.id}`;
-            const session = global.apkSearchSessions?.[msg.key.id];
-            
-            if (!session || !session.results) {
-                return false;
-            }
-            
-            const index = parseInt(number) - 1;
-            if (index < 0 || index >= session.results.length) {
-                await extra.reply('❌ Invalid selection number.');
-                return true;
-            }
-            
-            const appDetails = session.results[index];
-            
-            // Download the app
-            const filename = `${appDetails.name}_${appDetails.file.vername}.apk`.replace(/[^a-zA-Z0-9._-]/g, '_');
-            const tempDir = path.join(process.cwd(), 'temp');
-            if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-            
-            const filepath = path.join(tempDir, filename);
-            
-            await extra.reply(`📥 *Downloading*\n\n` +
-                `📱 Name: ${appDetails.name}\n` +
-                `📀 Version: ${appDetails.file.vername}\n` +
-                `💾 Size: ${formatSize(appDetails.file.filesize)}\n` +
-                `📦 Package: ${appDetails.package}\n\n` +
-                `Please wait...`);
-            
-            await downloadApk(appDetails, filepath);
-            
-            const fileSize = fs.statSync(filepath).size;
-            
-            await sock.sendMessage(extra.from, {
-                document: fs.readFileSync(filepath),
-                mimetype: 'application/vnd.android.package-archive',
-                fileName: filename,
-                caption: `✅ *Download Complete*\n\n📱 ${appDetails.name}\n📀 ${appDetails.file.vername}\n💾 ${formatSize(fileSize)}\n\n> *Downloaded by ${config.botName}*`
-            }, { quoted: msg });
-            
-            fs.unlinkSync(filepath);
-            
-            // Clean up session
-            delete global.apkSearchSessions[msg.key.id];
-            
-            return true;
-        } catch (error) {
-            console.error('[APK] Selection error:', error);
-            await extra.reply(`❌ Failed to download: ${error.message}`);
-            return true;
+    // Handle session responses (number selection)
+    async handleSession(sock, msg, session, context) {
+        const { from, sender, reply, react } = context;
+        
+        console.log(`\n📱 [APK-SESSION] Handling selection`);
+        
+        // Get the text from the message
+        let text = '';
+        if (msg.message?.conversation) {
+            text = msg.message.conversation.trim();
+        } else if (msg.message?.extendedTextMessage?.text) {
+            text = msg.message.extendedTextMessage.text.trim();
         }
+        
+        console.log(`[APK-SESSION] User input: "${text}"`);
+        
+        // Parse the selection number
+        const number = parseInt(text);
+        const results = session.data.results;
+        
+        if (isNaN(number) || number < 1 || number > results.length) {
+            await reply(`❌ Invalid selection. Please send a number between 1 and ${results.length}.`);
+            return true; // Stay in session, don't clear
+        }
+        
+        const selectedApp = results[number - 1];
+        console.log(`[APK-SESSION] User selected: ${selectedApp.name}`);
+        
+        // Clear the session immediately
+        sessionManager.clearSession(session.id);
+        
+        // Download and send the app
+        await downloadAndSendApp(sock, selectedApp, { from, sender, reply, react }, msg);
+        
+        return true;
     }
 };
+
+// Helper function to download and send APK
+async function downloadAndSendApp(sock, appDetails, context, msg) {
+    const { from, reply, react } = context;
+    
+    const filename = `${appDetails.name}_${appDetails.file.vername}.apk`.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const tempDir = path.join(process.cwd(), 'temp');
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+    
+    const filepath = path.join(tempDir, filename);
+    
+    await reply(`📥 *Downloading*\n\n` +
+        `📱 Name: ${appDetails.name}\n` +
+        `📀 Version: ${appDetails.file.vername}\n` +
+        `💾 Size: ${formatSize(appDetails.file.filesize)}\n` +
+        `📦 Package: ${appDetails.package}\n\n` +
+        `Please wait...`);
+    
+    console.log(`[APK] Downloading: ${filename}`);
+    await downloadApk(appDetails, filepath);
+    
+    const fileSize = fs.statSync(filepath).size;
+    console.log(`[APK] Downloaded ${formatSize(fileSize)}`);
+    
+    // Send the APK file
+    await sock.sendMessage(from, {
+        document: fs.readFileSync(filepath),
+        mimetype: 'application/vnd.android.package-archive',
+        fileName: filename,
+        caption: `✅ *Download Complete*\n\n📱 ${appDetails.name}\n📀 ${appDetails.file.vername}\n💾 ${formatSize(fileSize)}\n\n> *Downloaded by ${config.botName}*`
+    }, { quoted: msg });
+    
+    // Clean up temp file
+    fs.unlinkSync(filepath);
+    console.log(`[APK] ✅ APK sent successfully`);
+    
+    await react('✅');
+}
