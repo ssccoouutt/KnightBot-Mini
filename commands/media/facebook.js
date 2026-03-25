@@ -69,14 +69,15 @@ module.exports = {
         const result = await fbdl(url);
         console.log(`[FB-DEBUG] Result type: ${typeof result}`);
 
-        // Check for video array in the result
-        if (result && Array.isArray(result.video) && result.video.length > 0) {
-          console.log(`[FB-DEBUG] Found ${result.video.length} videos`);
-          const videos = result.video;
+        // Check for video array in the result (it might be in result.data or result.video)
+        const videos = (result && Array.isArray(result.data)) ? result.data : 
+                       (result && Array.isArray(result.video)) ? result.video : null;
+
+        if (videos && videos.length > 0) {
+          console.log(`[FB-DEBUG] Found ${videos.length} videos`);
 
           // Get best quality (HD first, then SD, then whatever is available)
-          let bestVideo = videos.find(v => v.resolution && v.resolution.includes("1080p")) || 
-                          videos.find(v => v.resolution && v.resolution.includes("720p")) ||
+          let bestVideo = videos.find(v => v.resolution && (v.resolution.includes("1080p") || v.resolution.includes("720p"))) || 
                           videos.find(v => v.quality === "HD") || 
                           videos[0];
           
