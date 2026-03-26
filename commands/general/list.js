@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const config = require('../../config');
+const database = require('../../database');
 const { loadCommands } = require('../../utils/commandLoader');
 const { sendButtons } = require('gifted-btns');
 
@@ -18,30 +19,63 @@ module.exports = {
   
   async execute(sock, msg, args, extra) {
     try {
+      const { from, sender, isGroup, reply } = extra;
       const prefix = config.prefix;
+      
+      // Check if user is owner
+      const isUserOwner = database.isOwner(sender);
+      
       const commands = loadCommands();
       const categories = {};
       
-      // Group commands by category
+      // Group commands by category with permission filtering
       commands.forEach((cmd, name) => {
         if (cmd.name === name) { // Only count main command names, not aliases
-          const category = (cmd.category || 'other').toLowerCase();
-          if (!categories[category]) {
-            categories[category] = [];
+          
+          // Determine if this command should be shown to current user
+          let shouldShow = true;
+          
+          // Owner-only commands: only visible to owner
+          if (cmd.ownerOnly) {
+            shouldShow = isUserOwner;
           }
-          categories[category].push({
-            label: cmd.description || '',
-            names: [cmd.name].concat(cmd.aliases || []),
-          });
+          // Admin-only commands: only visible to owner when self mode is on
+          else if (cmd.adminOnly) {
+            if (config.selfMode && !isUserOwner) {
+              shouldShow = false;
+            } else {
+              shouldShow = true;
+            }
+          }
+          
+          if (shouldShow) {
+            const category = (cmd.category || 'other').toLowerCase();
+            if (!categories[category]) {
+              categories[category] = [];
+            }
+            categories[category].push({
+              label: cmd.description || '',
+              names: [cmd.name].concat(cmd.aliases || []),
+            });
+          }
         }
       });
       
       let menu = `*${config.botName} - Commands List*\n`;
-      menu += `Prefix: *${prefix}*\n\n`;
+      menu += `Prefix: *${prefix}*\n`;
+      if (config.selfMode) {
+        menu += `Mode: Private\n`;
+      }
+      menu += `\n`;
       
       const orderedCats = Object.keys(categories).sort();
       
       for (const cat of orderedCats) {
+        // Skip group/admin categories for non-owners in self mode
+        if (config.selfMode && !isUserOwner && (cat === 'group' || cat === 'admin' || cat === 'mod' || cat === 'owner')) {
+          continue;
+        }
+        
         menu += `*📂 ${cat.toUpperCase()}*\n`;
         for (const entry of categories[cat]) {
           const cmdList = entry.names.map((n) => `${prefix}${n}`).join(', ');
@@ -52,7 +86,6 @@ module.exports = {
       }
       
       menu = menu.trimEnd();
-      
       
       // Send message with buttons using gifted-btns
       await sendButtons(sock, extra.from, {
