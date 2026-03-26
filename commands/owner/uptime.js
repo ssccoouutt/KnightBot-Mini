@@ -40,7 +40,8 @@ function formatUptime(seconds) {
 module.exports = {
   name: 'uptime',
   aliases: ['runtime', 'botuptime', 'alive'],
-  category: 'general',
+  category: 'owner',
+  ownerOnly: true,
   description: 'Show how long the bot has been running',
   usage: '.uptime',
   
