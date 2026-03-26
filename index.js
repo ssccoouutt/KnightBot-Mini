@@ -343,6 +343,37 @@ async function startBot() {
       }
       // ===== END LOAD FORWARDINGS =====
 
+      // ===== LOAD USER SUBSCRIPTIONS FROM GOOGLE DRIVE =====
+      console.log('\n👥 Loading user subscriptions from Google Drive...');
+      try {
+        const users = await database.loadUsersOnStart();
+        const userCount = Object.keys(users).length;
+        console.log(`✅ Loaded ${userCount} subscribed users from Google Drive`);
+        
+        if (userCount > 0) {
+          console.log('\n📋 Subscribed Users:');
+          const userEntries = Object.entries(users);
+          // Show first 10 users to avoid spam
+          const toShow = userEntries.slice(0, 10);
+          toShow.forEach(([jid, data]) => {
+            console.log(`   • ${jid} (since: ${data.subscribedAt})`);
+          });
+          if (userEntries.length > 10) {
+            console.log(`   ... and ${userEntries.length - 10} more users`);
+          }
+        }
+        
+        if (config.selfMode) {
+          console.log(`\n🔒 Self Mode is ENABLED. Only ${userCount} subscribed users can use commands.`);
+        } else {
+          console.log(`\n🔓 Self Mode is DISABLED. All users can use commands.`);
+        }
+      } catch (userError) {
+        console.error('❌ Failed to load user subscriptions from Google Drive:', userError.message);
+        console.log('⚠️ Continuing without user subscriptions...');
+      }
+      // ===== END LOAD USER SUBSCRIPTIONS =====
+
       // ===== AUTO-START TELEGRAM BRIDGE =====
       if (config.autoStartTelegram) {
         try {
