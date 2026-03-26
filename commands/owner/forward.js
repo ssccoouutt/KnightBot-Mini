@@ -9,7 +9,8 @@ module.exports = {
   description: 'Setup automatic message forwarding between groups',
   usage: '.forward <source_jid> <target_jid> [filters]',
   ownerOnly: true,
-  aliases: ['fwd', 'groupforward', 'forwarding'],
+  category: 'owner',
+  aliases: [],
   
   async execute(sock, msg, args, context) {
     const { from, reply, react, sender } = context;
