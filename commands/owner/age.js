@@ -6,8 +6,8 @@ module.exports = {
     aliases: ['calculate-age', 'howold'],
     description: 'Calculate your age from birth year',
     usage: 'age',
-    category: 'utility',
-    ownerOnly: false,
+    category: 'owner',
+    ownerOnly: true,
 
     async execute(sock, msg, args, context) {
         const { from, sender, reply, react } = context;
