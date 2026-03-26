@@ -17,8 +17,8 @@ module.exports = {
     try {
       const { from, sender, isGroup, reply } = extra;
       
-      // Check if user is owner
-      const isUserOwner = await database.isOwner(sender);
+      // Check if user is owner (checks against config.ownerNumber)
+      const isUserOwner = database.isOwner(sender);
       
       const commands = loadCommands();
       const categories = {};
@@ -30,11 +30,11 @@ module.exports = {
           // Determine if this command should be shown to current user
           let shouldShow = true;
           
-          // Owner-only commands: only visible to owner
+          // Owner-only commands: only visible to owners
           if (cmd.ownerOnly) {
             shouldShow = isUserOwner;
           }
-          // Admin-only commands: only visible to owner when self mode is on
+          // Admin-only commands: only visible to owners when self mode is on
           else if (cmd.adminOnly) {
             if (config.selfMode && !isUserOwner) {
               shouldShow = false;
@@ -141,7 +141,7 @@ module.exports = {
         menuText += `\n`;
       }
       
-      // Group Commands - only show to owner in self mode
+      // Group Commands - only show to owners when self mode is on
       if (categories.group && (!config.selfMode || isUserOwner)) {
         menuText += `┏━━━━━━━━━━━━━━━━━\n`;
         menuText += `┃ 🔵 GROUP COMMANDS\n`;
@@ -152,7 +152,7 @@ module.exports = {
         menuText += `\n`;
       }
       
-      // Admin Commands - only show to owner in self mode
+      // Admin Commands - only show to owners when self mode is on
       if (categories.admin && (!config.selfMode || isUserOwner)) {
         menuText += `┏━━━━━━━━━━━━━━━━━\n`;
         menuText += `┃ 🛡️ ADMIN COMMANDS\n`;
@@ -163,7 +163,7 @@ module.exports = {
         menuText += `\n`;
       }
       
-      // Moderator Commands - only show to owner in self mode
+      // Moderator Commands - only show to owners when self mode is on
       if (categories.mod && (!config.selfMode || isUserOwner)) {
         menuText += `┏━━━━━━━━━━━━━━━━━\n`;
         menuText += `┃ 🛡️ MODERATOR COMMANDS\n`;
@@ -174,7 +174,7 @@ module.exports = {
         menuText += `\n`;
       }
       
-      // Owner Commands - only show to owner
+      // Owner Commands - only show to owners
       if (categories.owner && isUserOwner) {
         menuText += `┏━━━━━━━━━━━━━━━━━\n`;
         menuText += `┃ 👑 OWNER COMMANDS\n`;
