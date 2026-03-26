@@ -5,7 +5,7 @@ const { getStats } = require('../../utils/groupstats');
 module.exports = {
     name: 'groupstats',
     aliases: ['stats', 'leaderboard', 'gstats', 'topmembers', 'msgs', 'messagestats'],
-    category: 'general',
+    category: 'admin',
     description: 'Show today\'s group chat statistics',
     usage: '.groupstats',
     groupOnly: true,
