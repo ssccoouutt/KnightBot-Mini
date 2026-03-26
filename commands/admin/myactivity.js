@@ -5,7 +5,7 @@ const { getStats } = require('../../utils/groupstats');
 module.exports = {
     name: 'myactivity',
     aliases: ['mystats', 'mymsgs', 'rank'],
-    category: 'general',
+    category: 'admin',
     description: 'Check your activity stats for today',
     usage: '.myactivity',
     groupOnly: true,
