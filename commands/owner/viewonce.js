@@ -6,8 +6,9 @@ const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 
 module.exports = {
   name: 'viewonce',
-  aliases: ['readvo', 'read', 'vv', 'readviewonce'],
-  category: 'general',
+  aliases: ['vv'],
+  category: 'owner',
+  ownerOnly: true,
   description: 'Reveal view-once messages (images/videos/audio)',
   usage: '.viewonce (reply to view-once message)',
   
