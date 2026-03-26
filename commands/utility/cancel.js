@@ -12,14 +12,23 @@ module.exports = {
     async execute(sock, msg, args, context) {
         const { from, sender, reply, react } = context;
         
-        // Use getLatestSession (not getSession)
+        // Get the latest session for this user
         const session = sessionManager.getLatestSession(sender, from);
         
         if (session) {
             const commandName = session.command;
-            sessionManager.clearSession(sender, from);
-            await react('🗑️');
-            await reply(`✅ *Session Cancelled*\n\nYour *${commandName}* session has been ended.`);
+            const sessionId = session.id;
+            
+            // Clear the session using its ID
+            const cleared = sessionManager.clearSession(sessionId);
+            
+            if (cleared) {
+                await react('🗑️');
+                await reply(`✅ *Session Cancelled*\n\nYour *${commandName}* session has been ended.`);
+                console.log(`[CANCEL] Session ${sessionId} cancelled for user ${sender}`);
+            } else {
+                await reply(`❌ Failed to cancel session. Please try again.`);
+            }
         } else {
             await reply('❌ You have no active session.');
         }
