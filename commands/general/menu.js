@@ -1,5 +1,5 @@
 /**
- * Menu Command - Display all available commands with permission filtering
+ * Menu Command - Display all available commands
  */
 
 const config = require('../../config');
@@ -20,16 +20,10 @@ module.exports = {
       // Check if user is owner
       const isUserOwner = await database.isOwner(sender);
       
-      // Check if user is subscribed (when self mode is on)
-      let isSubscribed = true;
-      if (config.selfMode && !isUserOwner) {
-        isSubscribed = await database.isUserAllowed(sender);
-      }
-      
       const commands = loadCommands();
       const categories = {};
       
-      // Group commands by category with permission filtering
+      // Group commands by category
       commands.forEach((cmd, name) => {
         if (cmd.name === name) { // Only count main command names, not aliases
           
@@ -40,27 +34,13 @@ module.exports = {
           if (cmd.ownerOnly) {
             shouldShow = isUserOwner;
           }
-          // Admin-only commands: visible to owner only in self mode
+          // Admin-only commands: only visible to owner when self mode is on
           else if (cmd.adminOnly) {
             if (config.selfMode && !isUserOwner) {
               shouldShow = false;
             } else {
               shouldShow = true;
             }
-          }
-          // Group-only commands
-          else if (cmd.groupOnly) {
-            shouldShow = isGroup;
-          }
-          // Private-only commands
-          else if (cmd.privateOnly) {
-            shouldShow = !isGroup;
-          }
-          
-          // In self mode, non-subscribed users only see limited commands
-          if (config.selfMode && !isUserOwner && !isSubscribed) {
-            const allowedBasic = ['menu', 'ping', 'info', 'help'];
-            shouldShow = allowedBasic.includes(cmd.name);
           }
           
           if (shouldShow) {
@@ -79,176 +59,128 @@ module.exports = {
       let menuText = `╭━━『 *${config.botName}* 』━━╮\n\n`;
       menuText += `👋 Hello @${sender.split('@')[0]}!\n\n`;
       menuText += `⚡ Prefix: ${config.prefix}\n`;
-      menuText += `🔒 Mode: ${config.selfMode ? 'Private' : 'Public'}\n`;
-      if (config.selfMode && !isUserOwner) {
-        menuText += `📋 Status: ${isSubscribed ? 'Subscribed ✅' : 'Limited Access 🔒'}\n`;
+      if (config.selfMode) {
+        menuText += `🔒 Mode: Private\n`;
       }
       menuText += `━━━━━━━━━━━━━━━━━━━━━\n\n`;
       
-      // General Commands (visible to everyone)
-      if (categories.general && categories.general.length > 0) {
+      // General Commands
+      if (categories.general) {
         menuText += `┏━━━━━━━━━━━━━━━━━\n`;
         menuText += `┃ 🧭 GENERAL COMMANDS\n`;
         menuText += `┗━━━━━━━━━━━━━━━━━\n`;
         categories.general.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}`;
-          if (cmd.description) menuText += ` - ${cmd.description}`;
-          menuText += `\n`;
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
         });
         menuText += `\n`;
       }
       
-      // Media Commands (visible to everyone)
-      if (categories.media && categories.media.length > 0) {
+      // Media Commands
+      if (categories.media) {
         menuText += `┏━━━━━━━━━━━━━━━━━\n`;
         menuText += `┃ 🎞️ MEDIA COMMANDS\n`;
         menuText += `┗━━━━━━━━━━━━━━━━━\n`;
         categories.media.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}`;
-          if (cmd.description) menuText += ` - ${cmd.description}`;
-          menuText += `\n`;
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
         });
         menuText += `\n`;
       }
       
-      // Fun Commands (visible to everyone)
-      if (categories.fun && categories.fun.length > 0) {
+      // Fun Commands
+      if (categories.fun) {
         menuText += `┏━━━━━━━━━━━━━━━━━\n`;
         menuText += `┃ 🎭 FUN COMMANDS\n`;
         menuText += `┗━━━━━━━━━━━━━━━━━\n`;
         categories.fun.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}`;
-          if (cmd.description) menuText += ` - ${cmd.description}`;
-          menuText += `\n`;
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
         });
         menuText += `\n`;
       }
       
-      // Utility Commands (visible to everyone)
-      if (categories.utility && categories.utility.length > 0) {
+      // Utility Commands
+      if (categories.utility) {
         menuText += `┏━━━━━━━━━━━━━━━━━\n`;
         menuText += `┃ 🔧 UTILITY COMMANDS\n`;
         menuText += `┗━━━━━━━━━━━━━━━━━\n`;
         categories.utility.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}`;
-          if (cmd.description) menuText += ` - ${cmd.description}`;
-          menuText += `\n`;
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
         });
         menuText += `\n`;
       }
       
-      // AI Commands (visible to everyone)
-      if (categories.ai && categories.ai.length > 0) {
+      // AI Commands
+      if (categories.ai) {
         menuText += `┏━━━━━━━━━━━━━━━━━\n`;
         menuText += `┃ 🤖 AI COMMANDS\n`;
         menuText += `┗━━━━━━━━━━━━━━━━━\n`;
         categories.ai.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}`;
-          if (cmd.description) menuText += ` - ${cmd.description}`;
-          menuText += `\n`;
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
         });
         menuText += `\n`;
       }
       
-      // Anime Commands (visible to everyone)
-      if (categories.anime && categories.anime.length > 0) {
+      // Anime Commands
+      if (categories.anime) {
         menuText += `┏━━━━━━━━━━━━━━━━━\n`;
         menuText += `┃ 👾 ANIME COMMANDS\n`;
         menuText += `┗━━━━━━━━━━━━━━━━━\n`;
         categories.anime.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}`;
-          if (cmd.description) menuText += ` - ${cmd.description}`;
-          menuText += `\n`;
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
         });
         menuText += `\n`;
       }
       
-      // Textmaker Commands (visible to everyone)
-      if (categories.textmaker && categories.textmaker.length > 0) {
+      // Textmaker Commands
+      if (categories.textmaker) {
         menuText += `┏━━━━━━━━━━━━━━━━━\n`;
         menuText += `┃ 🖋️ TEXTMAKER COMMANDS\n`;
         menuText += `┗━━━━━━━━━━━━━━━━━\n`;
         categories.textmaker.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}`;
-          if (cmd.description) menuText += ` - ${cmd.description}`;
-          menuText += `\n`;
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
         });
         menuText += `\n`;
       }
       
-      // Group Commands (visible to owners only in self mode, visible to admins in public mode)
-      if (categories.group && categories.group.length > 0) {
-        let shouldShowGroup = true;
-        if (config.selfMode && !isUserOwner) {
-          shouldShowGroup = false;
-        }
-        
-        if (shouldShowGroup) {
-          menuText += `┏━━━━━━━━━━━━━━━━━\n`;
-          menuText += `┃ 🔵 GROUP COMMANDS\n`;
-          menuText += `┗━━━━━━━━━━━━━━━━━\n`;
-          categories.group.forEach(cmd => {
-            menuText += `│ ➜ ${config.prefix}${cmd.name}`;
-            if (cmd.description) menuText += ` - ${cmd.description}`;
-            menuText += `\n`;
-          });
-          menuText += `\n`;
-        }
+      // Group Commands - only show to owner in self mode
+      if (categories.group && (!config.selfMode || isUserOwner)) {
+        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
+        menuText += `┃ 🔵 GROUP COMMANDS\n`;
+        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
+        categories.group.forEach(cmd => {
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
+        });
+        menuText += `\n`;
       }
       
-      // Admin Commands (only visible to owners in self mode)
-      if (categories.admin && categories.admin.length > 0) {
-        let shouldShowAdmin = false;
-        if (!config.selfMode) {
-          shouldShowAdmin = true;
-        } else if (isUserOwner) {
-          shouldShowAdmin = true;
-        }
-        
-        if (shouldShowAdmin) {
-          menuText += `┏━━━━━━━━━━━━━━━━━\n`;
-          menuText += `┃ 🛡️ ADMIN COMMANDS\n`;
-          menuText += `┗━━━━━━━━━━━━━━━━━\n`;
-          categories.admin.forEach(cmd => {
-            menuText += `│ ➜ ${config.prefix}${cmd.name}`;
-            if (cmd.description) menuText += ` - ${cmd.description}`;
-            menuText += `\n`;
-          });
-          menuText += `\n`;
-        }
+      // Admin Commands - only show to owner in self mode
+      if (categories.admin && (!config.selfMode || isUserOwner)) {
+        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
+        menuText += `┃ 🛡️ ADMIN COMMANDS\n`;
+        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
+        categories.admin.forEach(cmd => {
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
+        });
+        menuText += `\n`;
       }
       
-      // Moderator Commands (only visible to owners in self mode)
-      if (categories.mod && categories.mod.length > 0) {
-        let shouldShowMod = false;
-        if (!config.selfMode) {
-          shouldShowMod = true;
-        } else if (isUserOwner) {
-          shouldShowMod = true;
-        }
-        
-        if (shouldShowMod) {
-          menuText += `┏━━━━━━━━━━━━━━━━━\n`;
-          menuText += `┃ 🛡️ MODERATOR COMMANDS\n`;
-          menuText += `┗━━━━━━━━━━━━━━━━━\n`;
-          categories.mod.forEach(cmd => {
-            menuText += `│ ➜ ${config.prefix}${cmd.name}`;
-            if (cmd.description) menuText += ` - ${cmd.description}`;
-            menuText += `\n`;
-          });
-          menuText += `\n`;
-        }
+      // Moderator Commands - only show to owner in self mode
+      if (categories.mod && (!config.selfMode || isUserOwner)) {
+        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
+        menuText += `┃ 🛡️ MODERATOR COMMANDS\n`;
+        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
+        categories.mod.forEach(cmd => {
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
+        });
+        menuText += `\n`;
       }
       
-      // Owner Commands (only visible to owners)
-      if (categories.owner && categories.owner.length > 0 && isUserOwner) {
+      // Owner Commands - only show to owner
+      if (categories.owner && isUserOwner) {
         menuText += `┏━━━━━━━━━━━━━━━━━\n`;
         menuText += `┃ 👑 OWNER COMMANDS\n`;
         menuText += `┗━━━━━━━━━━━━━━━━━\n`;
         categories.owner.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}`;
-          if (cmd.description) menuText += ` - ${cmd.description}`;
-          menuText += `\n`;
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
         });
         menuText += `\n`;
       }
