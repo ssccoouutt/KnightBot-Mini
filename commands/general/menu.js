@@ -1,8 +1,9 @@
 /**
- * Menu Command - Display all available commands
+ * Menu Command - Display all available commands with permission filtering
  */
 
 const config = require('../../config');
+const database = require('../../database');
 const { loadCommands } = require('../../utils/commandLoader');
 
 module.exports = {
@@ -17,13 +18,67 @@ module.exports = {
       const commands = loadCommands();
       const categories = {};
       
-      // Group commands by category
+      // Get user info
+      const sender = extra.sender;
+      const isGroup = extra.isGroup;
+      const isUserOwner = await database.isOwner(sender);
+      
+      // Check if user is subscribed (when self mode is on)
+      let isSubscribed = true;
+      if (config.selfMode && !isUserOwner) {
+        isSubscribed = await database.isUserAllowed(sender);
+      }
+      
+      // Group commands by category with permission filtering
       commands.forEach((cmd, name) => {
         if (cmd.name === name) { // Only count main command names, not aliases
-          if (!categories[cmd.category]) {
-            categories[cmd.category] = [];
+          
+          // Determine if user can see this command
+          let canSee = true;
+          
+          // Owner-only commands: only visible to owner
+          if (cmd.ownerOnly) {
+            canSee = isUserOwner;
           }
-          categories[cmd.category].push(cmd);
+          // Admin-only commands: visible to owner and group admins (only in groups)
+          else if (cmd.adminOnly) {
+            if (isGroup) {
+              // Check if user is admin in the group
+              const groupMetadata = extra.groupMetadata;
+              const isAdmin = groupMetadata && await extra.isAdmin(sock, sender, extra.from, groupMetadata);
+              canSee = isUserOwner || isAdmin;
+            } else {
+              canSee = isUserOwner;
+            }
+          }
+          // Mod-only commands: visible to owner and mods
+          else if (cmd.modOnly) {
+            const isMod = await database.isModerator(sender.split('@')[0]);
+            canSee = isUserOwner || isMod;
+          }
+          // Group-only commands: visible to everyone in groups
+          else if (cmd.groupOnly) {
+            canSee = isGroup;
+          }
+          // Private-only commands: visible to everyone in private chat
+          else if (cmd.privateOnly) {
+            canSee = !isGroup;
+          }
+          
+          // In self mode, non-owner users see limited commands
+          if (config.selfMode && !isUserOwner && !isSubscribed) {
+            // Only allow basic commands for non-subscribed users
+            const allowedBasic = ['menu', 'ping', 'info', 'help'];
+            canSee = allowedBasic.includes(name);
+          }
+          
+          if (canSee) {
+            const category = cmd.category || 'general';
+            if (!categories[category]) {
+              categories[category] = [];
+            }
+            categories[category].push(cmd);
+          }
         }
       });
       
@@ -31,124 +86,94 @@ module.exports = {
       const displayOwner = ownerNames[0] || config.ownerName || 'Bot Owner';
       
       let menuText = `╭━━『 *${config.botName}* 』━━╮\n\n`;
-      menuText += `👋 Hello @${extra.sender.split('@')[0]}!\n\n`;
+      menuText += `👋 Hello @${sender.split('@')[0]}!\n\n`;
       menuText += `⚡ Prefix: ${config.prefix}\n`;
-      menuText += `📦 Total Commands: ${commands.size}\n`;
-      menuText += `👑 Owner: ${displayOwner}\n\n`;
       
-      // General Commands
-      if (categories.general) {
-        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
-        menuText += `┃ 🧭 GENERAL COMMAND\n`;
-        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
-        categories.general.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
-        });
-        menuText += `\n`;
+      // Show status info
+      if (config.selfMode) {
+        if (isUserOwner) {
+          menuText += `👑 Role: Owner\n`;
+        } else if (isSubscribed) {
+          menuText += `✅ Status: Subscribed User\n`;
+        } else {
+          menuText += `🔒 Status: Limited Access\n`;
+        }
       }
       
-      // AI Commands
-      if (categories.ai) {
-        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
-        menuText += `┃ 🤖 AI COMMAND\n`;
-        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
-        categories.ai.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
-        });
-        menuText += `\n`;
+      menuText += `━━━━━━━━━━━━━━━━━━━━━\n\n`;
+      
+      // Category display names and order
+      const categoryOrder = {
+        'general': '📌 GENERAL COMMANDS',
+        'media': '🎵 MEDIA COMMANDS',
+        'group': '👥 GROUP COMMANDS',
+        'admin': '🛡️ ADMIN COMMANDS',
+        'mod': '🛡️ MODERATOR COMMANDS',
+        'fun': '🎮 FUN COMMANDS',
+        'ai': '🤖 AI COMMANDS',
+        'utility': '🔧 UTILITY COMMANDS',
+        'anime': '👾 ANIME COMMANDS',
+        'textmaker': '🖋️ TEXTMAKER COMMANDS',
+        'owner': '👑 OWNER COMMANDS'
+      };
+      
+      // Category icons
+      const categoryIcons = {
+        'general': '📌',
+        'media': '🎵',
+        'group': '👥',
+        'admin': '🛡️',
+        'mod': '🛡️',
+        'fun': '🎮',
+        'ai': '🤖',
+        'utility': '🔧',
+        'anime': '👾',
+        'textmaker': '🖋️',
+        'owner': '👑'
+      };
+      
+      // Filter out categories for non-owner users in self mode
+      let filteredCategories = Object.keys(categories);
+      
+      if (config.selfMode && !isUserOwner) {
+        // Non-owner users should NOT see owner and admin categories
+        filteredCategories = filteredCategories.filter(cat => 
+          cat !== 'owner' && cat !== 'admin' && cat !== 'mod'
+        );
       }
       
-      // Group Commands
-      if (categories.group) {
-        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
-        menuText += `┃ 🔵 GROUP COMMAND\n`;
-        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
-        categories.group.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
-        });
-        menuText += `\n`;
+      // Display categories in order
+      for (const [catKey, catName] of Object.entries(categoryOrder)) {
+        if (filteredCategories.includes(catKey) && categories[catKey] && categories[catKey].length > 0) {
+          menuText += `┏━━━━━━━━━━━━━━━━━\n`;
+          menuText += `┃ ${catName}\n`;
+          menuText += `┗━━━━━━━━━━━━━━━━━\n`;
+          
+          categories[catKey].forEach(cmd => {
+            menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
+          });
+          menuText += `\n`;
+        }
       }
       
-      // Admin Commands
-      if (categories.admin) {
-        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
-        menuText += `┃ 🛡️ ADMIN COMMAND\n`;
-        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
-        categories.admin.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
-        });
-        menuText += `\n`;
-      }
-      
-      // Owner Commands
-      if (categories.owner) {
-        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
-        menuText += `┃ 👑 OWNER COMMAND\n`;
-        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
-        categories.owner.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
-        });
-        menuText += `\n`;
-      }
-      
-      // Media Commands
-      if (categories.media) {
-        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
-        menuText += `┃ 🎞️ MEDIA COMMAND\n`;
-        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
-        categories.media.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
-        });
-        menuText += `\n`;
-      }
-      
-      // Fun Commands
-      if (categories.fun) {
-        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
-        menuText += `┃ 🎭 FUN COMMAND\n`;
-        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
-        categories.fun.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
-        });
-        menuText += `\n`;
-      }
-      
-      // Utility Commands
-      if (categories.utility) {
-        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
-        menuText += `┃ 🔧 UTILITY COMMAND\n`;
-        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
-        categories.utility.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
-        });
-        menuText += `\n`;
-      }
-
-       // Anime Commands
-       if (categories.anime) {
-        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
-        menuText += `┃ 👾 ANIME COMMAND\n`;
-        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
-        categories.anime.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
-        });
-        menuText += `\n`;
-      }
-
-       // Textmaker Commands
-       if (categories.utility) {
-        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
-        menuText += `┃ 🖋️ TEXTMAKER COMMAND\n`;
-        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
-        categories.textmaker.forEach(cmd => {
-          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
-        });
-        menuText += `\n`;
+      // Display any remaining categories not in order
+      for (const cat of filteredCategories) {
+        if (!categoryOrder[cat] && categories[cat] && categories[cat].length > 0) {
+          const icon = categoryIcons[cat] || '📁';
+          menuText += `┏━━━━━━━━━━━━━━━━━\n`;
+          menuText += `┃ ${icon} ${cat.toUpperCase()} COMMANDS\n`;
+          menuText += `┗━━━━━━━━━━━━━━━━━\n`;
+          
+          categories[cat].forEach(cmd => {
+            menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
+          });
+          menuText += `\n`;
+        }
       }
       
       menuText += `╰━━━━━━━━━━━━━━━━━\n\n`;
       menuText += `💡 Type ${config.prefix}help <command> for more info\n`;
-      menuText += `🌟 Bot Version: 1.0.0\n`;
+      menuText += `🌟 Total Commands: ${commands.size}\n`;
       
       // Send menu with image
       const fs = require('fs');
@@ -156,12 +181,11 @@ module.exports = {
       const imagePath = path.join(__dirname, '../../utils/bot_image.jpg');
       
       if (fs.existsSync(imagePath)) {
-        // Send image with newsletter forwarding context
         const imageBuffer = fs.readFileSync(imagePath);
         await sock.sendMessage(extra.from, {
           image: imageBuffer,
           caption: menuText,
-          mentions: [extra.sender],
+          mentions: [sender],
           contextInfo: {
             forwardingScore: 1,
             isForwarded: true,
@@ -175,11 +199,12 @@ module.exports = {
       } else {
         await sock.sendMessage(extra.from, {
           text: menuText,
-          mentions: [extra.sender]
+          mentions: [sender]
         }, { quoted: msg });
       }
       
     } catch (error) {
+      console.error('Menu error:', error);
       await extra.reply(`❌ Error: ${error.message}`);
     }
   }
