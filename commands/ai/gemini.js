@@ -5,6 +5,9 @@ const config = require('../../config');
 const BASE_URL = "https://phrenogastric-antonomastically-jaelynn.ngrok-free.dev";
 const TIMEOUT = 120000; // 2 minutes in milliseconds
 
+// Set this to true to include screenshot in response
+const INCLUDE_SCREENSHOT = false;
+
 module.exports = {
     name: 'gemini',
     aliases: [],
@@ -84,18 +87,26 @@ module.exports = {
                 result = await queryGemini(question);
             }
 
-            // Download the screenshot
-            const screenshotBuffer = await downloadScreenshot(result.screenshot_filename);
-
             // Format the response
             const responseText = formatResponse(result, question);
 
-            // Send the screenshot as image with caption
-            await sock.sendMessage(from, {
-                image: screenshotBuffer,
-                caption: responseText,
-                mimetype: 'image/png'
-            });
+            // Send response based on screenshot setting
+            if (INCLUDE_SCREENSHOT && result.screenshot_filename) {
+                // Download the screenshot
+                const screenshotBuffer = await downloadScreenshot(result.screenshot_filename);
+                
+                // Send the screenshot as image with caption
+                await sock.sendMessage(from, {
+                    image: screenshotBuffer,
+                    caption: responseText,
+                    mimetype: 'image/png'
+                });
+            } else {
+                // Send as plain text
+                await sock.sendMessage(from, {
+                    text: responseText
+                });
+            }
 
             // Delete the processing message
             await sock.sendMessage(from, {
@@ -232,13 +243,16 @@ async function uploadMediaToTemp(sock, quotedMessage) {
     // 3. Use a cloud storage like AWS S3
     
     // Example using tmp.ninja (free, no auth)
+    const FormData = require('form-data');
     const formData = new FormData();
-    const blob = new Blob([mediaBuffer], { type: 'application/octet-stream' });
-    formData.append('file', blob, `file.${getExtension(mediaType)}`);
+    formData.append('file', mediaBuffer, {
+        filename: `file.${getExtension(mediaType)}`,
+        contentType: 'application/octet-stream'
+    });
 
     const uploadResponse = await axios.post('https://tmp.ninja/upload.php', formData, {
         headers: {
-            'Content-Type': 'multipart/form-data'
+            ...formData.getHeaders()
         }
     });
 
