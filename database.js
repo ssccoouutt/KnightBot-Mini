@@ -52,7 +52,17 @@ const writeDB = (filePath, data) => {
   }
 };
 
-// Group Settings
+// ==================== HELPER FUNCTIONS ====================
+const isOwner = (sender) => {
+  if (!sender) return false;
+  const senderNumber = sender.split('@')[0];
+  return config.ownerNumber.some(owner => {
+    const ownerNumber = owner.includes('@') ? owner.split('@')[0] : owner;
+    return ownerNumber === senderNumber;
+  });
+};
+
+// ==================== GROUP SETTINGS ====================
 const getGroupSettings = (groupId) => {
   const groups = readDB(GROUPS_DB);
   if (!groups[groupId]) {
@@ -68,7 +78,7 @@ const updateGroupSettings = (groupId, settings) => {
   return writeDB(GROUPS_DB, groups);
 };
 
-// User Data
+// ==================== USER DATA ====================
 const getUser = (userId) => {
   const users = readDB(USERS_DB);
   if (!users[userId]) {
@@ -88,7 +98,7 @@ const updateUser = (userId, data) => {
   return writeDB(USERS_DB, users);
 };
 
-// Warnings System
+// ==================== WARNINGS SYSTEM ====================
 const getWarnings = (groupId, userId) => {
   const warnings = readDB(WARNINGS_DB);
   const key = `${groupId}_${userId}`;
@@ -133,7 +143,7 @@ const clearWarnings = (groupId, userId) => {
   return writeDB(WARNINGS_DB, warnings);
 };
 
-// Moderators System
+// ==================== MODERATORS SYSTEM ====================
 const getModerators = () => {
   const mods = readDB(MODS_DB);
   return mods.moderators || [];
@@ -163,7 +173,7 @@ const isModerator = (userId) => {
   return mods.includes(userId);
 };
 
-// ===== GROUP FORWARDING SYSTEM WITH GOOGLE DRIVE =====
+// ==================== GROUP FORWARDING SYSTEM ====================
 
 // Get forwarding configuration from Drive
 const getGroupForwarding = async (sourceGroupId) => {
@@ -172,7 +182,7 @@ const getGroupForwarding = async (sourceGroupId) => {
 
 // Set group forwarding configuration with filters
 const setGroupForwarding = async (sourceGroupId, targetGroupId, enabled = true, forwarderJid = null, filters = null) => {
-  const config = {
+  const configData = {
     targetGroupId,
     enabled,
     forwarderJid,
@@ -187,8 +197,8 @@ const setGroupForwarding = async (sourceGroupId, targetGroupId, enabled = true, 
     }
   };
   
-  const success = await driveStorage.saveForwardingConfig(sourceGroupId, config);
-  return success ? config : null;
+  const success = await driveStorage.saveForwardingConfig(sourceGroupId, configData);
+  return success ? configData : null;
 };
 
 // Remove group forwarding configuration
@@ -214,25 +224,25 @@ const getAllGroupForwardingsIncludingDisabled = async () => {
 
 // Check if a group has forwarding enabled
 const hasGroupForwarding = async (sourceGroupId) => {
-  const config = await getGroupForwarding(sourceGroupId);
-  return config !== null && config.enabled === true;
+  const configData = await getGroupForwarding(sourceGroupId);
+  return configData !== null && configData.enabled === true;
 };
 
 // Get target group for source group
 const getForwardingTarget = async (sourceGroupId) => {
-  const config = await getGroupForwarding(sourceGroupId);
-  return config && config.enabled ? config.targetGroupId : null;
+  const configData = await getGroupForwarding(sourceGroupId);
+  return configData && configData.enabled ? configData.targetGroupId : null;
 };
 
 // Update forwarding filters
 const updateForwardingFilters = async (sourceGroupId, filters) => {
-  const config = await getGroupForwarding(sourceGroupId);
-  if (!config) return false;
+  const configData = await getGroupForwarding(sourceGroupId);
+  if (!configData) return false;
   
-  config.filters = { ...config.filters, ...filters };
-  config.updatedAt = Date.now();
+  configData.filters = { ...configData.filters, ...filters };
+  configData.updatedAt = Date.now();
   
-  return await driveStorage.saveForwardingConfig(sourceGroupId, config);
+  return await driveStorage.saveForwardingConfig(sourceGroupId, configData);
 };
 
 // Get forwarding statistics
@@ -263,23 +273,75 @@ const loadForwardingsOnStart = async () => {
   return forwardings;
 };
 
-// Export all functions
+// ==================== USER SUBSCRIPTION SYSTEM ====================
+
+// Check if user is allowed to use bot in self mode
+const isUserAllowed = async (userJid) => {
+  return await driveStorage.isUserAllowed(userJid);
+};
+
+// Add user subscription
+const addUserSubscription = async (userJid, subscribedBy) => {
+  return await driveStorage.addUser(userJid, subscribedBy);
+};
+
+// Remove user subscription
+const removeUserSubscription = async (userJid) => {
+  return await driveStorage.removeUser(userJid);
+};
+
+// Get all subscribed users
+const getAllSubscribedUsers = async () => {
+  return await driveStorage.getAllUsers();
+};
+
+// Get subscribed user count
+const getSubscribedUserCount = async () => {
+  return await driveStorage.getUserCount();
+};
+
+// Check if user can use bot (considering self mode and subscription)
+const canUseBot = async (senderJid) => {
+  // If self mode is off, everyone can use
+  if (!config.selfMode) return true;
+  
+  // Owner always can use
+  if (isOwner(senderJid)) return true;
+  
+  // Check if user is subscribed
+  return await isUserAllowed(senderJid);
+};
+
+// Load all users on startup
+const loadUsersOnStart = async () => {
+  console.log('\n👥 Loading allowed users from Google Drive...');
+  const users = await driveStorage.loadAllUsers();
+  return users;
+};
+
+// ==================== EXPORTS ====================
 module.exports = {
-  // Existing exports
+  // Group settings
   getGroupSettings,
   updateGroupSettings,
+  
+  // User data
   getUser,
   updateUser,
+  
+  // Warnings
   getWarnings,
   addWarning,
   removeWarning,
   clearWarnings,
+  
+  // Moderators
   getModerators,
   addModerator,
   removeModerator,
   isModerator,
   
-  // New Drive-based forwarding exports
+  // Forwarding
   getGroupForwarding,
   setGroupForwarding,
   removeGroupForwarding,
@@ -290,5 +352,17 @@ module.exports = {
   getForwardingTarget,
   updateForwardingFilters,
   getForwardingStats,
-  loadForwardingsOnStart
+  loadForwardingsOnStart,
+  
+  // User Subscription
+  isUserAllowed,
+  addUserSubscription,
+  removeUserSubscription,
+  getAllSubscribedUsers,
+  getSubscribedUserCount,
+  canUseBot,
+  loadUsersOnStart,
+  
+  // Helper
+  isOwner
 };
