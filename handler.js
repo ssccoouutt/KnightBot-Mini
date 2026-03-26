@@ -1076,67 +1076,67 @@ const handleMessage = async (sock, msg) => {
     if (!command) return;
     
     // ===== SELF MODE & SUBSCRIPTION CHECK =====
-    // Complete block - no commands allowed for non-subscribed users
-    if (config.selfMode) {
-        const canUse = await database.canUseBot(sender);
+    // First, check if user is owner - owner always has access
+    const isUserOwner = isOwner(sender);
+    
+    if (config.selfMode && !isUserOwner) {
+        const isSubscribed = await database.isUserAllowed(sender);
         
-        if (!canUse) {
-            // Silent block - absolutely no response
+        if (!isSubscribed) {
+            // Silent block for non-subscribed non-owner users
             console.log(`[SELF-MODE] Blocked command "${commandName}" from non-subscribed user ${sender}`);
             return;
         }
     }
     
-    // Check self mode (private mode) - additional safety fallback
-    if (config.selfMode && !isOwner(sender) && !(await database.isUserAllowed(sender))) {
-        // Silent block - no response
-        console.log(`[SELF-MODE] Fallback block for user ${sender}`);
-        return;
+    // Check owner-only commands - only owners can use these
+    if (command.ownerOnly && !isUserOwner) {
+        return sock.sendMessage(from, { text: config.messages.ownerOnly }, { quoted: msg });
     }
     
-    // Permission checks
-    if (command.ownerOnly && !isOwner(sender)) {
-      return sock.sendMessage(from, { text: config.messages.ownerOnly }, { quoted: msg });
+    // Check moderator commands
+    if (command.modOnly && !isMod(sender) && !isUserOwner) {
+        return sock.sendMessage(from, { text: '🔒 This command is only for moderators!' }, { quoted: msg });
     }
     
-    if (command.modOnly && !isMod(sender) && !isOwner(sender)) {
-      return sock.sendMessage(from, { text: '🔒 This command is only for moderators!' }, { quoted: msg });
-    }
-    
+    // Check group-only commands
     if (command.groupOnly && !isGroup) {
-      return sock.sendMessage(from, { text: config.messages.groupOnly }, { quoted: msg });
+        return sock.sendMessage(from, { text: config.messages.groupOnly }, { quoted: msg });
     }
     
+    // Check private-only commands
     if (command.privateOnly && isGroup) {
-      return sock.sendMessage(from, { text: config.messages.privateOnly }, { quoted: msg });
+        return sock.sendMessage(from, { text: config.messages.privateOnly }, { quoted: msg });
     }
     
-    if (command.adminOnly && !(await isAdmin(sock, sender, from, groupMetadata)) && !isOwner(sender)) {
-      return sock.sendMessage(from, { text: config.messages.adminOnly }, { quoted: msg });
+    // Check admin-only commands
+    if (command.adminOnly && !(await isAdmin(sock, sender, from, groupMetadata)) && !isUserOwner) {
+        return sock.sendMessage(from, { text: config.messages.adminOnly }, { quoted: msg });
     }
     
+    // Check bot admin needed
     if (command.botAdminNeeded) {
-      const botIsAdmin = await isBotAdmin(sock, from, groupMetadata);
-      if (!botIsAdmin) {
-        return sock.sendMessage(from, { text: config.messages.botAdminNeeded }, { quoted: msg });
-      }
+        const botIsAdmin = await isBotAdmin(sock, from, groupMetadata);
+        if (!botIsAdmin) {
+            return sock.sendMessage(from, { text: config.messages.botAdminNeeded }, { quoted: msg });
+        }
     }
     
     // Auto-typing
     if (config.autoTyping) {
-      await sock.sendPresenceUpdate('composing', from);
+        await sock.sendPresenceUpdate('composing', from);
     }
     
     console.log(`Executing command: ${commandName} from ${sender}`);
     
     await command.execute(sock, msg, args, {
-      from, sender, isGroup, groupMetadata,
-      isOwner: isOwner(sender),
-      isAdmin: await isAdmin(sock, sender, from, groupMetadata),
-      isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
-      isMod: isMod(sender),
-      reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
-      react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
+        from, sender, isGroup, groupMetadata,
+        isOwner: isUserOwner,
+        isAdmin: await isAdmin(sock, sender, from, groupMetadata),
+        isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
+        isMod: isMod(sender),
+        reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+        react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
     });
     
   } catch (error) {
