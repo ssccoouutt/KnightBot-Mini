@@ -17,7 +17,7 @@ module.exports = {
     try {
       const { from, sender, isGroup, reply } = extra;
       
-      // Check if user is owner (checks against config.ownerNumber)
+      // Check if user is owner
       const isUserOwner = database.isOwner(sender);
       
       const commands = loadCommands();
@@ -30,11 +30,11 @@ module.exports = {
           // Determine if this command should be shown to current user
           let shouldShow = true;
           
-          // Owner-only commands: only visible to owners
+          // Owner-only commands: only visible to owner
           if (cmd.ownerOnly) {
             shouldShow = isUserOwner;
           }
-          // Admin-only commands: only visible to owners when self mode is on
+          // Admin-only commands: only visible to owner when self mode is on
           else if (cmd.adminOnly) {
             if (config.selfMode && !isUserOwner) {
               shouldShow = false;
@@ -186,7 +186,7 @@ module.exports = {
       }
       
       menuText += `╰━━━━━━━━━━━━━━━━━\n\n`;
-      menuText += `💡 Type ${config.prefix}help <command> for more info\n`;
+      menuText += `💡 Use .list for usage\n`;
       menuText += `🌟 Bot Version: 1.0.0\n`;
       
       // Send menu with image
