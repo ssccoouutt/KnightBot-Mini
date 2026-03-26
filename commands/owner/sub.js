@@ -10,6 +10,7 @@ module.exports = {
   aliases: ['subscribe', 'subscription', 'allow', 'deny'],
   description: 'Manage user subscriptions for self mode',
   usage: '.sub <start|end|list|stats> [user_jid]',
+  category: 'owner',
   ownerOnly: true,
   
   async execute(sock, msg, args, extra) {
