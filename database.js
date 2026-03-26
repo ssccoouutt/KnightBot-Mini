@@ -55,9 +55,31 @@ const writeDB = (filePath, data) => {
 // ==================== HELPER FUNCTIONS ====================
 const isOwner = (sender) => {
   if (!sender) return false;
-  const senderNumber = sender.split('@')[0];
+  
+  // Extract the phone number from the JID
+  // Handle different JID formats: 923400315734@s.whatsapp.net, 923400315734:1@s.whatsapp.net, 247854325043208@lid
+  let senderNumber = sender;
+  
+  // Remove everything after @ if present
+  if (sender.includes('@')) {
+    senderNumber = sender.split('@')[0];
+  }
+  // Remove device ID if present (e.g., 923400315734:1)
+  if (senderNumber.includes(':')) {
+    senderNumber = senderNumber.split(':')[0];
+  }
+  
+  // Check if any owner matches
   return config.ownerNumber.some(owner => {
-    const ownerNumber = owner.includes('@') ? owner.split('@')[0] : owner;
+    // Normalize owner number (remove any @s.whatsapp.net if present)
+    let ownerNumber = owner;
+    if (ownerNumber.includes('@')) {
+      ownerNumber = ownerNumber.split('@')[0];
+    }
+    if (ownerNumber.includes(':')) {
+      ownerNumber = ownerNumber.split(':')[0];
+    }
+    
     return ownerNumber === senderNumber;
   });
 };
