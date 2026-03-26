@@ -1076,30 +1076,22 @@ const handleMessage = async (sock, msg) => {
     if (!command) return;
     
     // ===== SELF MODE & SUBSCRIPTION CHECK =====
-    // This checks if user is allowed to use commands when self mode is ON
+    // Complete block - no commands allowed for non-subscribed users
     if (config.selfMode) {
         const canUse = await database.canUseBot(sender);
         
         if (!canUse) {
-            // Basic commands that everyone can use in self mode (owner-only commands are already protected)
-            const allowedBasicCommands = ['menu', 'ping', 'info', 'help'];
-            
-            // If it's a command but not in allowed list
-            if (commandName && !allowedBasicCommands.includes(commandName)) {
-                // Silent block - don't respond to avoid spam
-                console.log(`[SELF-MODE] Blocked command "${commandName}" from non-subscribed user ${sender}`);
-                return;
-            }
+            // Silent block - absolutely no response
+            console.log(`[SELF-MODE] Blocked command "${commandName}" from non-subscribed user ${sender}`);
+            return;
         }
     }
     
-    // Check self mode (private mode) - fallback check
+    // Check self mode (private mode) - additional safety fallback
     if (config.selfMode && !isOwner(sender) && !(await database.isUserAllowed(sender))) {
-        // Additional check for basic commands that should be allowed
-        const allowedBasicCommands = ['menu', 'ping', 'info', 'help'];
-        if (!allowedBasicCommands.includes(commandName)) {
-            return;
-        }
+        // Silent block - no response
+        console.log(`[SELF-MODE] Fallback block for user ${sender}`);
+        return;
     }
     
     // Permission checks
