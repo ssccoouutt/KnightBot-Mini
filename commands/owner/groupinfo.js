@@ -4,8 +4,8 @@
 
 module.exports = {
     name: 'groupinfo',
-    aliases: ['info', 'ginfo'],
-    category: 'general',
+    aliases: ['ginfo'],
+    category: 'admin',
     description: 'Show group information',
     usage: '.groupinfo',
     groupOnly: true,
