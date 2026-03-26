@@ -4,6 +4,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { jidDecode, jidEncode } = require('@whiskeysockets/baileys');
 const config = require('./config');
 const driveStorage = require('./utils/driveStorage');
 
@@ -12,6 +13,9 @@ const GROUPS_DB = path.join(DB_PATH, 'groups.json');
 const USERS_DB = path.join(DB_PATH, 'users.json');
 const WARNINGS_DB = path.join(DB_PATH, 'warnings.json');
 const MODS_DB = path.join(DB_PATH, 'mods.json');
+
+// LID mapping cache (same as handler.js)
+const lidMappingCache = new Map();
 
 // Initialize database directory
 if (!fs.existsSync(DB_PATH)) {
@@ -52,34 +56,96 @@ const writeDB = (filePath, data) => {
   }
 };
 
-// ==================== HELPER FUNCTIONS ====================
+// ==================== HELPER FUNCTIONS (EXACT COPY FROM HANDLER.JS) ====================
+const normalizeJid = (jid) => {
+  if (!jid) return null;
+  if (typeof jid !== 'string') return null;
+  
+  if (jid.includes(':')) {
+    return jid.split(':')[0];
+  }
+  if (jid.includes('@')) {
+    return jid.split('@')[0];
+  }
+  return jid;
+};
+
+const getLidMappingValue = (user, direction) => {
+  if (!user) return null;
+  
+  const cacheKey = `${direction}:${user}`;
+  if (lidMappingCache.has(cacheKey)) {
+    return lidMappingCache.get(cacheKey);
+  }
+  
+  const sessionPath = path.join(__dirname, config.sessionName || 'session');
+  const suffix = direction === 'pnToLid' ? '.json' : '_reverse.json';
+  const filePath = path.join(sessionPath, `lid-mapping-${user}${suffix}`);
+  
+  if (!fs.existsSync(filePath)) {
+    lidMappingCache.set(cacheKey, null);
+    return null;
+  }
+  
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8').trim();
+    const value = raw ? JSON.parse(raw) : null;
+    lidMappingCache.set(cacheKey, value || null);
+    return value || null;
+  } catch (error) {
+    lidMappingCache.set(cacheKey, null);
+    return null;
+  }
+};
+
+const normalizeJidWithLid = (jid) => {
+  if (!jid) return jid;
+  
+  try {
+    const decoded = jidDecode(jid);
+    if (!decoded?.user) {
+      return `${jid.split(':')[0].split('@')[0]}@s.whatsapp.net`;
+    }
+    
+    let user = decoded.user;
+    let server = decoded.server === 'c.us' ? 's.whatsapp.net' : decoded.server;
+    
+    const mapToPn = () => {
+      const pnUser = getLidMappingValue(user, 'lidToPn');
+      if (pnUser) {
+        user = pnUser;
+        server = server === 'hosted.lid' ? 'hosted' : 's.whatsapp.net';
+        return true;
+      }
+      return false;
+    };
+    
+    if (server === 'lid' || server === 'hosted.lid') {
+      mapToPn();
+    } else if (server === 's.whatsapp.net' || server === 'hosted') {
+      mapToPn();
+    }
+    
+    if (server === 'hosted') {
+      return jidEncode(user, 'hosted');
+    }
+    return jidEncode(user, 's.whatsapp.net');
+  } catch (error) {
+    return jid;
+  }
+};
+
 const isOwner = (sender) => {
   if (!sender) return false;
   
-  // Extract the phone number from the JID
-  // Handle different JID formats: 923400315734@s.whatsapp.net, 923400315734:1@s.whatsapp.net, 247854325043208@lid
-  let senderNumber = sender;
+  // Normalize sender JID to handle LID
+  const normalizedSender = normalizeJidWithLid(sender);
+  const senderNumber = normalizeJid(normalizedSender);
   
-  // Remove everything after @ if present
-  if (sender.includes('@')) {
-    senderNumber = sender.split('@')[0];
-  }
-  // Remove device ID if present (e.g., 923400315734:1)
-  if (senderNumber.includes(':')) {
-    senderNumber = senderNumber.split(':')[0];
-  }
-  
-  // Check if any owner matches
+  // Check against owner numbers
   return config.ownerNumber.some(owner => {
-    // Normalize owner number (remove any @s.whatsapp.net if present)
-    let ownerNumber = owner;
-    if (ownerNumber.includes('@')) {
-      ownerNumber = ownerNumber.split('@')[0];
-    }
-    if (ownerNumber.includes(':')) {
-      ownerNumber = ownerNumber.split(':')[0];
-    }
-    
+    const normalizedOwner = normalizeJidWithLid(owner.includes('@') ? owner : `${owner}@s.whatsapp.net`);
+    const ownerNumber = normalizeJid(normalizedOwner);
     return ownerNumber === senderNumber;
   });
 };
