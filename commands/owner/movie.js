@@ -20,7 +20,7 @@ const CINEVERSE_BASE = "https://cineverse.name.ng";
 
 // Google Drive Configuration
 const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download";
-const UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
+const UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable";
 const FILE_URL = "https://www.googleapis.com/drive/v3/files";
 
 let cachedToken = null;
@@ -101,40 +101,68 @@ async function getAccessToken() {
     }
 }
 
-async function uploadToDrive(filePath, fileName) {
+async function uploadToDrive(filePath, fileName, onProgress) {
     try {
         const token = await getAccessToken();
         if (!token) throw new Error('No access token');
         
         console.log(`[MOVIE] Uploading ${fileName} to Google Drive...`);
         
-        const fileBuffer = fs.readFileSync(filePath);
         const stats = fs.statSync(filePath);
         const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+        const fileSizeBytes = stats.size;
         
-        // Create metadata
+        // Step 1: Start resumable upload session
         const metadata = {
             name: fileName,
-            mimeType: 'video/mp4',
-            parents: ['root']
+            mimeType: 'video/mp4'
         };
         
-        const formData = new FormData();
-        formData.append('metadata', JSON.stringify(metadata), { contentType: 'application/json' });
-        formData.append('file', fileBuffer, { filename: fileName, contentType: 'video/mp4' });
-        
-        const response = await axios.post(UPLOAD_URL, formData, {
+        const startResponse = await axios({
+            method: 'POST',
+            url: UPLOAD_URL,
             headers: {
                 'Authorization': `Bearer ${token}`,
-                ...formData.getHeaders()
+                'Content-Type': 'application/json',
+                'X-Upload-Content-Type': 'video/mp4',
+                'X-Upload-Content-Length': fileSizeBytes
             },
-            maxContentLength: Infinity,
-            maxBodyLength: Infinity
+            data: metadata
         });
         
-        const fileId = response.data.id;
+        const uploadUrl = startResponse.headers.location;
+        if (!uploadUrl) {
+            throw new Error('Failed to get upload URL');
+        }
         
-        // Make file public
+        console.log(`[MOVIE] Resumable upload URL obtained, starting upload...`);
+        
+        // Step 2: Upload the file in chunks
+        const fileStream = fs.createReadStream(filePath);
+        let uploadedBytes = 0;
+        
+        const uploadResponse = await axios({
+            method: 'PUT',
+            url: uploadUrl,
+            data: fileStream,
+            headers: {
+                'Content-Type': 'video/mp4',
+                'Content-Length': fileSizeBytes
+            },
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+            timeout: 600000, // 10 minutes timeout for large files
+            onUploadProgress: (progressEvent) => {
+                if (onProgress && progressEvent.total) {
+                    const percent = (progressEvent.loaded / progressEvent.total * 100).toFixed(1);
+                    onProgress(percent, progressEvent.loaded, progressEvent.total);
+                }
+            }
+        });
+        
+        const fileId = uploadResponse.data.id;
+        
+        // Step 3: Make file public
         try {
             await axios.post(`${FILE_URL}/${fileId}/permissions`, {
                 role: 'reader',
@@ -294,13 +322,13 @@ async function downloadFile(url, filepath, onProgress) {
         method: 'GET',
         url: url,
         responseType: 'stream',
-        timeout: 300000, // 5 minutes
+        timeout: 600000, // 10 minutes for large files
         headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
     });
     
-    const totalLength = response.headers['content-length'];
+    const totalLength = parseInt(response.headers['content-length'], 10);
     let downloadedLength = 0;
     
     const writer = fs.createWriteStream(filepath);
@@ -541,23 +569,30 @@ module.exports = {
                             const filepath = path.join(tempDir, filename);
                             
                             // Download the video
-                            let lastProgressMsg = null;
+                            let lastPercent = 0;
                             await downloadFile(downloadUrl, filepath, async (percent, downloaded, total) => {
-                                const progressMsg = `📥 *Downloading:* ${percent}% (${(downloaded/1024/1024).toFixed(1)}MB / ${(total/1024/1024).toFixed(1)}MB)`;
-                                if (lastProgressMsg !== progressMsg) {
-                                    lastProgressMsg = progressMsg;
-                                    // Optional: send progress updates (can be spammy, so commented)
-                                    // await reply(progressMsg);
+                                const percentInt = Math.floor(percent);
+                                if (percentInt > lastPercent && percentInt % 10 === 0) {
+                                    lastPercent = percentInt;
+                                    const progressMsg = `📥 *Downloading:* ${percent}% (${(downloaded/1024/1024).toFixed(1)}MB / ${(total/1024/1024).toFixed(1)}MB)`;
+                                    await reply(progressMsg);
                                 }
                             });
                             
                             const stats = fs.statSync(filepath);
                             const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
                             
-                            await reply(`✅ *Download complete!*\n📊 Size: ${fileSizeMB} MB\n\n📤 Uploading to Google Drive...`);
+                            await reply(`✅ *Download complete!*\n📊 Size: ${fileSizeMB} MB\n\n📤 Uploading to Google Drive (this may take several minutes)...`);
                             
-                            // Upload to Google Drive
-                            const uploadResult = await uploadToDrive(filepath, filename);
+                            // Upload to Google Drive with progress
+                            let lastUploadPercent = 0;
+                            const uploadResult = await uploadToDrive(filepath, filename, (percent, loaded, total) => {
+                                const percentInt = Math.floor(percent);
+                                if (percentInt > lastUploadPercent && percentInt % 10 === 0) {
+                                    lastUploadPercent = percentInt;
+                                    // Progress updates are optional to avoid spam
+                                }
+                            });
                             
                             // Clean up temp file
                             fs.unlinkSync(filepath);
