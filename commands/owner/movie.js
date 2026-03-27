@@ -1,9 +1,12 @@
 /**
- * Movie Downloader - Search and get direct download links for movies/series
- * Uses Playwright to exactly replicate the Python script
+ * Movie Downloader - Search, download movie and upload to Google Drive
  */
 
 const { chromium } = require('playwright');
+const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+const FormData = require('form-data');
 const config = require('../../config');
 const sessionManager = require('../../utils/sessionManager');
 const giftedBtns = require('gifted-btns');
@@ -14,6 +17,14 @@ const FORCE_AI_MODE = true;
 
 // Cineverse base URL
 const CINEVERSE_BASE = "https://cineverse.name.ng";
+
+// Google Drive Configuration
+const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download";
+const UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
+const FILE_URL = "https://www.googleapis.com/drive/v3/files";
+
+let cachedToken = null;
+let tokenExpiry = null;
 
 // Store browser instance (reuse across searches)
 let browserInstance = null;
@@ -33,18 +44,124 @@ async function getBrowser() {
     return browserInstance;
 }
 
-async function closeBrowser() {
-    if (browserInstance) {
-        console.log('[MOVIE] Closing browser...');
-        await browserInstance.close();
-        browserInstance = null;
+// ==================== GOOGLE DRIVE FUNCTIONS ====================
+
+async function getAccessToken() {
+    try {
+        if (cachedToken && tokenExpiry && new Date() < tokenExpiry) {
+            return cachedToken;
+        }
+        
+        console.log('[MOVIE] Fetching Google Drive token...');
+        
+        const tokenResponse = await axios({
+            method: 'GET',
+            url: TOKEN_URL,
+            responseType: 'stream',
+            timeout: 30000
+        });
+        
+        const tempTokenFile = path.join(process.cwd(), 'temp', `token_${Date.now()}.json`);
+        const tokenDir = path.dirname(tempTokenFile);
+        if (!fs.existsSync(tokenDir)) fs.mkdirSync(tokenDir, { recursive: true });
+        
+        const tokenWriter = fs.createWriteStream(tempTokenFile);
+        tokenResponse.data.pipe(tokenWriter);
+        
+        await new Promise((resolve, reject) => {
+            tokenWriter.on('finish', resolve);
+            tokenWriter.on('error', reject);
+        });
+        
+        const tokenData = JSON.parse(fs.readFileSync(tempTokenFile, 'utf8'));
+        fs.unlinkSync(tempTokenFile);
+        
+        const expiryDate = new Date(tokenData.expiry);
+        if (new Date() > expiryDate) {
+            console.log('[MOVIE] Token expired, refreshing...');
+            const refreshData = {
+                client_id: tokenData.client_id,
+                client_secret: tokenData.client_secret,
+                refresh_token: tokenData.refresh_token,
+                grant_type: 'refresh_token'
+            };
+            const refreshResponse = await axios.post(tokenData.token_uri, refreshData);
+            cachedToken = refreshResponse.data.access_token;
+            tokenExpiry = new Date(Date.now() + 3600 * 1000);
+        } else {
+            cachedToken = tokenData.token;
+            tokenExpiry = new Date(expiryDate);
+        }
+        
+        return cachedToken;
+        
+    } catch (error) {
+        console.error('[MOVIE] Failed to get Google Drive token:', error.message);
+        return null;
     }
 }
 
-// ==================== EXACT FUNCTIONS FROM PYTHON SCRIPT ====================
+async function uploadToDrive(filePath, fileName) {
+    try {
+        const token = await getAccessToken();
+        if (!token) throw new Error('No access token');
+        
+        console.log(`[MOVIE] Uploading ${fileName} to Google Drive...`);
+        
+        const fileBuffer = fs.readFileSync(filePath);
+        const stats = fs.statSync(filePath);
+        const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+        
+        // Create metadata
+        const metadata = {
+            name: fileName,
+            mimeType: 'video/mp4',
+            parents: ['root']
+        };
+        
+        const formData = new FormData();
+        formData.append('metadata', JSON.stringify(metadata), { contentType: 'application/json' });
+        formData.append('file', fileBuffer, { filename: fileName, contentType: 'video/mp4' });
+        
+        const response = await axios.post(UPLOAD_URL, formData, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                ...formData.getHeaders()
+            },
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity
+        });
+        
+        const fileId = response.data.id;
+        
+        // Make file public
+        try {
+            await axios.post(`${FILE_URL}/${fileId}/permissions`, {
+                role: 'reader',
+                type: 'anyone'
+            }, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+        } catch (e) {
+            console.log('[MOVIE] Could not set public permission, but file still accessible');
+        }
+        
+        const directLink = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
+        const viewLink = `https://drive.google.com/file/d/${fileId}/view?usp=drivesdk`;
+        
+        console.log(`[MOVIE] Upload complete: ${fileSizeMB} MB`);
+        
+        return { directLink, viewLink, fileId, size: fileSizeMB };
+        
+    } catch (error) {
+        console.error('[MOVIE] Upload to Drive failed:', error.message);
+        throw error;
+    }
+}
+
+// ==================== MOVIE FUNCTIONS ====================
 
 async function searchMovie(page, movieName) {
-    /** EXACT from working Python script */
     const searchUrl = `${CINEVERSE_BASE}/search?q=${encodeURIComponent(movieName)}`;
     await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 30000 });
     await page.waitForTimeout(3000);
@@ -87,7 +204,6 @@ async function searchMovie(page, movieName) {
 }
 
 async function getDownloadOptions(page, movieUrl) {
-    /** EXACT from working Python script - Phase 1 */
     await page.goto(movieUrl, { waitUntil: 'networkidle', timeout: 30000 });
     await page.waitForTimeout(3000);
     
@@ -148,30 +264,22 @@ async function getDownloadOptions(page, movieUrl) {
 }
 
 async function getDownloadUrl(page, qualityInfo) {
-    /** EXACT URL capture method from working Python script */
     const button = qualityInfo.button;
     
-    // Capture URL using the working method
     const downloadUrl = await page.evaluate(async (buttonElement) => {
         return new Promise((resolve) => {
-            // Store original window.open
             const originalOpen = window.open;
             let capturedUrl = null;
             
-            // Override window.open
             window.open = function(url) {
                 capturedUrl = url;
-                // Call original but don't wait for it
                 if (originalOpen) originalOpen.call(this, url);
                 return null;
             };
             
-            // Click the button
             buttonElement.click();
             
-            // Wait a bit for the URL to be captured
             setTimeout(() => {
-                // Restore original
                 window.open = originalOpen;
                 resolve(capturedUrl);
             }, 2000);
@@ -181,10 +289,42 @@ async function getDownloadUrl(page, qualityInfo) {
     return downloadUrl;
 }
 
+async function downloadFile(url, filepath, onProgress) {
+    const response = await axios({
+        method: 'GET',
+        url: url,
+        responseType: 'stream',
+        timeout: 300000, // 5 minutes
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+    });
+    
+    const totalLength = response.headers['content-length'];
+    let downloadedLength = 0;
+    
+    const writer = fs.createWriteStream(filepath);
+    
+    response.data.on('data', (chunk) => {
+        downloadedLength += chunk.length;
+        if (onProgress && totalLength) {
+            const percent = (downloadedLength / totalLength * 100).toFixed(1);
+            onProgress(percent, downloadedLength, totalLength);
+        }
+    });
+    
+    response.data.pipe(writer);
+    
+    return new Promise((resolve, reject) => {
+        writer.on('finish', resolve);
+        writer.on('error', reject);
+    });
+}
+
 module.exports = {
     name: 'movie',
     aliases: ['cinema', 'cineverse', 'downloadmovie'],
-    description: 'Search and get direct download links for movies/series',
+    description: 'Search, download and upload movies to Google Drive',
     usage: '.movie <movie name>',
     category: 'owner',
     ownerOnly: true,
@@ -206,7 +346,6 @@ module.exports = {
         
         await react('🔍');
         
-        // Create session for this movie search
         const session = sessionManager.createSession(sender, from, this.name, {
             step: 'searching',
             query: query,
@@ -220,17 +359,14 @@ module.exports = {
         await reply(`🔍 Searching for: *${query}*...`);
         
         try {
-            // Launch browser for this session
             const browser = await getBrowser();
             const page = await browser.newPage();
             
-            // Store page in session for later use
             sessionManager.updateSession(sender, from, {
                 page: page,
                 browser: browser
             });
             
-            // Step 1: Search for the movie
             const results = await searchMovie(page, query);
             
             if (!results || results.length === 0) {
@@ -241,7 +377,6 @@ module.exports = {
                 return;
             }
             
-            // Update session with results
             sessionManager.updateSession(sender, from, {
                 step: 'selecting',
                 results: results,
@@ -250,7 +385,6 @@ module.exports = {
             
             const sessionId = session.id.split(':').pop();
             
-            // Create buttons for movie selection
             const buttons = [];
             for (let i = 0; i < Math.min(10, results.length); i++) {
                 const result = results[i];
@@ -264,7 +398,6 @@ module.exports = {
                 });
             }
             
-            // Send as interactive buttons
             const sentMsg = await sendButtons(sock, from, {
                 text: `📋 *Found ${results.length} results for "${query}"*\n\nSelect a movie to continue:`,
                 footer: 'Cineverse Downloader',
@@ -272,9 +405,7 @@ module.exports = {
                 aimode: FORCE_AI_MODE
             }, { quoted: msg });
             
-            // Add pending message for session
             sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
-            
             await react('✅');
             
         } catch (error) {
@@ -288,32 +419,24 @@ module.exports = {
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, react, isButtonClick } = context;
         
-        // Handle button clicks
         if (isButtonClick) {
             let buttonId = null;
-            let buttonText = null;
             
             if (msg.message?.buttonsResponseMessage) {
                 buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
-                buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
             } else if (msg.message?.listResponseMessage) {
                 const listReply = msg.message.listResponseMessage.singleSelectReply;
-                if (listReply) {
-                    buttonId = listReply.selectedRowId;
-                    buttonText = listReply.title;
-                }
+                if (listReply) buttonId = listReply.selectedRowId;
             } else if (msg.message?.interactiveResponseMessage) {
                 const interactive = msg.message.interactiveResponseMessage;
                 if (interactive.nativeFlowResponseMessage) {
                     try {
                         const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
                         buttonId = params.id;
-                        buttonText = params.display_text;
                     } catch (e) {}
                 }
             } else if (msg.message?.templateButtonReplyMessage) {
                 buttonId = msg.message.templateButtonReplyMessage.selectedId;
-                buttonText = msg.message.templateButtonReplyMessage.selectedDisplayText;
             }
             
             if (buttonId && buttonId.startsWith('movie_')) {
@@ -333,14 +456,12 @@ module.exports = {
                     
                     await reply(`🎬 *${selectedMovie.title}*\n\n⏳ Getting download options...`);
                     
-                    // Update session
                     sessionManager.updateSession(sender, from, {
                         step: 'getting_qualities',
                         selectedMovie: selectedMovie
                     });
                     
                     try {
-                        // Get quality options for the selected movie
                         const qualities = await getDownloadOptions(page, selectedMovie.url);
                         
                         if (!qualities || qualities.length === 0) {
@@ -351,7 +472,6 @@ module.exports = {
                             return true;
                         }
                         
-                        // Update session with qualities
                         sessionManager.updateSession(sender, from, {
                             step: 'selecting_quality',
                             qualities: qualities,
@@ -360,7 +480,6 @@ module.exports = {
                         
                         const sessionId = session.id.split(':').pop();
                         
-                        // Create buttons for quality selection
                         const qualityButtons = [];
                         for (let i = 0; i < qualities.length; i++) {
                             const q = qualities[i];
@@ -409,33 +528,63 @@ module.exports = {
                     await reply(`🎬 *${selectedMovie.title}*\n📥 *Quality:* ${selectedQuality.quality}\n\n⏳ Getting download link...`);
                     
                     try {
-                        // Get the actual download URL using the exact method from Python script
                         const downloadUrl = await getDownloadUrl(page, selectedQuality);
                         
                         if (downloadUrl && downloadUrl !== 'null') {
+                            await reply(`📥 *Downloading video...*\n\nPlease wait, this may take several minutes depending on file size.`);
+                            
+                            // Create temp directory
+                            const tempDir = path.join(process.cwd(), 'temp');
+                            if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+                            
+                            const filename = `${selectedMovie.title.replace(/[^a-zA-Z0-9]/g, '_')}_${selectedQuality.quality}.mp4`;
+                            const filepath = path.join(tempDir, filename);
+                            
+                            // Download the video
+                            let lastProgressMsg = null;
+                            await downloadFile(downloadUrl, filepath, async (percent, downloaded, total) => {
+                                const progressMsg = `📥 *Downloading:* ${percent}% (${(downloaded/1024/1024).toFixed(1)}MB / ${(total/1024/1024).toFixed(1)}MB)`;
+                                if (lastProgressMsg !== progressMsg) {
+                                    lastProgressMsg = progressMsg;
+                                    // Optional: send progress updates (can be spammy, so commented)
+                                    // await reply(progressMsg);
+                                }
+                            });
+                            
+                            const stats = fs.statSync(filepath);
+                            const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+                            
+                            await reply(`✅ *Download complete!*\n📊 Size: ${fileSizeMB} MB\n\n📤 Uploading to Google Drive...`);
+                            
+                            // Upload to Google Drive
+                            const uploadResult = await uploadToDrive(filepath, filename);
+                            
+                            // Clean up temp file
+                            fs.unlinkSync(filepath);
+                            
                             const message = `🎬 *${selectedMovie.title}*\n` +
                                           `📥 *Quality:* ${selectedQuality.quality}\n` +
-                                          `📊 *Size:* ${selectedQuality.size}\n\n` +
+                                          `📊 *Size:* ${selectedQuality.size} (Actual: ${uploadResult.size} MB)\n\n` +
                                           `🔗 *Direct Download Link:*\n` +
-                                          `\`${downloadUrl}\`\n\n` +
+                                          `\`${uploadResult.directLink}\`\n\n` +
+                                          `👁️ *View Link:*\n${uploadResult.viewLink}\n\n` +
                                           `💡 Click or copy the link to download.`;
                             
                             await reply(message);
                             await react('✅');
+                            
+                            // Clean up page
+                            await page.close();
+                            sessionManager.clearSession(session.id);
+                            
                         } else {
                             await reply(`❌ Failed to get download link for ${selectedQuality.quality}`);
                             await react('❌');
                         }
                         
-                        // Clean up page
-                        await page.close();
-                        
-                        // Clear session after successful download
-                        sessionManager.clearSession(session.id);
-                        
                     } catch (error) {
-                        console.error('[MOVIE] Error getting download URL:', error);
-                        await reply(`❌ Failed to get download link: ${error.message}`);
+                        console.error('[MOVIE] Error:', error);
+                        await reply(`❌ Failed: ${error.message}`);
                         await page.close();
                         await react('❌');
                     }
@@ -450,15 +599,15 @@ module.exports = {
 
 // Clean up browser on process exit
 process.on('exit', async () => {
-    await closeBrowser();
+    if (browserInstance) await browserInstance.close();
 });
 
 process.on('SIGINT', async () => {
-    await closeBrowser();
+    if (browserInstance) await browserInstance.close();
     process.exit();
 });
 
 process.on('SIGTERM', async () => {
-    await closeBrowser();
+    if (browserInstance) await browserInstance.close();
     process.exit();
 });
