@@ -15,8 +15,8 @@ module.exports = {
     usage: 'wikipedia <search term>\n' +
            'wikipedia search <term> - Search for articles\n' +
            'wikipedia download <term> - Download as PDF',
-    category: 'utility',  // Changed from 'owner' to 'utility'
-    ownerOnly: false,      // Added: anyone can use
+    category: 'utility',
+    ownerOnly: false,
 
     async execute(sock, msg, args, context) {
         const { from, reply, react } = context;
@@ -203,8 +203,7 @@ async function handleDownload(sock, chatId, query, reply, react) {
         const caption = `📚 *Wikipedia Article*\n\n` +
                        `*Title:* ${exactTitle}\n` +
                        `*Size:* ${fileSizeKB} KB\n` +
-                       `*Source:* Wikipedia\n\n` +
-                       `🔗 ${pdfUrl}`;
+                       `*Source:* Wikipedia`;
 
         await sock.sendMessage(chatId, {
             document: fileBuffer,
