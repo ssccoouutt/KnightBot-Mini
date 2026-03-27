@@ -1,8 +1,9 @@
 /**
  * Movie Downloader - Search and get direct download links for movies/series
+ * Uses Playwright to exactly replicate the Python script
  */
 
-const axios = require('axios');
+const { chromium } = require('playwright');
 const config = require('../../config');
 const sessionManager = require('../../utils/sessionManager');
 const giftedBtns = require('gifted-btns');
@@ -11,8 +12,174 @@ const { sendButtons, sendInteractiveMessage } = giftedBtns;
 // Force AI mode ON for gifted buttons
 const FORCE_AI_MODE = true;
 
-// Cineverse API base URL
+// Cineverse base URL
 const CINEVERSE_BASE = "https://cineverse.name.ng";
+
+// Store browser instance (reuse across searches)
+let browserInstance = null;
+
+async function getBrowser() {
+    if (!browserInstance) {
+        console.log('[MOVIE] Launching browser...');
+        browserInstance = await chromium.launch({
+            headless: true,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage'
+            ]
+        });
+    }
+    return browserInstance;
+}
+
+async function closeBrowser() {
+    if (browserInstance) {
+        console.log('[MOVIE] Closing browser...');
+        await browserInstance.close();
+        browserInstance = null;
+    }
+}
+
+// ==================== EXACT FUNCTIONS FROM PYTHON SCRIPT ====================
+
+async function searchMovie(page, movieName) {
+    /** EXACT from working Python script */
+    const searchUrl = `${CINEVERSE_BASE}/search?q=${encodeURIComponent(movieName)}`;
+    await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.waitForTimeout(3000);
+    
+    const results = await page.evaluate(() => {
+        const results = [];
+        const links = document.querySelectorAll('a');
+        for (let link of links) {
+            const text = link.innerText.trim();
+            const href = link.href;
+            if (text && text.length > 3 && text.length < 200 && href && 
+                (href.includes('/movie/') || href.includes('/tv/'))) {
+                const lines = text.split('\n');
+                let year = '', rating = '', title = '';
+                for (let line of lines) {
+                    if (line.match(/\d{4}/)) year = line.trim();
+                    else if (line.match(/\d\.\d/)) rating = line.trim();
+                    else if (line.length > 2 && !line.match(/\d/)) title = line.trim();
+                }
+                results.push({
+                    title: title || text.split('\n')[2] || text,
+                    year: year,
+                    rating: rating,
+                    url: href
+                });
+            }
+        }
+        const unique = [];
+        const seen = new Set();
+        for (let r of results) {
+            if (!seen.has(r.url)) {
+                seen.add(r.url);
+                unique.push(r);
+            }
+        }
+        return unique;
+    });
+    
+    return results;
+}
+
+async function getDownloadOptions(page, movieUrl) {
+    /** EXACT from working Python script - Phase 1 */
+    await page.goto(movieUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.waitForTimeout(3000);
+    
+    // Click Download button
+    const buttons = await page.$$('button');
+    for (const btn of buttons) {
+        const text = await btn.innerText();
+        if (text && text.includes('Download')) {
+            await btn.click();
+            break;
+        }
+    }
+    
+    await page.waitForTimeout(3000);
+    
+    // Click Video tab
+    const videoTab = await page.$('button:has-text("Video")');
+    if (videoTab) {
+        await videoTab.click();
+        await page.waitForTimeout(1000);
+    }
+    
+    // Find quality buttons
+    const videoPanel = await page.$('[role="tabpanel"][aria-labelledby*="video"]');
+    if (!videoPanel) return [];
+    
+    const downloadButtons = await videoPanel.$$('button');
+    const qualityButtons = [];
+    for (const btn of downloadButtons) {
+        const text = await btn.innerText();
+        if (text && text.includes('Download')) {
+            qualityButtons.push(btn);
+        }
+    }
+    
+    const qualities = [];
+    for (let i = 0; i < qualityButtons.length; i++) {
+        const btn = qualityButtons[i];
+        const parent = await btn.evaluateHandle(el => el.parentElement.parentElement);
+        const parentText = await parent.innerText();
+        
+        const qualityMatch = parentText.match(/(\d{3,4}p)/i);
+        const sizeMatch = parentText.match(/([\d.]+\s*(?:MB|GB))/i);
+        
+        if (qualityMatch) {
+            const quality = qualityMatch[1];
+            const size = sizeMatch ? sizeMatch[1] : "Unknown";
+            
+            qualities.push({
+                quality: quality,
+                size: size,
+                button: btn
+            });
+        }
+    }
+    
+    return qualities;
+}
+
+async function getDownloadUrl(page, qualityInfo) {
+    /** EXACT URL capture method from working Python script */
+    const button = qualityInfo.button;
+    
+    // Capture URL using the working method
+    const downloadUrl = await page.evaluate(async (buttonElement) => {
+        return new Promise((resolve) => {
+            // Store original window.open
+            const originalOpen = window.open;
+            let capturedUrl = null;
+            
+            // Override window.open
+            window.open = function(url) {
+                capturedUrl = url;
+                // Call original but don't wait for it
+                if (originalOpen) originalOpen.call(this, url);
+                return null;
+            };
+            
+            // Click the button
+            buttonElement.click();
+            
+            // Wait a bit for the URL to be captured
+            setTimeout(() => {
+                // Restore original
+                window.open = originalOpen;
+                resolve(capturedUrl);
+            }, 2000);
+        });
+    }, button);
+    
+    return downloadUrl;
+}
 
 module.exports = {
     name: 'movie',
@@ -45,19 +212,30 @@ module.exports = {
             query: query,
             results: [],
             selectedMovie: null,
-            qualities: []
+            qualities: [],
+            page: null,
+            browser: null
         });
-        
-        const sessionId = session.id.split(':').pop();
         
         await reply(`🔍 Searching for: *${query}*...`);
         
         try {
+            // Launch browser for this session
+            const browser = await getBrowser();
+            const page = await browser.newPage();
+            
+            // Store page in session for later use
+            sessionManager.updateSession(sender, from, {
+                page: page,
+                browser: browser
+            });
+            
             // Step 1: Search for the movie
-            const results = await searchMovies(query);
+            const results = await searchMovie(page, query);
             
             if (!results || results.length === 0) {
                 await reply(`❌ No results found for "${query}".\n\nTry a different search term.`);
+                await page.close();
                 sessionManager.clearSession(session.id);
                 await react('❌');
                 return;
@@ -70,6 +248,8 @@ module.exports = {
                 query: query
             });
             
+            const sessionId = session.id.split(':').pop();
+            
             // Create buttons for movie selection
             const buttons = [];
             for (let i = 0; i < Math.min(10, results.length); i++) {
@@ -80,7 +260,7 @@ module.exports = {
                 
                 buttons.push({
                     id: `movie_${sessionId}_${i}`,
-                    text: buttonText.substring(0, 50) // Limit button text length
+                    text: buttonText.substring(0, 50)
                 });
             }
             
@@ -140,11 +320,18 @@ module.exports = {
                 const parts = buttonId.split('_');
                 const index = parseInt(parts[2]);
                 const results = session.data.results;
+                const page = session.data.page;
+                
+                if (!page) {
+                    await reply(`❌ Session expired. Please search again.`);
+                    sessionManager.clearSession(session.id);
+                    return true;
+                }
                 
                 if (index >= 0 && index < results.length) {
                     const selectedMovie = results[index];
                     
-                    await reply(`🎬 *${selectedMovie.title}*\n\n⏳ Fetching download options...`);
+                    await reply(`🎬 *${selectedMovie.title}*\n\n⏳ Getting download options...`);
                     
                     // Update session
                     sessionManager.updateSession(sender, from, {
@@ -154,10 +341,11 @@ module.exports = {
                     
                     try {
                         // Get quality options for the selected movie
-                        const qualities = await getMovieQualities(selectedMovie.url);
+                        const qualities = await getDownloadOptions(page, selectedMovie.url);
                         
                         if (!qualities || qualities.length === 0) {
                             await reply(`❌ No download options found for *${selectedMovie.title}*`);
+                            await page.close();
                             sessionManager.clearSession(session.id);
                             await react('❌');
                             return true;
@@ -194,6 +382,7 @@ module.exports = {
                     } catch (error) {
                         console.error('[MOVIE] Error getting qualities:', error);
                         await reply(`❌ Failed to get download options: ${error.message}`);
+                        await page.close();
                         sessionManager.clearSession(session.id);
                         await react('❌');
                     }
@@ -206,6 +395,13 @@ module.exports = {
                 const index = parseInt(parts[2]);
                 const qualities = session.data.qualities;
                 const selectedMovie = session.data.selectedMovie;
+                const page = session.data.page;
+                
+                if (!page) {
+                    await reply(`❌ Session expired. Please search again.`);
+                    sessionManager.clearSession(session.id);
+                    return true;
+                }
                 
                 if (index >= 0 && index < qualities.length) {
                     const selectedQuality = qualities[index];
@@ -213,10 +409,10 @@ module.exports = {
                     await reply(`🎬 *${selectedMovie.title}*\n📥 *Quality:* ${selectedQuality.quality}\n\n⏳ Getting download link...`);
                     
                     try {
-                        // Get the actual download URL
-                        const downloadUrl = await getDownloadUrl(selectedMovie.url, selectedQuality);
+                        // Get the actual download URL using the exact method from Python script
+                        const downloadUrl = await getDownloadUrl(page, selectedQuality);
                         
-                        if (downloadUrl) {
+                        if (downloadUrl && downloadUrl !== 'null') {
                             const message = `🎬 *${selectedMovie.title}*\n` +
                                           `📥 *Quality:* ${selectedQuality.quality}\n` +
                                           `📊 *Size:* ${selectedQuality.size}\n\n` +
@@ -231,12 +427,16 @@ module.exports = {
                             await react('❌');
                         }
                         
+                        // Clean up page
+                        await page.close();
+                        
                         // Clear session after successful download
                         sessionManager.clearSession(session.id);
                         
                     } catch (error) {
                         console.error('[MOVIE] Error getting download URL:', error);
                         await reply(`❌ Failed to get download link: ${error.message}`);
+                        await page.close();
                         await react('❌');
                     }
                 }
@@ -248,164 +448,17 @@ module.exports = {
     }
 };
 
-/**
- * Search for movies on Cineverse
- */
-async function searchMovies(query) {
-    try {
-        const searchUrl = `${CINEVERSE_BASE}/search?q=${encodeURIComponent(query)}`;
-        
-        const response = await axios.get(searchUrl, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            },
-            timeout: 30000
-        });
-        
-        const html = response.data;
-        
-        // Parse HTML for movie results
-        const results = [];
-        const linkRegex = /<a\s+href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
-        let match;
-        
-        while ((match = linkRegex.exec(html)) !== null) {
-            const href = match[1];
-            const content = match[2];
-            
-            if (href && (href.includes('/movie/') || href.includes('/tv/'))) {
-                // Extract title
-                let title = content.replace(/<[^>]*>/g, '').trim();
-                let year = '';
-                let rating = '';
-                
-                // Extract year
-                const yearMatch = title.match(/\b(19|20)\d{2}\b/);
-                if (yearMatch) {
-                    year = yearMatch[0];
-                }
-                
-                // Extract rating
-                const ratingMatch = title.match(/\b\d\.\d\b/);
-                if (ratingMatch) {
-                    rating = ratingMatch[0];
-                }
-                
-                // Clean title
-                title = title.replace(/\b(19|20)\d{2}\b/, '').replace(/\b\d\.\d\b/, '').trim();
-                
-                if (title && title.length > 2 && title.length < 200) {
-                    results.push({
-                        title: title,
-                        year: year,
-                        rating: rating,
-                        url: href.startsWith('http') ? href : `${CINEVERSE_BASE}${href}`
-                    });
-                }
-            }
-        }
-        
-        // Remove duplicates by URL
-        const unique = [];
-        const seen = new Set();
-        for (const r of results) {
-            if (!seen.has(r.url)) {
-                seen.add(r.url);
-                unique.push(r);
-            }
-        }
-        
-        return unique;
-        
-    } catch (error) {
-        console.error('[MOVIE] Search error:', error.message);
-        throw new Error('Failed to search movies');
-    }
-}
+// Clean up browser on process exit
+process.on('exit', async () => {
+    await closeBrowser();
+});
 
-/**
- * Get quality options for a movie
- */
-async function getMovieQualities(movieUrl) {
-    try {
-        const response = await axios.get(movieUrl, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            },
-            timeout: 30000
-        });
-        
-        const html = response.data;
-        const qualities = [];
-        
-        // Look for download buttons or quality options
-        // This is a simplified parser - you may need to adjust based on actual HTML structure
-        
-        // Look for quality patterns
-        const qualityPatterns = [
-            { regex: /(\d{3,4}p)[^<]*?([\d.]+(?:\s*(?:MB|GB)))/gi, qualityIndex: 1, sizeIndex: 2 },
-            { regex: /Quality:\s*(\d{3,4}p)[^<]*?Size:\s*([\d.]+(?:\s*(?:MB|GB)))/gi, qualityIndex: 1, sizeIndex: 2 },
-            { regex: /\[(\d{3,4}p)\][^<]*?\(([\d.]+(?:\s*(?:MB|GB)))\)/gi, qualityIndex: 1, sizeIndex: 2 }
-        ];
-        
-        for (const pattern of qualityPatterns) {
-            const regex = new RegExp(pattern.regex, 'gi');
-            let match;
-            while ((match = regex.exec(html)) !== null) {
-                const quality = match[pattern.qualityIndex];
-                const size = match[pattern.sizeIndex];
-                if (quality && !qualities.find(q => q.quality === quality)) {
-                    qualities.push({ quality, size });
-                }
-            }
-        }
-        
-        // If no qualities found via regex, add default qualities
-        if (qualities.length === 0) {
-            qualities.push(
-                { quality: '1080p', size: '~2GB' },
-                { quality: '720p', size: '~1GB' },
-                { quality: '480p', size: '~500MB' }
-            );
-        }
-        
-        return qualities;
-        
-    } catch (error) {
-        console.error('[MOVIE] Error getting qualities:', error.message);
-        throw new Error('Failed to get movie qualities');
-    }
-}
+process.on('SIGINT', async () => {
+    await closeBrowser();
+    process.exit();
+});
 
-/**
- * Get direct download URL for selected quality
- */
-async function getDownloadUrl(movieUrl, qualityInfo) {
-    try {
-        // This is a simplified implementation
-        // You may need to simulate clicking buttons and capturing URLs
-        // For now, return a placeholder URL based on quality
-        
-        // Extract movie ID from URL
-        const movieIdMatch = movieUrl.match(/\/(movie|tv)\/([^\/?]+)/);
-        const movieId = movieIdMatch ? movieIdMatch[2] : 'unknown';
-        
-        // Generate direct download link (this is a simulation)
-        // In a real implementation, you would need to:
-        // 1. Load the movie page
-        // 2. Find and click the download button
-        // 3. Select video tab
-        // 4. Click the quality button
-        // 5. Capture the window.open URL
-        
-        // For now, return a formatted URL
-        const quality = qualityInfo.quality.replace('p', '');
-        const downloadUrl = `https://cineverse.name.ng/download/${movieId}/${quality}`;
-        
-        return downloadUrl;
-        
-    } catch (error) {
-        console.error('[MOVIE] Error getting download URL:', error.message);
-        throw new Error('Failed to get download link');
-    }
-}
+process.on('SIGTERM', async () => {
+    await closeBrowser();
+    process.exit();
+});
