@@ -19,6 +19,7 @@ const FORCE_AI_MODE = true;
 const CINEVERSE_BASE = "https://cineverse.name.ng";
 
 // Google Drive Configuration
+const DRIVE_FOLDER_ID = '1vCEe1RQPN3tmBg5VZ8ojQnYrjdJ6K61v'; // Moviebox folder
 const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download";
 const UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable";
 const FILE_URL = "https://www.googleapis.com/drive/v3/files";
@@ -101,21 +102,22 @@ async function getAccessToken() {
     }
 }
 
-async function uploadToDrive(filePath, fileName, onProgress) {
+async function uploadToDrive(filePath, fileName, onProgress, progressMsgKey) {
     try {
         const token = await getAccessToken();
         if (!token) throw new Error('No access token');
         
-        console.log(`[MOVIE] Uploading ${fileName} to Google Drive...`);
+        console.log(`[MOVIE] Uploading ${fileName} to Google Drive folder...`);
         
         const stats = fs.statSync(filePath);
         const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
         const fileSizeBytes = stats.size;
         
-        // Step 1: Start resumable upload session
+        // Step 1: Start resumable upload session with folder parent
         const metadata = {
             name: fileName,
-            mimeType: 'video/mp4'
+            mimeType: 'video/mp4',
+            parents: [DRIVE_FOLDER_ID]
         };
         
         const startResponse = await axios({
@@ -140,6 +142,7 @@ async function uploadToDrive(filePath, fileName, onProgress) {
         // Step 2: Upload the file in chunks
         const fileStream = fs.createReadStream(filePath);
         let uploadedBytes = 0;
+        let lastPercent = 0;
         
         const uploadResponse = await axios({
             method: 'PUT',
@@ -155,7 +158,11 @@ async function uploadToDrive(filePath, fileName, onProgress) {
             onUploadProgress: (progressEvent) => {
                 if (onProgress && progressEvent.total) {
                     const percent = (progressEvent.loaded / progressEvent.total * 100).toFixed(1);
-                    onProgress(percent, progressEvent.loaded, progressEvent.total);
+                    const percentInt = Math.floor(percent);
+                    if (percentInt > lastPercent && percentInt % 10 === 0) {
+                        lastPercent = percentInt;
+                        onProgress(percent, progressEvent.loaded, progressEvent.total, progressMsgKey);
+                    }
                 }
             }
         });
@@ -317,12 +324,12 @@ async function getDownloadUrl(page, qualityInfo) {
     return downloadUrl;
 }
 
-async function downloadFile(url, filepath, onProgress) {
+async function downloadFile(url, filepath, onProgress, progressMsgKey, sock, from, msg) {
     const response = await axios({
         method: 'GET',
         url: url,
         responseType: 'stream',
-        timeout: 600000, // 10 minutes for large files
+        timeout: 600000,
         headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
@@ -330,14 +337,21 @@ async function downloadFile(url, filepath, onProgress) {
     
     const totalLength = parseInt(response.headers['content-length'], 10);
     let downloadedLength = 0;
+    let lastPercent = 0;
     
     const writer = fs.createWriteStream(filepath);
     
-    response.data.on('data', (chunk) => {
+    response.data.on('data', async (chunk) => {
         downloadedLength += chunk.length;
-        if (onProgress && totalLength) {
+        if (totalLength) {
             const percent = (downloadedLength / totalLength * 100).toFixed(1);
-            onProgress(percent, downloadedLength, totalLength);
+            const percentInt = Math.floor(percent);
+            if (percentInt > lastPercent && percentInt % 10 === 0) {
+                lastPercent = percentInt;
+                if (onProgress) {
+                    await onProgress(percent, downloadedLength, totalLength, progressMsgKey, sock, from);
+                }
+            }
         }
     });
     
@@ -381,7 +395,8 @@ module.exports = {
             selectedMovie: null,
             qualities: [],
             page: null,
-            browser: null
+            browser: null,
+            progressMsgKey: null
         });
         
         await reply(`🔍 Searching for: *${query}*...`);
@@ -428,7 +443,7 @@ module.exports = {
             
             const sentMsg = await sendButtons(sock, from, {
                 text: `📋 *Found ${results.length} results for "${query}"*\n\nSelect a movie to continue:`,
-                footer: 'Cineverse Downloader',
+                footer: 'Movie Downloader',
                 buttons: buttons,
                 aimode: FORCE_AI_MODE
             }, { quoted: msg });
@@ -482,18 +497,22 @@ module.exports = {
                 if (index >= 0 && index < results.length) {
                     const selectedMovie = results[index];
                     
-                    await reply(`🎬 *${selectedMovie.title}*\n\n⏳ Getting download options...`);
-                    
+                    // Send initial progress message that will be edited
+                    const progressMsg = await reply(`🎬 *${selectedMovie.title}*\n\n⏳ Getting download options...`);
                     sessionManager.updateSession(sender, from, {
                         step: 'getting_qualities',
-                        selectedMovie: selectedMovie
+                        selectedMovie: selectedMovie,
+                        progressMsgKey: progressMsg.key
                     });
                     
                     try {
                         const qualities = await getDownloadOptions(page, selectedMovie.url);
                         
                         if (!qualities || qualities.length === 0) {
-                            await reply(`❌ No download options found for *${selectedMovie.title}*`);
+                            await sock.sendMessage(from, {
+                                text: `❌ No download options found for *${selectedMovie.title}*`,
+                                edit: progressMsg.key
+                            });
                             await page.close();
                             sessionManager.clearSession(session.id);
                             await react('❌');
@@ -517,9 +536,15 @@ module.exports = {
                             });
                         }
                         
+                        // Edit the progress message to show quality options
+                        await sock.sendMessage(from, {
+                            text: `🎬 *${selectedMovie.title}*\n\n📥 Choose quality:`,
+                            edit: progressMsg.key
+                        });
+                        
                         const sentMsg = await sendButtons(sock, from, {
                             text: `🎬 *${selectedMovie.title}*\n\n📥 Choose quality:`,
-                            footer: 'Cineverse Downloader',
+                            footer: 'Movie Downloader',
                             buttons: qualityButtons,
                             aimode: FORCE_AI_MODE
                         }, {});
@@ -528,7 +553,10 @@ module.exports = {
                         
                     } catch (error) {
                         console.error('[MOVIE] Error getting qualities:', error);
-                        await reply(`❌ Failed to get download options: ${error.message}`);
+                        await sock.sendMessage(from, {
+                            text: `❌ Failed to get download options: ${error.message}`,
+                            edit: progressMsg.key
+                        });
                         await page.close();
                         sessionManager.clearSession(session.id);
                         await react('❌');
@@ -543,6 +571,7 @@ module.exports = {
                 const qualities = session.data.qualities;
                 const selectedMovie = session.data.selectedMovie;
                 const page = session.data.page;
+                const progressMsgKey = session.data.progressMsgKey;
                 
                 if (!page) {
                     await reply(`❌ Session expired. Please search again.`);
@@ -553,13 +582,27 @@ module.exports = {
                 if (index >= 0 && index < qualities.length) {
                     const selectedQuality = qualities[index];
                     
-                    await reply(`🎬 *${selectedMovie.title}*\n📥 *Quality:* ${selectedQuality.quality}\n\n⏳ Getting download link...`);
+                    // Get the progress message to edit
+                    let progressMsg;
+                    if (progressMsgKey) {
+                        // Get the message to edit
+                        progressMsg = { key: { id: progressMsgKey, remoteJid: from } };
+                    } else {
+                        progressMsg = await reply(`🎬 *${selectedMovie.title}*\n📥 *Quality:* ${selectedQuality.quality}\n\n⏳ Getting download link...`);
+                        sessionManager.updateSession(sender, from, {
+                            progressMsgKey: progressMsg.key
+                        });
+                    }
                     
                     try {
                         const downloadUrl = await getDownloadUrl(page, selectedQuality);
                         
                         if (downloadUrl && downloadUrl !== 'null') {
-                            await reply(`📥 *Downloading video...*\n\nPlease wait, this may take several minutes depending on file size.`);
+                            // Update progress message
+                            await sock.sendMessage(from, {
+                                text: `🎬 *${selectedMovie.title}*\n📥 *Quality:* ${selectedQuality.quality}\n\n📥 *Downloading video...*\n0%`,
+                                edit: progressMsg.key
+                            });
                             
                             // Create temp directory
                             const tempDir = path.join(process.cwd(), 'temp');
@@ -568,44 +611,48 @@ module.exports = {
                             const filename = `${selectedMovie.title.replace(/[^a-zA-Z0-9]/g, '_')}_${selectedQuality.quality}.mp4`;
                             const filepath = path.join(tempDir, filename);
                             
-                            // Download the video
-                            let lastPercent = 0;
-                            await downloadFile(downloadUrl, filepath, async (percent, downloaded, total) => {
-                                const percentInt = Math.floor(percent);
-                                if (percentInt > lastPercent && percentInt % 10 === 0) {
-                                    lastPercent = percentInt;
-                                    const progressMsg = `📥 *Downloading:* ${percent}% (${(downloaded/1024/1024).toFixed(1)}MB / ${(total/1024/1024).toFixed(1)}MB)`;
-                                    await reply(progressMsg);
-                                }
-                            });
+                            // Download the video with progress updates
+                            await downloadFile(downloadUrl, filepath, async (percent, downloaded, total, msgKey, sockClient, chatId) => {
+                                await sockClient.sendMessage(chatId, {
+                                    text: `🎬 *${selectedMovie.title}*\n📥 *Quality:* ${selectedQuality.quality}\n\n📥 *Downloading video...*\n${percent}% (${(downloaded/1024/1024).toFixed(1)}MB / ${(total/1024/1024).toFixed(1)}MB)`,
+                                    edit: msgKey
+                                });
+                            }, progressMsg.key, sock, from);
                             
                             const stats = fs.statSync(filepath);
                             const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
                             
-                            await reply(`✅ *Download complete!*\n📊 Size: ${fileSizeMB} MB\n\n📤 Uploading to Google Drive (this may take several minutes)...`);
+                            // Update progress message for upload
+                            await sock.sendMessage(from, {
+                                text: `🎬 *${selectedMovie.title}*\n📥 *Quality:* ${selectedQuality.quality}\n\n✅ *Download complete!* (${fileSizeMB} MB)\n\n📤 *Uploading to Google Drive...*\n0%`,
+                                edit: progressMsg.key
+                            });
                             
                             // Upload to Google Drive with progress
                             let lastUploadPercent = 0;
-                            const uploadResult = await uploadToDrive(filepath, filename, (percent, loaded, total) => {
-                                const percentInt = Math.floor(percent);
-                                if (percentInt > lastUploadPercent && percentInt % 10 === 0) {
-                                    lastUploadPercent = percentInt;
-                                    // Progress updates are optional to avoid spam
-                                }
-                            });
+                            const uploadResult = await uploadToDrive(filepath, filename, async (percent, loaded, total, msgKey, sockClient, chatId) => {
+                                await sockClient.sendMessage(chatId, {
+                                    text: `🎬 *${selectedMovie.title}*\n📥 *Quality:* ${selectedQuality.quality}\n\n✅ *Download complete!* (${fileSizeMB} MB)\n\n📤 *Uploading to Google Drive...*\n${percent}% (${(loaded/1024/1024).toFixed(1)}MB / ${(total/1024/1024).toFixed(1)}MB)`,
+                                    edit: msgKey
+                                });
+                            }, progressMsg.key, sock, from);
                             
                             // Clean up temp file
                             fs.unlinkSync(filepath);
                             
-                            const message = `🎬 *${selectedMovie.title}*\n` +
-                                          `📥 *Quality:* ${selectedQuality.quality}\n` +
-                                          `📊 *Size:* ${selectedQuality.size} (Actual: ${uploadResult.size} MB)\n\n` +
-                                          `🔗 *Direct Download Link:*\n` +
-                                          `\`${uploadResult.directLink}\`\n\n` +
-                                          `👁️ *View Link:*\n${uploadResult.viewLink}\n\n` +
-                                          `💡 Click or copy the link to download.`;
+                            // Final message with links
+                            const finalMessage = `🎬 *${selectedMovie.title}*\n` +
+                                                `📥 *Quality:* ${selectedQuality.quality}\n` +
+                                                `📊 *Size:* ${selectedQuality.size} (Actual: ${uploadResult.size} MB)\n\n` +
+                                                `🔗 *Direct Download Link:*\n` +
+                                                `\`${uploadResult.directLink}\`\n\n` +
+                                                `👁️ *View Link:*\n${uploadResult.viewLink}\n\n` +
+                                                `💡 Click or copy the link to download.`;
                             
-                            await reply(message);
+                            await sock.sendMessage(from, {
+                                text: finalMessage,
+                                edit: progressMsg.key
+                            });
                             await react('✅');
                             
                             // Clean up page
@@ -613,13 +660,19 @@ module.exports = {
                             sessionManager.clearSession(session.id);
                             
                         } else {
-                            await reply(`❌ Failed to get download link for ${selectedQuality.quality}`);
+                            await sock.sendMessage(from, {
+                                text: `❌ Failed to get download link for ${selectedQuality.quality}`,
+                                edit: progressMsg.key
+                            });
                             await react('❌');
                         }
                         
                     } catch (error) {
                         console.error('[MOVIE] Error:', error);
-                        await reply(`❌ Failed: ${error.message}`);
+                        await sock.sendMessage(from, {
+                            text: `❌ Failed: ${error.message}`,
+                            edit: progressMsg.key
+                        });
                         await page.close();
                         await react('❌');
                     }
