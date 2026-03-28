@@ -360,8 +360,8 @@ module.exports = {
     aliases: ['cinema', 'cineverse', 'downloadmovie'],
     description: 'Search, download and upload movies to Google Drive',
     usage: '.movie <movie name>',
-    category: 'owner',
-    ownerOnly: true,
+    category: 'media',
+    ownerOnly: false,
 
     async execute(sock, msg, args, context) {
         const { from, sender, reply, react } = context;
