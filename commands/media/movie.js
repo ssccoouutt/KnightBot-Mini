@@ -1,16 +1,10 @@
 /**
- * Movie Downloader - Search, download movie and upload to Google Drive
+ * Movie Downloader - Search and get direct download/stream link
  * 
- * FIXED ISSUES:
- * 1. Search Results: Now correctly extracts movie titles instead of just showing 'Movie'.
- * 2. 0 MB Download: Improved download URL capture and added validation for content-length.
+ * MODIFIED: Only returns direct download/stream link without downloading or uploading
  */
 
 const { chromium } = require('playwright');
-const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
-const FormData = require('form-data');
 const config = require('../../config');
 const sessionManager = require('../../utils/sessionManager');
 const giftedBtns = require('gifted-btns');
@@ -21,15 +15,6 @@ const FORCE_AI_MODE = true;
 
 // Cineverse base URL
 const CINEVERSE_BASE = "https://cineverse.name.ng";
-
-// Google Drive Configuration
-const DRIVE_FOLDER_ID = '1vCEe1RQPN3tmBg5VZ8ojQnYrjdJ6K61v'; // Moviebox folder
-const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download";
-const UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable";
-const FILE_URL = "https://www.googleapis.com/drive/v3/files";
-
-let cachedToken = null;
-let tokenExpiry = null;
 
 // Store browser instance (reuse across searches)
 let browserInstance = null;
@@ -49,155 +34,6 @@ async function getBrowser() {
     return browserInstance;
 }
 
-// ==================== GOOGLE DRIVE FUNCTIONS ====================
-
-async function getAccessToken() {
-    try {
-        if (cachedToken && tokenExpiry && new Date() < tokenExpiry) {
-            return cachedToken;
-        }
-        
-        console.log('[MOVIE] Fetching Google Drive token...');
-        
-        const tokenResponse = await axios({
-            method: 'GET',
-            url: TOKEN_URL,
-            responseType: 'stream',
-            timeout: 30000
-        });
-        
-        const tempTokenFile = path.join(process.cwd(), 'temp', `token_${Date.now()}.json`);
-        const tokenDir = path.dirname(tempTokenFile);
-        if (!fs.existsSync(tokenDir)) fs.mkdirSync(tokenDir, { recursive: true });
-        
-        const tokenWriter = fs.createWriteStream(tempTokenFile);
-        tokenResponse.data.pipe(tokenWriter);
-        
-        await new Promise((resolve, reject) => {
-            tokenWriter.on('finish', resolve);
-            tokenWriter.on('error', reject);
-        });
-        
-        const tokenData = JSON.parse(fs.readFileSync(tempTokenFile, 'utf8'));
-        fs.unlinkSync(tempTokenFile);
-        
-        const expiryDate = new Date(tokenData.expiry);
-        if (new Date() > expiryDate) {
-            console.log('[MOVIE] Token expired, refreshing...');
-            const refreshData = {
-                client_id: tokenData.client_id,
-                client_secret: tokenData.client_secret,
-                refresh_token: tokenData.refresh_token,
-                grant_type: 'refresh_token'
-            };
-            const refreshResponse = await axios.post(tokenData.token_uri, refreshData);
-            cachedToken = refreshResponse.data.access_token;
-            tokenExpiry = new Date(Date.now() + 3600 * 1000);
-        } else {
-            cachedToken = tokenData.token;
-            tokenExpiry = new Date(expiryDate);
-        }
-        
-        return cachedToken;
-        
-    } catch (error) {
-        console.error('[MOVIE] Failed to get Google Drive token:', error.message);
-        return null;
-    }
-}
-
-async function uploadToDrive(filePath, fileName, onProgress, progressMsgKey) {
-    try {
-        const token = await getAccessToken();
-        if (!token) throw new Error('No access token');
-        
-        console.log(`[MOVIE] Uploading ${fileName} to Google Drive...`);
-        
-        const stats = fs.statSync(filePath);
-        if (stats.size === 0) {
-            throw new Error('Cannot upload an empty file (0 bytes)');
-        }
-
-        const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
-        const fileSizeBytes = stats.size;
-        
-        // Step 1: Start resumable upload session to specific folder
-        const metadata = {
-            name: fileName,
-            mimeType: 'video/mp4',
-            parents: [DRIVE_FOLDER_ID] // Upload to Moviebox folder
-        };
-        
-        const startResponse = await axios({
-            method: 'POST',
-            url: UPLOAD_URL,
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json',
-                'X-Upload-Content-Type': 'video/mp4',
-                'X-Upload-Content-Length': fileSizeBytes
-            },
-            data: metadata
-        });
-        
-        const uploadUrl = startResponse.headers.location;
-        if (!uploadUrl) {
-            throw new Error('Failed to get upload URL');
-        }
-        
-        console.log(`[MOVIE] Resumable upload URL obtained, starting upload...`);
-        
-        // Step 2: Upload the file in chunks
-        const fileStream = fs.createReadStream(filePath);
-        
-        const uploadResponse = await axios({
-            method: 'PUT',
-            url: uploadUrl,
-            data: fileStream,
-            headers: {
-                'Content-Type': 'video/mp4',
-                'Content-Length': fileSizeBytes
-            },
-            maxContentLength: Infinity,
-            maxBodyLength: Infinity,
-            timeout: 600000, // 10 minutes timeout for large files
-            onUploadProgress: (progressEvent) => {
-                if (onProgress && progressEvent.total) {
-                    const percent = (progressEvent.loaded / progressEvent.total * 100).toFixed(1);
-                    onProgress(percent, progressEvent.loaded, progressEvent.total, progressMsgKey);
-                }
-            }
-        });
-        
-        const fileId = uploadResponse.data.id;
-        
-        // Step 3: Make file public
-        try {
-            await axios.post(`${FILE_URL}/${fileId}/permissions`, {
-                role: 'reader',
-                type: 'anyone'
-            }, {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
-        } catch (e) {
-            console.log('[MOVIE] Could not set public permission, but file still accessible');
-        }
-        
-        const directLink = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
-        const viewLink = `https://drive.google.com/file/d/${fileId}/view?usp=drivesdk`;
-        
-        console.log(`[MOVIE] Upload complete: ${fileSizeMB} MB`);
-        
-        return { directLink, viewLink, fileId, size: fileSizeMB };
-        
-    } catch (error) {
-        console.error('[MOVIE] Upload to Drive failed:', error.message);
-        throw error;
-    }
-}
-
-// ==================== MOVIE FUNCTIONS ====================
-
 async function searchMovie(page, movieName) {
     const searchUrl = `${CINEVERSE_BASE}/search?q=${encodeURIComponent(movieName)}`;
     await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 30000 });
@@ -213,7 +49,7 @@ async function searchMovie(page, movieName) {
                 const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
                 let year = '', rating = '', title = '';
                 
-                // FIXED: Robust title extraction
+                // Robust title extraction
                 for (let line of lines) {
                     if (line.match(/^\d{4}$/)) year = line;
                     else if (line.match(/^\d\.\d$/)) rating = line;
@@ -299,7 +135,7 @@ async function getDownloadOptions(page, movieUrl) {
     return qualities;
 }
 
-async function getDownloadUrl(page, qualityInfo) {
+async function getDirectDownloadUrl(page, qualityInfo) {
     const button = qualityInfo.button;
     
     // Listen for requests that contain 'download' to capture the correct URL
@@ -329,58 +165,10 @@ async function getDownloadUrl(page, qualityInfo) {
     return capturedUrl;
 }
 
-async function downloadFile(url, filepath, onProgress, progressMsgKey, sock, from) {
-    const response = await axios({
-        method: 'GET',
-        url: url,
-        responseType: 'stream',
-        timeout: 600000,
-        headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': CINEVERSE_BASE
-        }
-    });
-    
-    const totalLength = parseInt(response.headers['content-length'], 10);
-    
-    // FIXED: Prevent 0 MB issue
-    if (isNaN(totalLength) || totalLength <= 0) {
-        throw new Error('Invalid file size received from server (0 MB)');
-    }
-
-    let downloadedLength = 0;
-    let lastPercent = 0;
-    
-    const writer = fs.createWriteStream(filepath);
-    response.data.pipe(writer);
-    
-    response.data.on('data', (chunk) => {
-        downloadedLength += chunk.length;
-        if (onProgress && totalLength) {
-            const percent = (downloadedLength / totalLength * 100).toFixed(1);
-            const percentInt = Math.floor(parseFloat(percent));
-            if (percentInt > lastPercent && percentInt % 10 === 0) {
-                lastPercent = percentInt;
-                onProgress(percent, downloadedLength, totalLength, progressMsgKey, sock, from);
-            }
-        }
-    });
-    
-    return new Promise((resolve, reject) => {
-        writer.on('finish', () => {
-            const stats = fs.statSync(filepath);
-            if (stats.size === 0) reject(new Error('Downloaded file is empty (0 bytes)'));
-            else resolve();
-        });
-        writer.on('error', reject);
-        response.data.on('error', reject);
-    });
-}
-
 module.exports = {
     name: 'movie',
-    aliases: ['cinema', 'cineverse', 'downloadmovie'],
-    description: 'Search, download and upload movies to Google Drive',
+    aliases: ['cinema', 'cineverse', 'movielink'],
+    description: 'Search and get direct download/stream link for movies',
     usage: '.movie <movie name>',
     category: 'media',
     ownerOnly: false,
@@ -389,12 +177,12 @@ module.exports = {
         const { from, sender, reply, react } = context;
 
         if (args.length === 0) {
-            await reply(`🎬 *Movie Downloader*\n\n` +
+            await reply(`🎬 *Movie Link Finder*\n\n` +
                        `Usage: \`${config.prefix}movie <movie name>\`\n\n` +
                        `*Examples:*\n` +
                        `• \`${config.prefix}movie 3 idiots\`\n` +
                        `• \`${config.prefix}movie stranger things\`\n\n` +
-                       `*Note:* Only bot owners can use this command.`);
+                       `*Note:* Returns direct download/stream links without downloading.`);
             return;
         }
 
@@ -455,8 +243,8 @@ module.exports = {
             }
             
             const sentMsg = await sendButtons(sock, from, {
-                text: `📋 *Found ${results.length} results for "${query}"*\n\nSelect a movie to continue:`,
-                footer: 'Movie Downloader',
+                text: `📋 *Found ${results.length} results for "${query}"*\n\nSelect a movie to get download link:`,
+                footer: 'Movie Link Finder',
                 buttons: buttons,
                 aimode: FORCE_AI_MODE
             }, { quoted: msg });
@@ -546,8 +334,8 @@ module.exports = {
                         }
                         
                         const sentMsg = await sendButtons(sock, from, {
-                            text: `🎬 *${selectedMovie.title}*\n\n📥 Choose quality:`,
-                            footer: 'Movie Downloader',
+                            text: `🎬 *${selectedMovie.title}*\n\n📥 Choose quality to get download link:`,
+                            footer: 'Movie Link Finder',
                             buttons: qualityButtons,
                             aimode: FORCE_AI_MODE
                         }, {});
@@ -581,52 +369,31 @@ module.exports = {
                 if (index >= 0 && index < qualities.length) {
                     const selectedQuality = qualities[index];
                     
-                    await reply(`⏳ Preparing download for *${selectedMovie.title}* (${selectedQuality.quality})...`);
+                    await reply(`⏳ Getting direct link for *${selectedMovie.title}* (${selectedQuality.quality})...`);
                     
                     try {
-                        const downloadUrl = await getDownloadUrl(page, selectedQuality);
+                        const downloadUrl = await getDirectDownloadUrl(page, selectedQuality);
                         
                         if (!downloadUrl) {
                             await reply(`❌ Failed to get direct download link.`);
                             return true;
                         }
                         
-                        const fileName = `${selectedMovie.title.replace(/[^a-zA-Z0-9]/g, '_')}_${selectedQuality.quality}.mp4`;
-                        const filePath = path.join(process.cwd(), 'temp', fileName);
-                        const tempDir = path.dirname(filePath);
-                        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-                        
-                        const progressMsg = await reply(`📥 Downloading: 0%`);
-                        
-                        const onDownloadProgress = async (percent) => {
-                            await sock.sendMessage(from, { edit: progressMsg.key, text: `📥 Downloading: ${percent}%` });
-                        };
-                        
-                        await downloadFile(downloadUrl, filePath, onDownloadProgress);
-                        
-                        await sock.sendMessage(from, { edit: progressMsg.key, text: `📤 Uploading to Google Drive...` });
-                        
-                        const onUploadProgress = async (percent) => {
-                            await sock.sendMessage(from, { edit: progressMsg.key, text: `📤 Uploading: ${percent}%` });
-                        };
-                        
-                        const uploadResult = await uploadToDrive(filePath, fileName, onUploadProgress);
-                        
-                        fs.unlinkSync(filePath);
                         await page.close();
                         sessionManager.clearSession(session.id);
                         
-                        await reply(`✅ *Movie Uploaded Successfully!*\n\n` +
+                        await reply(`✅ *Direct Link Found!*\n\n` +
                                    `🎬 *Title:* ${selectedMovie.title}\n` +
-                                   `📊 *Size:* ${uploadResult.size} MB\n` +
-                                   `📥 *Download Link:* ${uploadResult.directLink}\n\n` +
-                                   `🔗 *View Link:* ${uploadResult.viewLink}`);
+                                   `📺 *Quality:* ${selectedQuality.quality}\n` +
+                                   `📊 *Size:* ${selectedQuality.size}\n\n` +
+                                   `🔗 *Direct Download/Stream Link:*\n${downloadUrl}\n\n` +
+                                   `⚠️ *Note:* This link may expire. Download or stream immediately.`);
                         
                         await react('✅');
                         
                     } catch (error) {
-                        console.error('[MOVIE] Download/Upload error:', error);
-                        await reply(`❌ Failed: ${error.message}`);
+                        console.error('[MOVIE] Error getting direct link:', error);
+                        await reply(`❌ Failed to get direct link: ${error.message}`);
                         await react('❌');
                     }
                 }
