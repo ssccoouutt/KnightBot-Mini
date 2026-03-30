@@ -1,34 +1,29 @@
-FROM node:22-alpine
+FROM node:22-bullseye
 
-# Install all required system dependencies
-RUN apk add --no-cache \
+# Install build tools and canvas dependencies
+RUN apt-get update && apt-get install -y \
     git \
     python3 \
     make \
     g++ \
-    bash \
-    cairo-dev \
-    jpeg-dev \
-    pango-dev \
-    giflib-dev \
-    pixman-dev \
-    libjpeg-turbo-dev \
-    freetype-dev \
-    build-base
+    build-essential \
+    libcairo2-dev \
+    libjpeg-dev \
+    libpango1.0-dev \
+    libgif-dev \
+    librsvg2-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy package files first (better caching)
+# Copy package files first
 COPY package*.json ./
 
-# Install npm dependencies
+# Install dependencies
 RUN npm install
 
 # Copy application source
 COPY . .
-
-# Set environment
-ENV NODE_ENV=production
 
 # Start the bot
 CMD ["node", "index.js"]
