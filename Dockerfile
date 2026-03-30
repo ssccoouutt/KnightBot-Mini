@@ -1,18 +1,18 @@
-FROM node:18-alpine
+FROM node:22-alpine
 
-# Install git and other build dependencies
-RUN apk add --no-cache git python3 make g++
+# Install git and build tools (required for some npm packages)
+RUN apk add --no-cache git python3 make g++ bash
 
 WORKDIR /app
 
-# Copy package files
+# Copy package files first (better layer caching)
 COPY package*.json ./
 
 # Install dependencies
 RUN npm install
 
-# Copy rest of the application
+# Copy the rest of the application
 COPY . .
 
-# Start the bot
+# Start the bot directly
 CMD ["node", "index.js"]
