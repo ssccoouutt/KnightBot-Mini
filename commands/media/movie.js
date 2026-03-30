@@ -1,17 +1,10 @@
 /**
- * Movie Downloader - Search and get direct download/stream link
- * 
- * MODIFIED: Only returns direct download/stream link without downloading or uploading
+ * Movie Downloader - Simplified version
+ * Shows first 5 results, selects best match, displays all quality links
  */
 
 const { chromium } = require('playwright');
 const config = require('../../config');
-const sessionManager = require('../../utils/sessionManager');
-const giftedBtns = require('gifted-btns');
-const { sendButtons, sendInteractiveMessage } = giftedBtns;
-
-// Force AI mode ON for gifted buttons
-const FORCE_AI_MODE = true;
 
 // Cineverse base URL
 const CINEVERSE_BASE = "https://cineverse.name.ng";
@@ -168,7 +161,7 @@ async function getDirectDownloadUrl(page, qualityInfo) {
 module.exports = {
     name: 'movie',
     aliases: ['cinema', 'cineverse', 'movielink'],
-    description: 'Search and get direct download/stream link for movies',
+    description: 'Search movies and get direct download links for all qualities',
     usage: '.movie <movie name>',
     category: 'media',
     ownerOnly: false,
@@ -182,224 +175,128 @@ module.exports = {
                        `*Examples:*\n` +
                        `• \`${config.prefix}movie 3 idiots\`\n` +
                        `• \`${config.prefix}movie stranger things\`\n\n` +
-                       `*Note:* Returns direct download/stream links without downloading.`);
+                       `*Features:*\n` +
+                       `• Shows top 5 search results\n` +
+                       `• Auto-selects best match (first result)\n` +
+                       `• Returns direct links for all available qualities`);
             return;
         }
 
         const query = args.join(' ');
         
         await react('🔍');
-        
-        const session = sessionManager.createSession(sender, from, this.name, {
-            step: 'searching',
-            query: query,
-            results: [],
-            selectedMovie: null,
-            qualities: [],
-            page: null,
-            browser: null
-        });
-        
         await reply(`🔍 Searching for: *${query}*...`);
         
+        let browser = null;
+        let page = null;
+        
         try {
-            const browser = await getBrowser();
-            const page = await browser.newPage();
+            browser = await getBrowser();
+            page = await browser.newPage();
             
-            sessionManager.updateSession(sender, from, {
-                page: page,
-                browser: browser
-            });
-            
+            // Search for movies
             const results = await searchMovie(page, query);
             
             if (!results || results.length === 0) {
                 await reply(`❌ No results found for "${query}".\n\nTry a different search term.`);
-                await page.close();
-                sessionManager.clearSession(session.id);
                 await react('❌');
                 return;
             }
             
-            sessionManager.updateSession(sender, from, {
-                step: 'selecting',
-                results: results,
-                query: query
-            });
+            // Show top 5 results
+            const topResults = results.slice(0, 5);
+            let resultsMessage = `📋 *Search Results for "${query}"*\n\n`;
+            for (let i = 0; i < topResults.length; i++) {
+                const result = topResults[i];
+                resultsMessage += `${i + 1}. *${result.title}*`;
+                if (result.year) resultsMessage += ` (${result.year})`;
+                if (result.rating) resultsMessage += ` ⭐${result.rating}`;
+                resultsMessage += `\n`;
+            }
+            resultsMessage += `\n✅ *Auto-selecting best match:* ${topResults[0].title}`;
+            await reply(resultsMessage);
             
-            const sessionId = session.id.split(':').pop();
+            // Select best match (first result)
+            const selectedMovie = topResults[0];
             
-            const buttons = [];
-            for (let i = 0; i < Math.min(10, results.length); i++) {
-                const result = results[i];
-                let buttonText = result.title;
-                if (result.year) buttonText += ` (${result.year})`;
-                if (result.rating) buttonText += ` ⭐${result.rating}`;
-                
-                buttons.push({
-                    id: `movie_${sessionId}_${i}`,
-                    text: buttonText.substring(0, 50)
-                });
+            await reply(`🎬 *${selectedMovie.title}*\n\n⏳ Fetching download links for all qualities...`);
+            
+            // Get all quality options
+            const qualities = await getDownloadOptions(page, selectedMovie.url);
+            
+            if (!qualities || qualities.length === 0) {
+                await reply(`❌ No download options found for *${selectedMovie.title}*`);
+                await react('❌');
+                return;
             }
             
-            const sentMsg = await sendButtons(sock, from, {
-                text: `📋 *Found ${results.length} results for "${query}"*\n\nSelect a movie to get download link:`,
-                footer: 'Movie Link Finder',
-                buttons: buttons,
-                aimode: FORCE_AI_MODE
-            }, { quoted: msg });
+            // Get download links for all qualities
+            await reply(`📥 Capturing direct links for ${qualities.length} quality option(s)...`);
             
-            sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
+            const qualityLinks = [];
+            for (let i = 0; i < qualities.length; i++) {
+                const quality = qualities[i];
+                await reply(`🔗 Fetching ${quality.quality} link...`);
+                
+                try {
+                    const downloadUrl = await getDirectDownloadUrl(page, quality);
+                    if (downloadUrl) {
+                        qualityLinks.push({
+                            quality: quality.quality,
+                            size: quality.size,
+                            url: downloadUrl
+                        });
+                    } else {
+                        qualityLinks.push({
+                            quality: quality.quality,
+                            size: quality.size,
+                            url: "❌ Failed to capture link"
+                        });
+                    }
+                } catch (error) {
+                    qualityLinks.push({
+                        quality: quality.quality,
+                        size: quality.size,
+                        url: `❌ Error: ${error.message}`
+                    });
+                }
+                
+                // Small delay between requests to avoid overwhelming the site
+                await page.waitForTimeout(1000);
+            }
+            
+            // Prepare final message with all links
+            let finalMessage = `✅ *Movie Links Found!*\n\n`;
+            finalMessage += `🎬 *Title:* ${selectedMovie.title}\n`;
+            if (selectedMovie.year) finalMessage += `📅 *Year:* ${selectedMovie.year}\n`;
+            if (selectedMovie.rating) finalMessage += `⭐ *Rating:* ${selectedMovie.rating}\n`;
+            finalMessage += `\n📥 *Download Links:*\n\n`;
+            
+            for (const link of qualityLinks) {
+                finalMessage += `*${link.quality}* (${link.size})\n`;
+                finalMessage += `${link.url}\n\n`;
+            }
+            
+            finalMessage += `⚠️ *Note:* Links may expire. Download or stream immediately.\n`;
+            finalMessage += `💡 Use a download manager for better speed.`;
+            
+            await reply(finalMessage);
             await react('✅');
             
         } catch (error) {
-            console.error('[MOVIE] Search error:', error);
-            await reply(`❌ Search failed: ${error.message}`);
-            sessionManager.clearSession(session.id);
+            console.error('[MOVIE] Error:', error);
+            await reply(`❌ Failed to process request: ${error.message}`);
             await react('❌');
+        } finally {
+            // Clean up
+            if (page) {
+                try {
+                    await page.close();
+                } catch (e) {
+                    console.error('[MOVIE] Error closing page:', e.message);
+                }
+            }
+            // Don't close browser instance as it might be reused
         }
-    },
-    
-    async handleSession(sock, msg, session, context) {
-        const { from, sender, reply, react, isButtonClick } = context;
-        
-        if (isButtonClick) {
-            let buttonId = null;
-            
-            if (msg.message?.buttonsResponseMessage) {
-                buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
-            } else if (msg.message?.listResponseMessage) {
-                const listReply = msg.message.listResponseMessage.singleSelectReply;
-                if (listReply) buttonId = listReply.selectedRowId;
-            } else if (msg.message?.interactiveResponseMessage) {
-                const interactive = msg.message.interactiveResponseMessage;
-                if (interactive.nativeFlowResponseMessage) {
-                    try {
-                        const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
-                        buttonId = params.id;
-                    } catch (e) {}
-                }
-            } else if (msg.message?.templateButtonReplyMessage) {
-                buttonId = msg.message.templateButtonReplyMessage.selectedId;
-            }
-            
-            if (buttonId && buttonId.startsWith('movie_')) {
-                const parts = buttonId.split('_');
-                const index = parseInt(parts[2]);
-                const results = session.data.results;
-                const page = session.data.page;
-                
-                if (!page) {
-                    await reply(`❌ Session expired. Please search again.`);
-                    sessionManager.clearSession(session.id);
-                    return true;
-                }
-                
-                if (index >= 0 && index < results.length) {
-                    const selectedMovie = results[index];
-                    
-                    await reply(`🎬 *${selectedMovie.title}*\n\n⏳ Getting download options...`);
-                    
-                    sessionManager.updateSession(sender, from, {
-                        step: 'getting_qualities',
-                        selectedMovie: selectedMovie
-                    });
-                    
-                    try {
-                        const qualities = await getDownloadOptions(page, selectedMovie.url);
-                        
-                        if (!qualities || qualities.length === 0) {
-                            await reply(`❌ No download options found for *${selectedMovie.title}*`);
-                            await page.close();
-                            sessionManager.clearSession(session.id);
-                            await react('❌');
-                            return true;
-                        }
-                        
-                        sessionManager.updateSession(sender, from, {
-                            step: 'selecting_quality',
-                            qualities: qualities,
-                            selectedMovie: selectedMovie
-                        });
-                        
-                        const sessionId = session.id.split(':').pop();
-                        
-                        const qualityButtons = [];
-                        for (let i = 0; i < qualities.length; i++) {
-                            const q = qualities[i];
-                            qualityButtons.push({
-                                id: `quality_${sessionId}_${i}`,
-                                text: `${q.quality} - ${q.size}`
-                            });
-                        }
-                        
-                        const sentMsg = await sendButtons(sock, from, {
-                            text: `🎬 *${selectedMovie.title}*\n\n📥 Choose quality to get download link:`,
-                            footer: 'Movie Link Finder',
-                            buttons: qualityButtons,
-                            aimode: FORCE_AI_MODE
-                        }, {});
-                        
-                        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
-                        
-                    } catch (error) {
-                        console.error('[MOVIE] Error getting qualities:', error);
-                        await reply(`❌ Failed to get download options: ${error.message}`);
-                        await page.close();
-                        sessionManager.clearSession(session.id);
-                        await react('❌');
-                    }
-                }
-                return true;
-            }
-            
-            if (buttonId && buttonId.startsWith('quality_')) {
-                const parts = buttonId.split('_');
-                const index = parseInt(parts[2]);
-                const qualities = session.data.qualities;
-                const selectedMovie = session.data.selectedMovie;
-                const page = session.data.page;
-                
-                if (!page || !selectedMovie || !qualities) {
-                    await reply(`❌ Session expired. Please search again.`);
-                    sessionManager.clearSession(session.id);
-                    return true;
-                }
-                
-                if (index >= 0 && index < qualities.length) {
-                    const selectedQuality = qualities[index];
-                    
-                    await reply(`⏳ Getting direct link for *${selectedMovie.title}* (${selectedQuality.quality})...`);
-                    
-                    try {
-                        const downloadUrl = await getDirectDownloadUrl(page, selectedQuality);
-                        
-                        if (!downloadUrl) {
-                            await reply(`❌ Failed to get direct download link.`);
-                            return true;
-                        }
-                        
-                        await page.close();
-                        sessionManager.clearSession(session.id);
-                        
-                        await reply(`✅ *Direct Link Found!*\n\n` +
-                                   `🎬 *Title:* ${selectedMovie.title}\n` +
-                                   `📺 *Quality:* ${selectedQuality.quality}\n` +
-                                   `📊 *Size:* ${selectedQuality.size}\n\n` +
-                                   `🔗 *Direct Download/Stream Link:*\n${downloadUrl}\n\n` +
-                                   `⚠️ *Note:* This link may expire. Download or stream immediately.`);
-                        
-                        await react('✅');
-                        
-                    } catch (error) {
-                        console.error('[MOVIE] Error getting direct link:', error);
-                        await reply(`❌ Failed to get direct link: ${error.message}`);
-                        await react('❌');
-                    }
-                }
-                return true;
-            }
-        }
-        return false;
     }
 };
