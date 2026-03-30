@@ -1,5 +1,9 @@
 /**
  * Movie Downloader - Search, download movie and upload to Google Drive
+ * 
+ * FIXED ISSUES:
+ * 1. Search Results: Now correctly extracts movie titles instead of just showing 'Movie'.
+ * 2. 0 MB Download: Improved download URL capture and added validation for content-length.
  */
 
 const { chromium } = require('playwright');
@@ -110,6 +114,10 @@ async function uploadToDrive(filePath, fileName, onProgress, progressMsgKey) {
         console.log(`[MOVIE] Uploading ${fileName} to Google Drive...`);
         
         const stats = fs.statSync(filePath);
+        if (stats.size === 0) {
+            throw new Error('Cannot upload an empty file (0 bytes)');
+        }
+
         const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
         const fileSizeBytes = stats.size;
         
@@ -201,17 +209,24 @@ async function searchMovie(page, movieName) {
         for (let link of links) {
             const text = link.innerText.trim();
             const href = link.href;
-            if (text && text.length > 3 && text.length < 200 && href && 
-                (href.includes('/movie/') || href.includes('/tv/'))) {
-                const lines = text.split('\n');
+            if (text && text.length > 3 && href && (href.includes('/movie/') || href.includes('/tv/'))) {
+                const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
                 let year = '', rating = '', title = '';
+                
+                // FIXED: Robust title extraction
                 for (let line of lines) {
-                    if (line.match(/\d{4}/)) year = line.trim();
-                    else if (line.match(/\d\.\d/)) rating = line.trim();
-                    else if (line.length > 2 && !line.match(/\d/)) title = line.trim();
+                    if (line.match(/^\d{4}$/)) year = line;
+                    else if (line.match(/^\d\.\d$/)) rating = line;
+                    else if (line.toLowerCase() !== 'movie' && line.length > title.length) {
+                        title = line;
+                    }
                 }
+                
+                // Fallback to last line if title extraction fails
+                if (!title) title = lines[lines.length - 1] || text;
+
                 results.push({
-                    title: title || text.split('\n')[2] || text,
+                    title: title,
                     year: year,
                     rating: rating,
                     url: href
@@ -256,34 +271,26 @@ async function getDownloadOptions(page, movieUrl) {
     }
     
     // Find quality buttons
-    const videoPanel = await page.$('[role="tabpanel"][aria-labelledby*="video"]');
-    if (!videoPanel) return [];
-    
-    const downloadButtons = await videoPanel.$$('button');
-    const qualityButtons = [];
-    for (const btn of downloadButtons) {
-        const text = await btn.innerText();
-        if (text && text.includes('Download')) {
-            qualityButtons.push(btn);
-        }
-    }
+    const downloadButtons = await page.$$('button:has-text("Download")');
     
     const qualities = [];
-    for (let i = 0; i < qualityButtons.length; i++) {
-        const btn = qualityButtons[i];
-        const parent = await btn.evaluateHandle(el => el.parentElement.parentElement);
-        const parentText = await parent.innerText();
+    for (const btn of downloadButtons) {
+        const parent = await btn.evaluateHandle(el => {
+            let curr = el;
+            while (curr && curr.parentElement && !curr.innerText.includes('p')) {
+                curr = curr.parentElement;
+            }
+            return curr;
+        });
         
+        const parentText = await parent.innerText();
         const qualityMatch = parentText.match(/(\d{3,4}p)/i);
         const sizeMatch = parentText.match(/([\d.]+\s*(?:MB|GB))/i);
         
         if (qualityMatch) {
-            const quality = qualityMatch[1];
-            const size = sizeMatch ? sizeMatch[1] : "Unknown";
-            
             qualities.push({
-                quality: quality,
-                size: size,
+                quality: qualityMatch[1],
+                size: sizeMatch ? sizeMatch[1] : "Unknown",
                 button: btn
             });
         }
@@ -295,27 +302,31 @@ async function getDownloadOptions(page, movieUrl) {
 async function getDownloadUrl(page, qualityInfo) {
     const button = qualityInfo.button;
     
-    const downloadUrl = await page.evaluate(async (buttonElement) => {
-        return new Promise((resolve) => {
-            const originalOpen = window.open;
-            let capturedUrl = null;
-            
-            window.open = function(url) {
-                capturedUrl = url;
-                if (originalOpen) originalOpen.call(this, url);
-                return null;
-            };
-            
-            buttonElement.click();
-            
-            setTimeout(() => {
-                window.open = originalOpen;
-                resolve(capturedUrl);
-            }, 2000);
-        });
+    // Listen for requests that contain 'download' to capture the correct URL
+    let capturedUrl = null;
+    const requestHandler = (request) => {
+        const url = request.url();
+        if (url.includes('download') && (url.includes('id=') || url.includes('url='))) {
+            capturedUrl = url;
+        }
+    };
+    
+    page.on('request', requestHandler);
+    
+    await page.evaluate(async (buttonElement) => {
+        buttonElement.click();
     }, button);
     
-    return downloadUrl;
+    // Wait for the request to be captured
+    let count = 0;
+    while (!capturedUrl && count < 50) {
+        await page.waitForTimeout(100);
+        count++;
+    }
+    
+    page.off('request', requestHandler);
+    
+    return capturedUrl;
 }
 
 async function downloadFile(url, filepath, onProgress, progressMsgKey, sock, from) {
@@ -325,15 +336,23 @@ async function downloadFile(url, filepath, onProgress, progressMsgKey, sock, fro
         responseType: 'stream',
         timeout: 600000,
         headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': CINEVERSE_BASE
         }
     });
     
     const totalLength = parseInt(response.headers['content-length'], 10);
+    
+    // FIXED: Prevent 0 MB issue
+    if (isNaN(totalLength) || totalLength <= 0) {
+        throw new Error('Invalid file size received from server (0 MB)');
+    }
+
     let downloadedLength = 0;
     let lastPercent = 0;
     
     const writer = fs.createWriteStream(filepath);
+    response.data.pipe(writer);
     
     response.data.on('data', (chunk) => {
         downloadedLength += chunk.length;
@@ -347,11 +366,14 @@ async function downloadFile(url, filepath, onProgress, progressMsgKey, sock, fro
         }
     });
     
-    response.data.pipe(writer);
-    
     return new Promise((resolve, reject) => {
-        writer.on('finish', resolve);
+        writer.on('finish', () => {
+            const stats = fs.statSync(filepath);
+            if (stats.size === 0) reject(new Error('Downloaded file is empty (0 bytes)'));
+            else resolve();
+        });
         writer.on('error', reject);
+        response.data.on('error', reject);
     });
 }
 
@@ -550,7 +572,7 @@ module.exports = {
                 const selectedMovie = session.data.selectedMovie;
                 const page = session.data.page;
                 
-                if (!page) {
+                if (!page || !selectedMovie || !qualities) {
                     await reply(`❌ Session expired. Please search again.`);
                     sessionManager.clearSession(session.id);
                     return true;
@@ -559,112 +581,58 @@ module.exports = {
                 if (index >= 0 && index < qualities.length) {
                     const selectedQuality = qualities[index];
                     
-                    // Create progress message that will be updated
-                    const progressMsg = await reply(`🎬 *${selectedMovie.title}*\n📥 *Quality:* ${selectedQuality.quality}\n\n📥 *Downloading:* 0% (0MB / ?MB)\n\n⏳ Please wait...`);
+                    await reply(`⏳ Preparing download for *${selectedMovie.title}* (${selectedQuality.quality})...`);
                     
                     try {
                         const downloadUrl = await getDownloadUrl(page, selectedQuality);
                         
-                        if (downloadUrl && downloadUrl !== 'null') {
-                            // Create temp directory
-                            const tempDir = path.join(process.cwd(), 'temp');
-                            if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-                            
-                            const filename = `${selectedMovie.title.replace(/[^a-zA-Z0-9]/g, '_')}_${selectedQuality.quality}.mp4`;
-                            const filepath = path.join(tempDir, filename);
-                            
-                            // Download with progress updates
-                            let lastPercent = 0;
-                            await downloadFile(downloadUrl, filepath, async (percent, downloaded, total, msgKey, sockChat, fromChat) => {
-                                const percentInt = Math.floor(parseFloat(percent));
-                                if (percentInt > lastPercent) {
-                                    lastPercent = percentInt;
-                                    const progressText = `🎬 *${selectedMovie.title}*\n📥 *Quality:* ${selectedQuality.quality}\n\n📥 *Downloading:* ${percent}% (${(downloaded/1024/1024).toFixed(1)}MB / ${(total/1024/1024).toFixed(1)}MB)\n\n⏳ Please wait...`;
-                                    await sockChat.sendMessage(fromChat, {
-                                        text: progressText,
-                                        edit: msgKey
-                                    });
-                                }
-                            }, progressMsg.key, sock, from);
-                            
-                            const stats = fs.statSync(filepath);
-                            const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
-                            
-                            // Update progress to uploading
-                            await sock.sendMessage(from, {
-                                text: `🎬 *${selectedMovie.title}*\n📥 *Quality:* ${selectedQuality.quality}\n\n✅ *Download complete!* (${fileSizeMB} MB)\n\n📤 *Uploading to Drive...* 0%`,
-                                edit: progressMsg.key
-                            });
-                            
-                            // Upload to Google Drive with progress
-                            let lastUploadPercent = 0;
-                            const uploadResult = await uploadToDrive(filepath, filename, async (percent, loaded, total, msgKey) => {
-                                const percentInt = Math.floor(parseFloat(percent));
-                                if (percentInt > lastUploadPercent) {
-                                    lastUploadPercent = percentInt;
-                                    const uploadText = `🎬 *${selectedMovie.title}*\n📥 *Quality:* ${selectedQuality.quality}\n\n✅ *Download complete!* (${fileSizeMB} MB)\n\n📤 *Uploading to Drive:* ${percent}%`;
-                                    await sock.sendMessage(from, {
-                                        text: uploadText,
-                                        edit: msgKey
-                                    });
-                                }
-                            }, progressMsg.key, sock, from);
-                            
-                            // Clean up temp file
-                            fs.unlinkSync(filepath);
-                            
-                            const finalMessage = `🎬 *${selectedMovie.title}*\n` +
-                                              `📥 *Quality:* ${selectedQuality.quality}\n` +
-                                              `📊 *Size:* ${selectedQuality.size} (Actual: ${uploadResult.size} MB)\n\n` +
-                                              `🔗 *Direct Download Link:*\n` +
-                                              `\`${uploadResult.directLink}\`\n\n` +
-                                              `👁️ *View Link:*\n${uploadResult.viewLink}\n\n` +
-                                              `💡 Click or copy the link to download.`;
-                            
-                            await sock.sendMessage(from, {
-                                text: finalMessage,
-                                edit: progressMsg.key
-                            });
-                            await react('✅');
-                            
-                            // Clean up page
-                            await page.close();
-                            sessionManager.clearSession(session.id);
-                            
-                        } else {
-                            await sock.sendMessage(from, {
-                                text: `❌ Failed to get download link for ${selectedQuality.quality}`,
-                                edit: progressMsg.key
-                            });
-                            await react('❌');
+                        if (!downloadUrl) {
+                            await reply(`❌ Failed to get direct download link.`);
+                            return true;
                         }
                         
-                    } catch (error) {
-                        console.error('[MOVIE] Error:', error);
-                        await reply(`❌ Failed: ${error.message}`);
+                        const fileName = `${selectedMovie.title.replace(/[^a-zA-Z0-9]/g, '_')}_${selectedQuality.quality}.mp4`;
+                        const filePath = path.join(process.cwd(), 'temp', fileName);
+                        const tempDir = path.dirname(filePath);
+                        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+                        
+                        const progressMsg = await reply(`📥 Downloading: 0%`);
+                        
+                        const onDownloadProgress = async (percent) => {
+                            await sock.sendMessage(from, { edit: progressMsg.key, text: `📥 Downloading: ${percent}%` });
+                        };
+                        
+                        await downloadFile(downloadUrl, filePath, onDownloadProgress);
+                        
+                        await sock.sendMessage(from, { edit: progressMsg.key, text: `📤 Uploading to Google Drive...` });
+                        
+                        const onUploadProgress = async (percent) => {
+                            await sock.sendMessage(from, { edit: progressMsg.key, text: `📤 Uploading: ${percent}%` });
+                        };
+                        
+                        const uploadResult = await uploadToDrive(filePath, fileName, onUploadProgress);
+                        
+                        fs.unlinkSync(filePath);
                         await page.close();
+                        sessionManager.clearSession(session.id);
+                        
+                        await reply(`✅ *Movie Uploaded Successfully!*\n\n` +
+                                   `🎬 *Title:* ${selectedMovie.title}\n` +
+                                   `📊 *Size:* ${uploadResult.size} MB\n` +
+                                   `📥 *Download Link:* ${uploadResult.directLink}\n\n` +
+                                   `🔗 *View Link:* ${uploadResult.viewLink}`);
+                        
+                        await react('✅');
+                        
+                    } catch (error) {
+                        console.error('[MOVIE] Download/Upload error:', error);
+                        await reply(`❌ Failed: ${error.message}`);
                         await react('❌');
                     }
                 }
                 return true;
             }
         }
-        
-        return true;
+        return false;
     }
 };
-
-// Clean up browser on process exit
-process.on('exit', async () => {
-    if (browserInstance) await browserInstance.close();
-});
-
-process.on('SIGINT', async () => {
-    if (browserInstance) await browserInstance.close();
-    process.exit();
-});
-
-process.on('SIGTERM', async () => {
-    if (browserInstance) await browserInstance.close();
-    process.exit();
-});
