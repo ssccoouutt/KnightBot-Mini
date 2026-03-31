@@ -1,5 +1,5 @@
 /**
- * Movie Downloader - Simplified version with minimal messages
+ * Movie Downloader - Simplified version
  * Shows first 5 results, selects best match, displays all quality links
  */
 
@@ -42,6 +42,7 @@ async function searchMovie(page, movieName) {
                 const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
                 let year = '', rating = '', title = '';
                 
+                // Robust title extraction
                 for (let line of lines) {
                     if (line.match(/^\d{4}$/)) year = line;
                     else if (line.match(/^\d\.\d$/)) rating = line;
@@ -50,6 +51,7 @@ async function searchMovie(page, movieName) {
                     }
                 }
                 
+                // Fallback to last line if title extraction fails
                 if (!title) title = lines[lines.length - 1] || text;
 
                 results.push({
@@ -78,6 +80,7 @@ async function getDownloadOptions(page, movieUrl) {
     await page.goto(movieUrl, { waitUntil: 'networkidle', timeout: 30000 });
     await page.waitForTimeout(3000);
     
+    // Click Download button
     const buttons = await page.$$('button');
     for (const btn of buttons) {
         const text = await btn.innerText();
@@ -89,12 +92,14 @@ async function getDownloadOptions(page, movieUrl) {
     
     await page.waitForTimeout(3000);
     
+    // Click Video tab
     const videoTab = await page.$('button:has-text("Video")');
     if (videoTab) {
         await videoTab.click();
         await page.waitForTimeout(1000);
     }
     
+    // Find quality buttons
     const downloadButtons = await page.$$('button:has-text("Download")');
     
     const qualities = [];
@@ -126,6 +131,7 @@ async function getDownloadOptions(page, movieUrl) {
 async function getDirectDownloadUrl(page, qualityInfo) {
     const button = qualityInfo.button;
     
+    // Listen for requests that contain 'download' to capture the correct URL
     let capturedUrl = null;
     const requestHandler = (request) => {
         const url = request.url();
@@ -140,6 +146,7 @@ async function getDirectDownloadUrl(page, qualityInfo) {
         buttonElement.click();
     }, button);
     
+    // Wait for the request to be captured
     let count = 0;
     while (!capturedUrl && count < 50) {
         await page.waitForTimeout(100);
@@ -160,20 +167,25 @@ module.exports = {
     ownerOnly: false,
 
     async execute(sock, msg, args, context) {
-        const { from, reply, react } = context;
+        const { from, sender, reply, react } = context;
 
         if (args.length === 0) {
             await reply(`🎬 *Movie Link Finder*\n\n` +
                        `Usage: \`${config.prefix}movie <movie name>\`\n\n` +
                        `*Examples:*\n` +
                        `• \`${config.prefix}movie 3 idiots\`\n` +
-                       `• \`${config.prefix}movie stranger things\``);
+                       `• \`${config.prefix}movie stranger things\`\n\n` +
+                       `*Features:*\n` +
+                       `• Shows top 5 search results\n` +
+                       `• Auto-selects best match (first result)\n` +
+                       `• Returns direct links for all available qualities`);
             return;
         }
 
         const query = args.join(' ');
         
         await react('🔍');
+        await reply(`🔍 Searching for: *${query}*...`);
         
         let browser = null;
         let page = null;
@@ -182,16 +194,32 @@ module.exports = {
             browser = await getBrowser();
             page = await browser.newPage();
             
+            // Search for movies
             const results = await searchMovie(page, query);
             
             if (!results || results.length === 0) {
-                await reply(`❌ No results found for "${query}".`);
+                await reply(`❌ No results found for "${query}".\n\nTry a different search term.`);
                 await react('❌');
                 return;
             }
             
+            // Show top 5 results
             const topResults = results.slice(0, 5);
+            let resultsMessage = `📋 *Search Results for "${query}"*\n\n`;
+            for (let i = 0; i < topResults.length; i++) {
+                const result = topResults[i];
+                resultsMessage += `${i + 1}. *${result.title}*`;
+                if (result.year) resultsMessage += ` (${result.year})`;
+                if (result.rating) resultsMessage += ` ⭐${result.rating}`;
+                resultsMessage += `\n`;
+            }
+            resultsMessage += `\n✅ *Auto-selecting best match:* ${topResults[0].title}`;
+            await reply(resultsMessage);
+            
+            // Select best match (first result)
             const selectedMovie = topResults[0];
+            
+            await reply(`🎬 *${selectedMovie.title}*\n\n⏳ Fetching download links for all qualities...`);
             
             // Get all quality options
             const qualities = await getDownloadOptions(page, selectedMovie.url);
@@ -203,50 +231,72 @@ module.exports = {
             }
             
             // Get download links for all qualities
+            await reply(`📥 Capturing direct links for ${qualities.length} quality option(s)...`);
+            
             const qualityLinks = [];
             for (let i = 0; i < qualities.length; i++) {
                 const quality = qualities[i];
-                const downloadUrl = await getDirectDownloadUrl(page, quality);
+                await reply(`🔗 Fetching ${quality.quality} link...`);
                 
-                qualityLinks.push({
-                    quality: quality.quality,
-                    size: quality.size,
-                    url: downloadUrl || "❌ Failed to capture link"
-                });
+                try {
+                    const downloadUrl = await getDirectDownloadUrl(page, quality);
+                    if (downloadUrl) {
+                        qualityLinks.push({
+                            quality: quality.quality,
+                            size: quality.size,
+                            url: downloadUrl
+                        });
+                    } else {
+                        qualityLinks.push({
+                            quality: quality.quality,
+                            size: quality.size,
+                            url: "❌ Failed to capture link"
+                        });
+                    }
+                } catch (error) {
+                    qualityLinks.push({
+                        quality: quality.quality,
+                        size: quality.size,
+                        url: `❌ Error: ${error.message}`
+                    });
+                }
                 
-                await page.waitForTimeout(500);
+                // Small delay between requests to avoid overwhelming the site
+                await page.waitForTimeout(1000);
             }
             
-            // Prepare final message
-            let finalMessage = `✅ *${selectedMovie.title}*`;
-            if (selectedMovie.year) finalMessage += ` (${selectedMovie.year})`;
-            if (selectedMovie.rating) finalMessage += ` ⭐${selectedMovie.rating}`;
-            finalMessage += `\n\n`;
+            // Prepare final message with all links
+            let finalMessage = `✅ *Movie Links Found!*\n\n`;
+            finalMessage += `🎬 *Title:* ${selectedMovie.title}\n`;
+            if (selectedMovie.year) finalMessage += `📅 *Year:* ${selectedMovie.year}\n`;
+            if (selectedMovie.rating) finalMessage += `⭐ *Rating:* ${selectedMovie.rating}\n`;
+            finalMessage += `\n📥 *Download Links:*\n\n`;
             
             for (const link of qualityLinks) {
-                if (link.url && !link.url.includes('Failed')) {
-                    finalMessage += `🎬 *${link.quality}* (${link.size})\n`;
-                    finalMessage += `${link.url}\n\n`;
-                } else {
-                    finalMessage += `❌ *${link.quality}* (${link.size}) - Link unavailable\n\n`;
-                }
+                finalMessage += `*${link.quality}* (${link.size})\n`;
+                finalMessage += `${link.url}\n\n`;
             }
             
-            finalMessage += `⚠️ *Note:* Links may expire. Download immediately.`;
+            finalMessage += `⚠️ *Note:* Links may expire. Download or stream immediately.\n`;
+            finalMessage += `💡 Use a download manager for better speed.`;
             
             await reply(finalMessage);
             await react('✅');
             
         } catch (error) {
             console.error('[MOVIE] Error:', error);
-            await reply(`❌ Failed: ${error.message}`);
+            await reply(`❌ Failed to process request: ${error.message}`);
             await react('❌');
         } finally {
+            // Clean up
             if (page) {
                 try {
                     await page.close();
-                } catch (e) {}
+                } catch (e) {
+                    console.error('[MOVIE] Error closing page:', e.message);
+                }
             }
+            // Don't close browser instance as it might be reused
         }
     }
 };
