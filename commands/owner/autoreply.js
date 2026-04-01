@@ -1,5 +1,5 @@
 /**
- * AutoReply Manager - Manage automatic replies for specific commands
+ * AutoReply Manager - Manage automatic replies for specific commands with button support
  */
 
 const axios = require('axios');
@@ -25,15 +25,39 @@ let tokenExpiry = null;
 // Store autoreply rules in memory
 let autoreplyRules = new Map();
 
-// Default rules
+// Default rules with buttons
 const DEFAULT_RULES = {
-    "Need-Gemini-Pro": "🤖 *Gemini Pro Access*\n\nYou can use Gemini AI with:\n• `.gemini <question>`\n• Reply to media with `.gemini`\n• `.gemini <question> --file <url>`\n\n*Examples:*\n`.gemini What is AI?`\n`.gemini Analyze this image`",
-    "Need-YouTube-Downloader": "🎬 *YouTube Downloader*\n\nDownload YouTube videos/audio:\n• `.ytvideo <url>` - Download video\n• `.song <url>` - Download audio\n\n*Examples:*\n`.ytvideo https://youtu.be/xxxxx`\n`.song https://youtu.be/xxxxx`",
-    "Need-Instagram-Downloader": "📸 *Instagram Downloader*\n\nDownload Instagram content:\n• `.instagram <url>` - Download photos/videos\n• `.igs <url>` - Convert to sticker\n• `.igsc <url>` - Crop to square sticker\n\n*Example:*\n`.instagram https://www.instagram.com/p/xxxxx`",
-    "Need-TikTok-Downloader": "🎵 *TikTok Downloader*\n\nDownload TikTok videos:\n• `.tiktok <url>` - Download video\n\n*Example:*\n`.tiktok https://www.tiktok.com/@username/video/xxxxx`",
-    "Need-Facebook-Downloader": "📘 *Facebook Downloader*\n\nDownload Facebook videos:\n• `.facebook <url>` - Download video\n\n*Example:*\n`.facebook https://www.facebook.com/watch/?v=xxxxx`",
-    "Need-WhatsApp-Channel": "📢 *WhatsApp Channel*\n\nJoin our official WhatsApp channel:\nhttps://whatsapp.com/channel/0029Va90zAnIHphOuO8Msp3A\n\nGet updates, new features, and announcements!",
-    "Need-Help": "🆘 *Help Menu*\n\nUse these commands to get help:\n• `.menu` - Show all commands\n• `.list` - List commands with descriptions\n• `.ping` - Check bot status\n• `.help <command>` - Get command details\n\nFor specific help:\n• `Need-Gemini-Pro` - Gemini AI info\n• `Need-YouTube-Downloader` - YouTube downloader\n• `Need-Instagram-Downloader` - Instagram downloader\n• `Need-TikTok-Downloader` - TikTok downloader\n• `Need-Facebook-Downloader` - Facebook downloader\n• `Need-WhatsApp-Channel` - Join WhatsApp channel"
+    "Need-Gemini-Pro": {
+        text: "🤖 *Gemini Pro Access*\n\nYou can use Gemini AI with the following options:",
+        buttons: [
+            { id: "gemini_text", text: "💬 Text Query" },
+            { id: "gemini_media", text: "🖼️ Analyze Media" },
+            { id: "gemini_url", text: "🔗 File URL" }
+        ]
+    },
+    "Need-YouTube-Downloader": {
+        text: "🎬 *YouTube Downloader*\n\nDownload YouTube videos/audio with these options:",
+        buttons: [
+            { id: "yt_video", text: "📹 Download Video" },
+            { id: "yt_audio", text: "🎵 Download Audio" }
+        ]
+    },
+    "Need-Instagram-Downloader": {
+        text: "📸 *Instagram Downloader*\n\nDownload Instagram content:",
+        buttons: [
+            { id: "ig_media", text: "📷 Download Media" },
+            { id: "ig_sticker", text: "🔘 Convert to Sticker" }
+        ]
+    },
+    "Need-Help": {
+        text: "🆘 *Help Menu*\n\nWhat do you need help with?",
+        buttons: [
+            { id: "help_gemini", text: "🤖 Gemini AI" },
+            { id: "help_media", text: "🎬 Media Downloaders" },
+            { id: "help_commands", text: "📋 All Commands" },
+            { id: "help_channel", text: "📢 Join Channel" }
+        ]
+    }
 };
 
 // ==================== GOOGLE DRIVE FUNCTIONS ====================
@@ -95,12 +119,18 @@ async function getAccessToken() {
 
 function rulesToText(rules) {
     let text = '# KnightBot-Mini AutoReply Rules\n';
-    text += '# Format: COMMAND | REPLY\n';
-    text += '# Example: Need-Help | This is the help message\n';
+    text += '# Format: COMMAND | TEXT | BUTTONS\n';
+    text += '# Buttons format: id:text,id:text\n';
+    text += '# Example: Need-Help | Help message | help_gemini:🤖 Gemini AI,help_media:🎬 Media\n';
     text += `# Last updated: ${new Date().toLocaleString()}\n\n`;
     
-    for (const [command, reply] of rules) {
-        text += `${command} | ${reply.replace(/\n/g, '\\n')}\n`;
+    for (const [command, rule] of rules) {
+        let line = `${command} | ${rule.text.replace(/\n/g, '\\n')}`;
+        if (rule.buttons && rule.buttons.length > 0) {
+            const buttonsStr = rule.buttons.map(b => `${b.id}:${b.text}`).join(',');
+            line += ` | ${buttonsStr}`;
+        }
+        text += line + '\n';
     }
     
     return text;
@@ -114,13 +144,24 @@ function textToRules(text) {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#')) continue;
         
-        const separatorIndex = trimmed.indexOf('|');
-        if (separatorIndex !== -1) {
-            const command = trimmed.substring(0, separatorIndex).trim();
-            let reply = trimmed.substring(separatorIndex + 1).trim();
-            reply = reply.replace(/\\n/g, '\n');
-            if (command && reply) {
-                rules.set(command, reply);
+        const parts = trimmed.split('|').map(p => p.trim());
+        if (parts.length >= 2) {
+            const command = parts[0];
+            let replyText = parts[1].replace(/\\n/g, '\n');
+            let buttons = [];
+            
+            if (parts.length >= 3 && parts[2]) {
+                const buttonParts = parts[2].split(',');
+                for (const btn of buttonParts) {
+                    const [id, text] = btn.split(':');
+                    if (id && text) {
+                        buttons.push({ id, text });
+                    }
+                }
+            }
+            
+            if (command && replyText) {
+                rules.set(command, { text: replyText, buttons });
             }
         }
     }
@@ -195,6 +236,7 @@ async function writeRulesToDrive(rules) {
                 }
             });
         } else {
+            const FormData = require('form-data');
             const formData = new FormData();
             formData.append('metadata', JSON.stringify({
                 name: 'autoreply_rules.txt',
@@ -233,8 +275,8 @@ async function saveRules() {
     return await writeRulesToDrive(autoreplyRules);
 }
 
-async function addRule(command, reply) {
-    autoreplyRules.set(command, reply);
+async function addRule(command, text, buttons = []) {
+    autoreplyRules.set(command, { text, buttons });
     return await saveRules();
 }
 
@@ -244,18 +286,14 @@ async function removeRule(command) {
     return deleted;
 }
 
-async function toggleRule(command, enabled) {
-    if (autoreplyRules.has(command)) {
-        if (enabled) {
-            // Keep as is
-        } else {
-            // To disable, we could comment out or remove
-            // For simplicity, we'll remove and store in disabled list
-            // But for now, just remove
-            autoreplyRules.delete(command);
-            await saveRules();
-        }
-        return true;
+async function updateRule(command, text, buttons = null) {
+    const existing = autoreplyRules.get(command);
+    if (existing) {
+        autoreplyRules.set(command, {
+            text: text || existing.text,
+            buttons: buttons !== null ? buttons : existing.buttons
+        });
+        return await saveRules();
     }
     return false;
 }
@@ -265,20 +303,137 @@ async function getRule(command) {
 }
 
 async function getAllRules() {
-    return Array.from(autoreplyRules.entries()).map(([cmd, reply]) => ({ command: cmd, reply }));
-}
-
-async function getEnabledCount() {
-    return autoreplyRules.size;
+    return Array.from(autoreplyRules.entries()).map(([cmd, rule]) => ({ 
+        command: cmd, 
+        text: rule.text,
+        buttons: rule.buttons || []
+    }));
 }
 
 async function checkAndReply(sock, from, sender, message, reply) {
     const trimmedMsg = message.trim();
     if (autoreplyRules.has(trimmedMsg)) {
-        const autoReply = autoreplyRules.get(trimmedMsg);
-        await reply(autoReply);
-        console.log(`[AUTOREPLY] Replied to "${trimmedMsg}" from ${sender}`);
+        const rule = autoreplyRules.get(trimmedMsg);
+        
+        if (rule.buttons && rule.buttons.length > 0) {
+            // Send with buttons
+            const sessionId = `${sender}_${Date.now()}`;
+            const buttons = rule.buttons.map((btn, idx) => ({
+                id: `autoreply_${sessionId}_${idx}`,
+                text: btn.text
+            }));
+            
+            const sentMsg = await sendButtons(sock, from, {
+                text: rule.text,
+                footer: 'Auto Reply',
+                buttons: buttons,
+                aimode: FORCE_AI_MODE
+            }, {});
+            
+            // Store button handlers in a temporary map
+            if (!global.autoreplyButtonHandlers) {
+                global.autoreplyButtonHandlers = new Map();
+            }
+            global.autoreplyButtonHandlers.set(sentMsg.key.id, {
+                command: trimmedMsg,
+                buttons: rule.buttons
+            });
+            
+        } else {
+            // Send as plain text
+            await reply(rule.text);
+        }
+        
+        console.log(`[AUTOREPLY] Replied to "${trimmedMsg}" from ${sender} ${rule.buttons.length > 0 ? '(with buttons)' : ''}`);
         return true;
+    }
+    return false;
+}
+
+async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender) {
+    // Handle autoreply button clicks
+    if (buttonId && buttonId.startsWith('autoreply_')) {
+        const parts = buttonId.split('_');
+        const idx = parseInt(parts[2]);
+        
+        // Get the stored handler info
+        if (global.autoreplyButtonHandlers && global.autoreplyButtonHandlers.has(msg.key.id)) {
+            const handler = global.autoreplyButtonHandlers.get(msg.key.id);
+            const button = handler.buttons[idx];
+            
+            if (button) {
+                // Handle specific button actions
+                switch (button.id) {
+                    case 'gemini_text':
+                        await sock.sendMessage(from, {
+                            text: "💬 *Text Query*\n\nUse: `.gemini <your question>`\n\nExample: `.gemini What is artificial intelligence?`"
+                        }, { quoted: msg });
+                        break;
+                    case 'gemini_media':
+                        await sock.sendMessage(from, {
+                            text: "🖼️ *Analyze Media*\n\nReply to any image/video/document with:\n`.gemini`\n\nOr send a file URL:\n`.gemini <question> --file <url>`"
+                        }, { quoted: msg });
+                        break;
+                    case 'gemini_url':
+                        await sock.sendMessage(from, {
+                            text: "🔗 *File URL*\n\nUse: `.gemini <question> --file <url>`\n\nExample: `.gemini What's in this PDF? --file https://example.com/doc.pdf`"
+                        }, { quoted: msg });
+                        break;
+                    case 'yt_video':
+                        await sock.sendMessage(from, {
+                            text: "📹 *Download Video*\n\nUse: `.ytvideo <url>`\n\nExample: `.ytvideo https://youtu.be/xxxxx`"
+                        }, { quoted: msg });
+                        break;
+                    case 'yt_audio':
+                        await sock.sendMessage(from, {
+                            text: "🎵 *Download Audio*\n\nUse: `.song <url>`\n\nExample: `.song https://youtu.be/xxxxx`"
+                        }, { quoted: msg });
+                        break;
+                    case 'ig_media':
+                        await sock.sendMessage(from, {
+                            text: "📷 *Download Media*\n\nUse: `.instagram <url>`\n\nExample: `.instagram https://www.instagram.com/p/xxxxx`"
+                        }, { quoted: msg });
+                        break;
+                    case 'ig_sticker':
+                        await sock.sendMessage(from, {
+                            text: "🔘 *Convert to Sticker*\n\nUse: `.igs <url>` or `.igsc <url>`\n\nExample: `.igs https://www.instagram.com/p/xxxxx`"
+                        }, { quoted: msg });
+                        break;
+                    case 'help_gemini':
+                        await sock.sendMessage(from, {
+                            text: "🤖 *Gemini AI Help*\n\n• `.gemini <question>` - Ask a question\n• Reply to media with `.gemini` - Analyze media\n• `.gemini <q> --file <url>` - Analyze file URL"
+                        }, { quoted: msg });
+                        break;
+                    case 'help_media':
+                        await sock.sendMessage(from, {
+                            text: "🎬 *Media Downloaders*\n\n• `.ytvideo <url>` - YouTube video\n• `.song <url>` - YouTube audio\n• `.instagram <url>` - Instagram\n• `.tiktok <url>` - TikTok\n• `.facebook <url>` - Facebook"
+                        }, { quoted: msg });
+                        break;
+                    case 'help_commands':
+                        await sock.sendMessage(from, {
+                            text: "📋 *All Commands*\n\nUse `.menu` to see all available commands.\nUse `.list` for detailed command list."
+                        }, { quoted: msg });
+                        break;
+                    case 'help_channel':
+                        await sock.sendMessage(from, {
+                            text: "📢 *Join Our Channel*\n\nhttps://whatsapp.com/channel/0029Va90zAnIHphOuO8Msp3A\n\nGet updates, new features, and announcements!"
+                        }, { quoted: msg });
+                        break;
+                    default:
+                        // Generic response for custom buttons
+                        await sock.sendMessage(from, {
+                            text: `📌 *${button.text}*\n\nYou selected: ${button.text}\n\nType .menu for available commands.`
+                        }, { quoted: msg });
+                }
+                
+                // Clean up handler
+                setTimeout(() => {
+                    global.autoreplyButtonHandlers.delete(msg.key.id);
+                }, 60000);
+                
+                return true;
+            }
+        }
     }
     return false;
 }
@@ -287,7 +442,7 @@ module.exports = {
     name: 'autoreply',
     aliases: ['ar', 'autorespond', 'autor'],
     description: 'Manage automatic replies for specific commands',
-    usage: '.autoreply <on|off|list|add|remove|reload> [command] [reply]',
+    usage: '.autoreply <on|off|list|add|remove|update|reload> [command] [text] [buttons]',
     category: 'owner',
     ownerOnly: true,
 
@@ -301,12 +456,14 @@ module.exports = {
                        `*Rules Count:* ${autoreplyRules.size}\n\n` +
                        `*Commands:*\n` +
                        `• \`.autoreply list\` - Show all rules\n` +
-                       `• \`.autoreply add <command> <reply>\` - Add rule\n` +
+                       `• \`.autoreply add <command> <text> [buttons]\` - Add rule\n` +
                        `• \`.autoreply remove <command>\` - Remove rule\n` +
+                       `• \`.autoreply update <command> <text> [buttons]\` - Update rule\n` +
                        `• \`.autoreply reload\` - Reload from Drive\n` +
                        `• \`.autoreply help\` - Show help\n\n` +
+                       `*Button format:* id:text,id:text\n` +
                        `*Example:*\n` +
-                       `.autoreply add Need-Help | This is the help message`);
+                       `.autoreply add Need-Help | Help message | help1:Option 1,help2:Option 2`);
         }
         
         const subCommand = args[0].toLowerCase();
@@ -320,9 +477,13 @@ module.exports = {
             let listMsg = '🤖 *AutoReply Rules*\n\n';
             for (let i = 0; i < Math.min(rules.length, 20); i++) {
                 const rule = rules[i];
-                const replyPreview = rule.reply.length > 50 ? rule.reply.substring(0, 50) + '...' : rule.reply;
+                const textPreview = rule.text.length > 50 ? rule.text.substring(0, 50) + '...' : rule.text;
                 listMsg += `${i + 1}. \`${rule.command}\`\n`;
-                listMsg += `   💬 ${replyPreview}\n\n`;
+                listMsg += `   💬 ${textPreview}\n`;
+                if (rule.buttons && rule.buttons.length > 0) {
+                    listMsg += `   🔘 Buttons: ${rule.buttons.map(b => b.text).join(', ')}\n`;
+                }
+                listMsg += `\n`;
             }
             
             if (rules.length > 20) {
@@ -332,22 +493,76 @@ module.exports = {
             return reply(listMsg);
         }
         
-        if (subCommand === 'add' || subCommand === 'set') {
+        if (subCommand === 'add') {
             if (args.length < 3) {
-                return reply('❌ Usage: .autoreply add <command> <reply>\n\nExample: .autoreply add Need-Help This is the help message');
+                return reply('❌ Usage: .autoreply add <command> | <text> | [buttons]\n\nExample: .autoreply add Need-Help | This is help | btn1:Option 1,btn2:Option 2');
             }
             
-            const command = args[1];
-            const replyText = args.slice(2).join(' ');
+            const fullArgs = args.slice(1).join(' ');
+            const parts = fullArgs.split('|').map(p => p.trim());
             
-            await addRule(command, replyText);
+            if (parts.length < 2) {
+                return reply('❌ Invalid format. Use: command | text | buttons');
+            }
+            
+            const command = parts[0];
+            const text = parts[1];
+            let buttons = [];
+            
+            if (parts.length >= 3 && parts[2]) {
+                const buttonParts = parts[2].split(',');
+                for (const btn of buttonParts) {
+                    const [id, btnText] = btn.split(':');
+                    if (id && btnText) {
+                        buttons.push({ id, text: btnText });
+                    }
+                }
+            }
+            
+            await addRule(command, text, buttons);
             await react('✅');
-            return reply(`✅ *Rule Added*\n\nCommand: \`${command}\`\nReply: ${replyText.substring(0, 100)}${replyText.length > 100 ? '...' : ''}`);
+            return reply(`✅ *Rule Added*\n\nCommand: \`${command}\`\nText: ${text.substring(0, 100)}${text.length > 100 ? '...' : ''}\nButtons: ${buttons.length}`);
+        }
+        
+        if (subCommand === 'update') {
+            if (args.length < 3) {
+                return reply('❌ Usage: .autoreply update <command> | <text> | [buttons]');
+            }
+            
+            const fullArgs = args.slice(1).join(' ');
+            const parts = fullArgs.split('|').map(p => p.trim());
+            
+            if (parts.length < 2) {
+                return reply('❌ Invalid format. Use: command | text | buttons');
+            }
+            
+            const command = parts[0];
+            const text = parts[1];
+            let buttons = null;
+            
+            if (parts.length >= 3 && parts[2]) {
+                buttons = [];
+                const buttonParts = parts[2].split(',');
+                for (const btn of buttonParts) {
+                    const [id, btnText] = btn.split(':');
+                    if (id && btnText) {
+                        buttons.push({ id, text: btnText });
+                    }
+                }
+            }
+            
+            const updated = await updateRule(command, text, buttons);
+            if (updated) {
+                await react('🔄');
+                return reply(`✅ *Rule Updated*\n\nCommand: \`${command}\``);
+            } else {
+                return reply(`❌ Rule not found: \`${command}\``);
+            }
         }
         
         if (subCommand === 'remove' || subCommand === 'delete') {
             if (args.length < 2) {
-                return reply('❌ Usage: .autoreply remove <command>\n\nExample: .autoreply remove Need-Help');
+                return reply('❌ Usage: .autoreply remove <command>');
             }
             
             const command = args[1];
@@ -367,44 +582,19 @@ module.exports = {
             return reply(`✅ *Rules Reloaded*\n\nLoaded ${autoreplyRules.size} rules from Google Drive.`);
         }
         
-        if (subCommand === 'on' || subCommand === 'enable') {
-            await react('✅');
-            return reply(`✅ *AutoReply Enabled*\n\nAuto-reply is active with ${autoreplyRules.size} rules.`);
-        }
-        
-        if (subCommand === 'off' || subCommand === 'disable') {
-            // Clear all rules (but keep defaults? No, just clear)
-            // This is dangerous, so we'll just show status
-            return reply(`⚠️ *AutoReply Status*\n\nAuto-reply is currently ${autoreplyRules.size > 0 ? 'ON' : 'OFF'}.\n\nTo disable all rules, use \`.autoreply clear\` to remove all rules.\n\n*Note:* The bot will still check for commands if rules exist.`);
-        }
-        
-        if (subCommand === 'clear') {
-            // Confirm first
-            return reply(`⚠️ *Warning*\n\nThis will remove ALL auto-reply rules (${autoreplyRules.size} rules).\n\nTo confirm, type: \`.autoreply confirm-clear\``);
-        }
-        
-        if (subCommand === 'confirm-clear') {
-            const oldCount = autoreplyRules.size;
-            autoreplyRules.clear();
-            await saveRules();
-            await react('🗑️');
-            return reply(`✅ *All Rules Cleared*\n\nRemoved ${oldCount} auto-reply rules.`);
-        }
-        
         if (subCommand === 'help') {
             return reply(`🤖 *AutoReply Manager - Help*\n\n` +
                        `*Commands:*\n` +
                        `• \`.autoreply list\` - List all rules\n` +
-                       `• \`.autoreply add <command> <reply>\` - Add new rule\n` +
+                       `• \`.autoreply add <command> | <text> | [buttons]\` - Add new rule\n` +
+                       `• \`.autoreply update <command> | <text> | [buttons]\` - Update rule\n` +
                        `• \`.autoreply remove <command>\` - Remove a rule\n` +
                        `• \`.autoreply reload\` - Reload from Google Drive\n` +
-                       `• \`.autoreply clear\` - Remove all rules\n` +
                        `• \`.autoreply help\` - Show this help\n\n` +
-                       `*How it works:*\n` +
-                       `When someone sends a message that exactly matches a command (case-sensitive), the bot will automatically reply with the configured message.\n\n` +
+                       `*Button Format:*\n` +
+                       `id1:Button Text 1,id2:Button Text 2\n\n` +
                        `*Example:*\n` +
-                       `User: \`Need-Help\`\n` +
-                       `Bot: *Help Message*\n\n` +
+                       `.autoreply add Need-Help | Choose an option | opt1:📱 Option 1,opt2:🎬 Option 2\n\n` +
                        `*Storage:*\n` +
                        `All rules are saved to Google Drive and persist across bot restarts.`);
         }
@@ -419,15 +609,21 @@ module.exports = {
 loadRules().catch(console.error);
 
 // Function to check and reply to messages (to be called from handler)
-async function checkAutoReply(sock, from, sender, message, replyFunc) {
+async function checkAutoReply(sock, from, sender, message, reply) {
     // Only process in private chats
     if (from.endsWith('@g.us')) return false;
     if (from.includes('@broadcast')) return false;
     if (from.includes('@newsletter')) return false;
     
-    return await checkAndReply(sock, from, sender, message, replyFunc);
+    return await checkAndReply(sock, from, sender, message, reply);
+}
+
+// Function to handle button clicks from auto-reply messages
+async function handleAutoReplyButton(sock, msg, buttonId, buttonText, from, sender) {
+    return await handleButtonClick(sock, msg, buttonId, buttonText, from, sender);
 }
 
 module.exports.checkAutoReply = checkAutoReply;
+module.exports.handleAutoReplyButton = handleAutoReplyButton;
 module.exports.loadRules = loadRules;
 module.exports.autoreplyRules = () => autoreplyRules;
