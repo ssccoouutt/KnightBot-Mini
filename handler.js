@@ -11,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const sessionManager = require('./utils/sessionManager');
+const autoreply = require('./commands/owner/autoreply');
 
 // Group metadata cache to prevent rate limiting
 const groupMetadataCache = new Map();
@@ -757,6 +758,17 @@ const handleMessage = async (sock, msg) => {
     }
     
     body = (body || '').trim();
+    
+    // ===== AUTO-REPLY CHECK =====
+    // Check for auto-reply commands (only in private chats, not from bot, not commands)
+    if (!isGroup && !msg.key.fromMe && body && !body.startsWith(config.prefix)) {
+      const autoReplied = await autoreply.checkAutoReply(sock, from, sender, body, (text) => sock.sendMessage(from, { text }, { quoted: msg }));
+      if (autoReplied) {
+        // Message was handled by auto-reply, don't process further
+        console.log(`[AUTOREPLY] Handled message: "${body}" from ${sender}`);
+        return;
+      }
+    }
     
     // Check antiall protection (owner only feature)
     if (isGroup) {
