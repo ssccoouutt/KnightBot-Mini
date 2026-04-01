@@ -1,62 +1,194 @@
 /**
- * JSON-based Database with Google Drive Sync
+ * Message Handler - Processes incoming messages and executes commands
  */
 
+const config = require('./config');
+const database = require('./database');
+const { loadCommands } = require('./utils/commandLoader');
+const { addMessage } = require('./utils/groupstats');
+const { jidDecode, jidEncode, downloadContentFromMessage } = require('@whiskeysockets/baileys');
 const fs = require('fs');
 const path = require('path');
-const { jidDecode, jidEncode } = require('@whiskeysockets/baileys');
-const config = require('./config');
-const driveStorage = require('./utils/driveStorage');
+const axios = require('axios');
+const sessionManager = require('./utils/sessionManager');
+const autoreply = require('./commands/owner/autoreply');
 
-const DB_PATH = path.join(__dirname, 'database');
-const GROUPS_DB = path.join(DB_PATH, 'groups.json');
-const USERS_DB = path.join(DB_PATH, 'users.json');
-const WARNINGS_DB = path.join(DB_PATH, 'warnings.json');
-const MODS_DB = path.join(DB_PATH, 'mods.json');
+// Group metadata cache to prevent rate limiting
+const groupMetadataCache = new Map();
+const CACHE_TTL = 60000; // 1 minute cache
 
-// LID mapping cache (same as handler.js)
-const lidMappingCache = new Map();
+// Load all commands
+const commands = loadCommands();
 
-// Initialize database directory
-if (!fs.existsSync(DB_PATH)) {
-  fs.mkdirSync(DB_PATH, { recursive: true });
-}
-
-// Initialize database files
-const initDB = (filePath, defaultData = {}) => {
-  if (!fs.existsSync(filePath)) {
-    fs.writeFileSync(filePath, JSON.stringify(defaultData, null, 2));
-  }
+// Helper function to convert stream to buffer
+const streamToBuffer = async (stream) => {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    stream.on('data', chunk => chunks.push(chunk));
+    stream.on('end', () => resolve(Buffer.concat(chunks)));
+    stream.on('error', reject);
+  });
 };
 
-initDB(GROUPS_DB, {});
-initDB(USERS_DB, {});
-initDB(WARNINGS_DB, {});
-initDB(MODS_DB, { moderators: [] });
-
-// Read database
-const readDB = (filePath) => {
-  try {
-    const data = fs.readFileSync(filePath, 'utf-8');
-    return JSON.parse(data);
-  } catch (error) {
-    console.error(`Error reading database: ${error.message}`);
-    return {};
-  }
-};
-
-// Write database
-const writeDB = (filePath, data) => {
-  try {
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
-    return true;
-  } catch (error) {
-    console.error(`Error writing database: ${error.message}`);
+// Check if message should be forwarded based on filters
+const shouldForwardMessage = (messageContent, filters) => {
+  if (!filters) return true;
+  
+  const messageType = Object.keys(messageContent)[0];
+  
+  // Determine message type
+  let type = messageType;
+  if (type === 'conversation' || type === 'extendedTextMessage') type = 'text';
+  else if (type === 'imageMessage') type = 'image';
+  else if (type === 'videoMessage') type = 'video';
+  else if (type === 'audioMessage') type = 'audio';
+  else if (type === 'documentMessage') type = 'document';
+  else if (type === 'stickerMessage') type = 'sticker';
+  else if (type === 'locationMessage') type = 'location';
+  else if (type === 'contactMessage') type = 'contact';
+  else if (type === 'pollCreationMessage') type = 'poll';
+  else type = 'other';
+  
+  // Check if message type is allowed
+  if (filters.types && filters.types.length > 0 && !filters.types.includes(type)) {
     return false;
   }
+  
+  // Check caption filters
+  const hasCaption = messageContent.imageMessage?.caption || 
+                     messageContent.videoMessage?.caption || 
+                     messageContent.documentMessage?.caption;
+  
+  if (filters.onlyWithCaption && !hasCaption) return false;
+  if (filters.onlyWithoutCaption && hasCaption) return false;
+  
+  // Check exclude filters
+  const isMedia = messageContent.imageMessage || 
+                  messageContent.videoMessage || 
+                  messageContent.audioMessage || 
+                  messageContent.documentMessage ||
+                  messageContent.stickerMessage;
+  const isText = messageContent.conversation || messageContent.extendedTextMessage;
+  
+  if (filters.excludeMedia && isMedia) return false;
+  if (filters.excludeText && isText) return false;
+  
+  return true;
 };
 
-// ==================== HELPER FUNCTIONS (EXACT COPY FROM HANDLER.JS) ====================
+// Unwrap WhatsApp containers (ephemeral, view once, etc.)
+const getMessageContent = (msg) => {
+  if (!msg || !msg.message) return null;
+  
+  let m = msg.message;
+  
+  // Common wrappers in modern WhatsApp
+  if (m.ephemeralMessage) m = m.ephemeralMessage.message;
+  if (m.viewOnceMessageV2) m = m.viewOnceMessageV2.message;
+  if (m.viewOnceMessage) m = m.viewOnceMessage.message;
+  if (m.documentWithCaptionMessage) m = m.documentWithCaptionMessage.message;
+  
+  return m;
+};
+
+// Cached group metadata getter with rate limit handling (for non-admin checks)
+const getCachedGroupMetadata = async (sock, groupId) => {
+  try {
+    if (!groupId || !groupId.endsWith('@g.us')) {
+      return null;
+    }
+    
+    const cached = groupMetadataCache.get(groupId);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      return cached.data;
+    }
+    
+    const metadata = await sock.groupMetadata(groupId);
+    
+    groupMetadataCache.set(groupId, {
+      data: metadata,
+      timestamp: Date.now()
+    });
+    
+    return metadata;
+  } catch (error) {
+    if (error.message && (
+      error.message.includes('forbidden') || 
+      error.message.includes('403') ||
+      error.statusCode === 403 ||
+      error.output?.statusCode === 403 ||
+      error.data === 403
+    )) {
+      groupMetadataCache.set(groupId, {
+        data: null,
+        timestamp: Date.now()
+      });
+      return null;
+    }
+    
+    if (error.message && error.message.includes('rate-overlimit')) {
+      const cached = groupMetadataCache.get(groupId);
+      if (cached) {
+        return cached.data;
+      }
+      return null;
+    }
+    
+    const cached = groupMetadataCache.get(groupId);
+    if (cached) {
+      return cached.data;
+    }
+    
+    return null;
+  }
+};
+
+// Live group metadata getter (always fresh, no cache) - for admin checks
+const getLiveGroupMetadata = async (sock, groupId) => {
+  try {
+    const metadata = await sock.groupMetadata(groupId);
+    
+    groupMetadataCache.set(groupId, {
+      data: metadata,
+      timestamp: Date.now()
+    });
+    
+    return metadata;
+  } catch (error) {
+    const cached = groupMetadataCache.get(groupId);
+    if (cached) {
+      return cached.data;
+    }
+    return null;
+  }
+};
+
+// Alias for backward compatibility (non-admin features use cached)
+const getGroupMetadata = getCachedGroupMetadata;
+
+// Helper functions
+const isOwner = (sender) => {
+  if (!sender) return false;
+  
+  const normalizedSender = normalizeJidWithLid(sender);
+  const senderNumber = normalizeJid(normalizedSender);
+  
+  return config.ownerNumber.some(owner => {
+    const normalizedOwner = normalizeJidWithLid(owner.includes('@') ? owner : `${owner}@s.whatsapp.net`);
+    const ownerNumber = normalizeJid(normalizedOwner);
+    return ownerNumber === senderNumber;
+  });
+};
+
+const isMod = (sender) => {
+  const number = sender.split('@')[0];
+  return database.isModerator(number);
+};
+
+// LID mapping cache
+const lidMappingCache = new Map();
+
+// Helper to normalize JID to just the number part
 const normalizeJid = (jid) => {
   if (!jid) return null;
   if (typeof jid !== 'string') return null;
@@ -70,6 +202,7 @@ const normalizeJid = (jid) => {
   return jid;
 };
 
+// Get LID mapping value from session files
 const getLidMappingValue = (user, direction) => {
   if (!user) return null;
   
@@ -98,6 +231,7 @@ const getLidMappingValue = (user, direction) => {
   }
 };
 
+// Normalize JID handling LID conversion
 const normalizeJidWithLid = (jid) => {
   if (!jid) return jid;
   
@@ -135,322 +269,1300 @@ const normalizeJidWithLid = (jid) => {
   }
 };
 
-const isOwner = (sender) => {
-  if (!sender) return false;
+// Build comparable JID variants (PN + LID) for matching
+const buildComparableIds = (jid) => {
+  if (!jid) return [];
   
-  // Normalize sender JID to handle LID
-  const normalizedSender = normalizeJidWithLid(sender);
-  const senderNumber = normalizeJid(normalizedSender);
-  
-  // Check against owner numbers
-  return config.ownerNumber.some(owner => {
-    const normalizedOwner = normalizeJidWithLid(owner.includes('@') ? owner : `${owner}@s.whatsapp.net`);
-    const ownerNumber = normalizeJid(normalizedOwner);
-    return ownerNumber === senderNumber;
-  });
-};
-
-// ==================== GROUP SETTINGS ====================
-const getGroupSettings = (groupId) => {
-  const groups = readDB(GROUPS_DB);
-  if (!groups[groupId]) {
-    groups[groupId] = { ...config.defaultGroupSettings };
-    writeDB(GROUPS_DB, groups);
-  }
-  return groups[groupId];
-};
-
-const updateGroupSettings = (groupId, settings) => {
-  const groups = readDB(GROUPS_DB);
-  groups[groupId] = { ...groups[groupId], ...settings };
-  return writeDB(GROUPS_DB, groups);
-};
-
-// ==================== USER DATA ====================
-const getUser = (userId) => {
-  const users = readDB(USERS_DB);
-  if (!users[userId]) {
-    users[userId] = {
-      registered: Date.now(),
-      premium: false,
-      banned: false
-    };
-    writeDB(USERS_DB, users);
-  }
-  return users[userId];
-};
-
-const updateUser = (userId, data) => {
-  const users = readDB(USERS_DB);
-  users[userId] = { ...users[userId], ...data };
-  return writeDB(USERS_DB, users);
-};
-
-// ==================== WARNINGS SYSTEM ====================
-const getWarnings = (groupId, userId) => {
-  const warnings = readDB(WARNINGS_DB);
-  const key = `${groupId}_${userId}`;
-  return warnings[key] || { count: 0, warnings: [] };
-};
-
-const addWarning = (groupId, userId, reason) => {
-  const warnings = readDB(WARNINGS_DB);
-  const key = `${groupId}_${userId}`;
-  
-  if (!warnings[key]) {
-    warnings[key] = { count: 0, warnings: [] };
-  }
-  
-  warnings[key].count++;
-  warnings[key].warnings.push({
-    reason,
-    date: Date.now()
-  });
-  
-  writeDB(WARNINGS_DB, warnings);
-  return warnings[key];
-};
-
-const removeWarning = (groupId, userId) => {
-  const warnings = readDB(WARNINGS_DB);
-  const key = `${groupId}_${userId}`;
-  
-  if (warnings[key] && warnings[key].count > 0) {
-    warnings[key].count--;
-    warnings[key].warnings.pop();
-    writeDB(WARNINGS_DB, warnings);
-    return true;
-  }
-  return false;
-};
-
-const clearWarnings = (groupId, userId) => {
-  const warnings = readDB(WARNINGS_DB);
-  const key = `${groupId}_${userId}`;
-  delete warnings[key];
-  return writeDB(WARNINGS_DB, warnings);
-};
-
-// ==================== MODERATORS SYSTEM ====================
-const getModerators = () => {
-  const mods = readDB(MODS_DB);
-  return mods.moderators || [];
-};
-
-const addModerator = (userId) => {
-  const mods = readDB(MODS_DB);
-  if (!mods.moderators) mods.moderators = [];
-  if (!mods.moderators.includes(userId)) {
-    mods.moderators.push(userId);
-    return writeDB(MODS_DB, mods);
-  }
-  return false;
-};
-
-const removeModerator = (userId) => {
-  const mods = readDB(MODS_DB);
-  if (mods.moderators) {
-    mods.moderators = mods.moderators.filter(id => id !== userId);
-    return writeDB(MODS_DB, mods);
-  }
-  return false;
-};
-
-const isModerator = (userId) => {
-  const mods = getModerators();
-  return mods.includes(userId);
-};
-
-// ==================== GROUP FORWARDING SYSTEM ====================
-
-// Get forwarding configuration from Drive
-const getGroupForwarding = async (sourceGroupId) => {
-  return await driveStorage.getForwardingConfig(sourceGroupId);
-};
-
-// Set group forwarding configuration with filters
-const setGroupForwarding = async (sourceGroupId, targetGroupId, enabled = true, forwarderJid = null, filters = null) => {
-  const configData = {
-    targetGroupId,
-    enabled,
-    forwarderJid,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-    filters: filters || {
-      types: ['text', 'image', 'video', 'audio', 'document', 'sticker', 'location', 'contact', 'poll'],
-      onlyWithCaption: false,
-      onlyWithoutCaption: false,
-      excludeMedia: false,
-      excludeText: false
+  try {
+    const decoded = jidDecode(jid);
+    if (!decoded?.user) {
+      return [normalizeJidWithLid(jid)].filter(Boolean);
     }
-  };
+    
+    const variants = new Set();
+    const normalizedServer = decoded.server === 'c.us' ? 's.whatsapp.net' : decoded.server;
+    
+    variants.add(jidEncode(decoded.user, normalizedServer));
+    
+    const isPnServer = normalizedServer === 's.whatsapp.net' || normalizedServer === 'hosted';
+    const isLidServer = normalizedServer === 'lid' || normalizedServer === 'hosted.lid';
+    
+    if (isPnServer) {
+      const lidUser = getLidMappingValue(decoded.user, 'pnToLid');
+      if (lidUser) {
+        const lidServer = normalizedServer === 'hosted' ? 'hosted.lid' : 'lid';
+        variants.add(jidEncode(lidUser, lidServer));
+      }
+    } else if (isLidServer) {
+      const pnUser = getLidMappingValue(decoded.user, 'lidToPn');
+      if (pnUser) {
+        const pnServer = normalizedServer === 'hosted.lid' ? 'hosted' : 's.whatsapp.net';
+        variants.add(jidEncode(pnUser, pnServer));
+      }
+    }
+    
+    return Array.from(variants);
+  } catch (error) {
+    return [jid];
+  }
+};
+
+// Find participant by either PN JID or LID JID
+const findParticipant = (participants = [], userIds) => {
+  const targets = (Array.isArray(userIds) ? userIds : [userIds])
+    .filter(Boolean)
+    .flatMap(id => buildComparableIds(id));
   
-  const success = await driveStorage.saveForwardingConfig(sourceGroupId, configData);
-  return success ? configData : null;
-};
-
-// Remove group forwarding configuration
-const removeGroupForwarding = async (sourceGroupId) => {
-  return await driveStorage.removeForwardingConfig(sourceGroupId);
-};
-
-// Toggle group forwarding
-const toggleGroupForwarding = async (sourceGroupId, enabled) => {
-  return await driveStorage.toggleForwardingConfig(sourceGroupId, enabled);
-};
-
-// Get all active group forwarding configs
-const getAllGroupForwardings = async () => {
-  const allForwardings = await driveStorage.getAllForwardings();
-  return allForwardings.filter(f => f.enabled === true);
-};
-
-// Get all forwardings including disabled
-const getAllGroupForwardingsIncludingDisabled = async () => {
-  return await driveStorage.getAllForwardings();
-};
-
-// Check if a group has forwarding enabled
-const hasGroupForwarding = async (sourceGroupId) => {
-  const configData = await getGroupForwarding(sourceGroupId);
-  return configData !== null && configData.enabled === true;
-};
-
-// Get target group for source group
-const getForwardingTarget = async (sourceGroupId) => {
-  const configData = await getGroupForwarding(sourceGroupId);
-  return configData && configData.enabled ? configData.targetGroupId : null;
-};
-
-// Update forwarding filters
-const updateForwardingFilters = async (sourceGroupId, filters) => {
-  const configData = await getGroupForwarding(sourceGroupId);
-  if (!configData) return false;
+  if (!targets.length) return null;
   
-  configData.filters = { ...configData.filters, ...filters };
-  configData.updatedAt = Date.now();
+  return participants.find(participant => {
+    if (!participant) return false;
+    
+    const participantIds = [
+      participant.id,
+      participant.lid,
+      participant.userJid
+    ]
+      .filter(Boolean)
+      .flatMap(id => buildComparableIds(id));
+    
+    return participantIds.some(id => targets.includes(id));
+  }) || null;
+};
+
+const isAdmin = async (sock, participant, groupId, groupMetadata = null) => {
+  if (!participant) return false;
   
-  return await driveStorage.saveForwardingConfig(sourceGroupId, configData);
-};
-
-// Get forwarding statistics
-const getForwardingStats = async () => {
-  const forwardings = await driveStorage.getAllForwardings();
-  const total = forwardings.length;
-  const active = forwardings.filter(f => f.enabled).length;
-  const disabled = total - active;
+  if (!groupId || !groupId.endsWith('@g.us')) {
+    return false;
+  }
   
-  return {
-    total,
-    active,
-    disabled,
-    configs: forwardings.map(f => ({
-      source: f.sourceGroupId,
-      target: f.targetGroupId,
-      enabled: f.enabled,
-      age: Date.now() - (f.createdAt || Date.now()),
-      filters: f.filters
-    }))
-  };
-};
-
-// Load all forwardings on startup
-const loadForwardingsOnStart = async () => {
-  console.log('\n📤 Loading forwarding configurations from Google Drive...');
-  const forwardings = await driveStorage.loadAllForwardings();
-  return forwardings;
-};
-
-// ==================== USER SUBSCRIPTION SYSTEM ====================
-
-// Check if user is allowed to use bot in self mode
-const isUserAllowed = async (userJid) => {
-  return await driveStorage.isUserAllowed(userJid);
-};
-
-// Add user subscription
-const addUserSubscription = async (userJid, subscribedBy) => {
-  return await driveStorage.addUser(userJid, subscribedBy);
-};
-
-// Remove user subscription
-const removeUserSubscription = async (userJid) => {
-  return await driveStorage.removeUser(userJid);
-};
-
-// Get all subscribed users
-const getAllSubscribedUsers = async () => {
-  return await driveStorage.getAllUsers();
-};
-
-// Get subscribed user count
-const getSubscribedUserCount = async () => {
-  return await driveStorage.getUserCount();
-};
-
-// Check if user can use bot (considering self mode and subscription)
-const canUseBot = async (senderJid) => {
-  // If self mode is off, everyone can use
-  if (!config.selfMode) return true;
+  let liveMetadata = groupMetadata;
+  if (!liveMetadata || !liveMetadata.participants) {
+    if (groupId) {
+      liveMetadata = await getLiveGroupMetadata(sock, groupId);
+    } else {
+      return false;
+    }
+  }
   
-  // Owner always can use
-  if (isOwner(senderJid)) return true;
+  if (!liveMetadata || !liveMetadata.participants) return false;
   
-  // Check if user is subscribed
-  return await isUserAllowed(senderJid);
+  const foundParticipant = findParticipant(liveMetadata.participants, participant);
+  if (!foundParticipant) return false;
+  
+  return foundParticipant.admin === 'admin' || foundParticipant.admin === 'superadmin';
 };
 
-// Load all users on startup
-const loadUsersOnStart = async () => {
-  console.log('\n👥 Loading allowed users from Google Drive...');
-  const users = await driveStorage.loadAllUsers();
-  return users;
+const isBotAdmin = async (sock, groupId, groupMetadata = null) => {
+  if (!sock.user || !groupId) return false;
+  
+  if (!groupId.endsWith('@g.us')) {
+    return false;
+  }
+  
+  try {
+    const botId = sock.user.id;
+    const botLid = sock.user.lid;
+    
+    if (!botId) return false;
+    
+    const botJids = [botId];
+    if (botLid) {
+      botJids.push(botLid);
+    }
+    
+    const liveMetadata = await getLiveGroupMetadata(sock, groupId);
+    
+    if (!liveMetadata || !liveMetadata.participants) return false;
+    
+    const participant = findParticipant(liveMetadata.participants, botJids);
+    if (!participant) return false;
+    
+    return participant.admin === 'admin' || participant.admin === 'superadmin';
+  } catch (error) {
+    return false;
+  }
 };
 
-// ==================== EXPORTS ====================
+const isUrl = (text) => {
+  const urlRegex = /(https?:\/\/[^\s]+)/gi;
+  return urlRegex.test(text);
+};
+
+const hasGroupLink = (text) => {
+  const linkRegex = /chat.whatsapp.com\/([0-9A-Za-z]{20,24})/i;
+  return linkRegex.test(text);
+};
+
+// System JID filter - checks if JID is from broadcast/status/newsletter
+const isSystemJid = (jid) => {
+  if (!jid) return true;
+  return jid.includes('@broadcast') || 
+         jid.includes('status.broadcast') || 
+         jid.includes('@newsletter') ||
+         jid.includes('@newsletter.');
+};
+
+// ===== GROUP FORWARDING FEATURE WITH FILTERS AND DRIVE STORAGE =====
+const checkAndForwardMessage = async (sock, msg, from, content) => {
+  try {
+    // Only forward messages from groups
+    if (!from.endsWith('@g.us')) return;
+    
+    // Get forwarding configuration from Drive
+    const forwardingConfig = await database.getGroupForwarding(from);
+    
+    // Check if forwarding is enabled
+    if (!forwardingConfig || !forwardingConfig.enabled) return;
+    
+    const targetGroupId = forwardingConfig.targetGroupId;
+    if (!targetGroupId) return;
+    
+    // Don't forward messages from the bot itself (to avoid loops)
+    if (msg.key.fromMe) return;
+    
+    // Don't forward system messages
+    const isSystem = from.includes('@broadcast') || 
+                     from.includes('status.broadcast') || 
+                     from.includes('@newsletter');
+    if (isSystem) return;
+    
+    // Get message content
+    const messageContent = content || getMessageContent(msg);
+    if (!messageContent) return;
+    
+    // Check filters
+    const filters = forwardingConfig.filters;
+    const shouldForward = shouldForwardMessage(messageContent, filters);
+    
+    if (!shouldForward) {
+      return;
+    }
+    
+    try {
+      // Handle different message types - FORWARD EXACTLY AS IS (NO HEADERS)
+      
+      // Text message
+      if (messageContent.conversation) {
+        await sock.sendMessage(targetGroupId, { 
+          text: messageContent.conversation
+        });
+      }
+      // Extended text message
+      else if (messageContent.extendedTextMessage) {
+        await sock.sendMessage(targetGroupId, { 
+          text: messageContent.extendedTextMessage.text || ''
+        });
+      }
+      // Image message
+      else if (messageContent.imageMessage) {
+        const image = messageContent.imageMessage;
+        
+        try {
+          const stream = await downloadContentFromMessage(image, 'image');
+          const buffer = [];
+          for await (const chunk of stream) {
+            buffer.push(chunk);
+          }
+          const imageBuffer = Buffer.concat(buffer);
+          
+          await sock.sendMessage(targetGroupId, {
+            image: imageBuffer,
+            caption: image.caption || '',
+            mimetype: image.mimetype
+          });
+        } catch (downloadErr) {
+          console.error(`❌ Failed to download image:`, downloadErr.message);
+        }
+      }
+      // Video message
+      else if (messageContent.videoMessage) {
+        const video = messageContent.videoMessage;
+        
+        try {
+          const stream = await downloadContentFromMessage(video, 'video');
+          const buffer = [];
+          for await (const chunk of stream) {
+            buffer.push(chunk);
+          }
+          const videoBuffer = Buffer.concat(buffer);
+          
+          await sock.sendMessage(targetGroupId, {
+            video: videoBuffer,
+            caption: video.caption || '',
+            mimetype: video.mimetype
+          });
+        } catch (downloadErr) {
+          console.error(`❌ Failed to download video:`, downloadErr.message);
+        }
+      }
+      // Audio message
+      else if (messageContent.audioMessage) {
+        const audio = messageContent.audioMessage;
+        
+        try {
+          const stream = await downloadContentFromMessage(audio, 'audio');
+          const buffer = [];
+          for await (const chunk of stream) {
+            buffer.push(chunk);
+          }
+          const audioBuffer = Buffer.concat(buffer);
+          
+          await sock.sendMessage(targetGroupId, {
+            audio: audioBuffer,
+            mimetype: audio.mimetype,
+            ptt: audio.ptt || false
+          });
+        } catch (downloadErr) {
+          console.error(`❌ Failed to download audio:`, downloadErr.message);
+        }
+      }
+      // Document message
+      else if (messageContent.documentMessage) {
+        const doc = messageContent.documentMessage;
+        
+        try {
+          const stream = await downloadContentFromMessage(doc, 'document');
+          const buffer = [];
+          for await (const chunk of stream) {
+            buffer.push(chunk);
+          }
+          const docBuffer = Buffer.concat(buffer);
+          
+          await sock.sendMessage(targetGroupId, {
+            document: docBuffer,
+            mimetype: doc.mimetype,
+            fileName: doc.fileName,
+            caption: doc.caption || ''
+          });
+        } catch (downloadErr) {
+          console.error(`❌ Failed to download document:`, downloadErr.message);
+        }
+      }
+      // Sticker message
+      else if (messageContent.stickerMessage) {
+        const sticker = messageContent.stickerMessage;
+        
+        try {
+          const stream = await downloadContentFromMessage(sticker, 'sticker');
+          const buffer = [];
+          for await (const chunk of stream) {
+            buffer.push(chunk);
+          }
+          const stickerBuffer = Buffer.concat(buffer);
+          
+          await sock.sendMessage(targetGroupId, {
+            sticker: stickerBuffer
+          });
+        } catch (downloadErr) {
+          console.error(`❌ Failed to download sticker:`, downloadErr.message);
+        }
+      }
+      // Location message
+      else if (messageContent.locationMessage) {
+        const location = messageContent.locationMessage;
+        await sock.sendMessage(targetGroupId, {
+          location: {
+            degreesLatitude: location.degreesLatitude,
+            degreesLongitude: location.degreesLongitude
+          }
+        });
+      }
+      // Contact message
+      else if (messageContent.contactMessage) {
+        const contact = messageContent.contactMessage;
+        await sock.sendMessage(targetGroupId, {
+          contacts: {
+            displayName: contact.displayName,
+            vcard: contact.vcard
+          }
+        });
+      }
+      // Poll creation message
+      else if (messageContent.pollCreationMessage) {
+        const poll = messageContent.pollCreationMessage;
+        await sock.sendMessage(targetGroupId, {
+          poll: {
+            name: poll.name,
+            options: poll.options.map(opt => opt.optionName),
+            selectableCount: poll.selectableCount || 1
+          }
+        });
+      }
+      // Button response message
+      else if (messageContent.buttonsResponseMessage) {
+        const btn = messageContent.buttonsResponseMessage;
+        await sock.sendMessage(targetGroupId, {
+          text: btn.selectedDisplayText || 'Button response'
+        });
+      }
+      // List response message
+      else if (messageContent.listResponseMessage) {
+        const list = messageContent.listResponseMessage;
+        const selected = list.singleSelectReply;
+        await sock.sendMessage(targetGroupId, {
+          text: selected?.title || 'List selection'
+        });
+      }
+      
+    } catch (forwardError) {
+      console.error(`❌ Error forwarding message:`, forwardError.message);
+    }
+    
+  } catch (error) {
+    console.error('❌ Error in checkAndForwardMessage:', error.message);
+  }
+};
+
+// Main message handler
+const handleMessage = async (sock, msg) => {
+  try {
+    if (!msg.message) return;
+    
+    const from = msg.key.remoteJid;
+    
+    // System message filter - ignore broadcast/status/newsletter messages
+    if (isSystemJid(from)) {
+      return;
+    }
+    
+    // Auto-React System
+    try {
+      delete require.cache[require.resolve('./config')];
+      const config = require('./config');
+
+      if (config.autoReact && msg.message && !msg.key.fromMe) {
+        const content = msg.message.ephemeralMessage?.message || msg.message;
+        const text = content.conversation || content.extendedTextMessage?.text || '';
+        const jid = msg.key.remoteJid;
+        const emojis = ['❤️','🔥','👌','💀','😁','✨','👍','🤨','😎','😂','🤝','💫'];
+        const mode = config.autoReactMode || 'bot';
+
+        if (mode === 'bot') {
+          const prefixList = ['.', '/', '#'];
+          if (prefixList.includes(text?.trim()[0])) {
+            await sock.sendMessage(jid, { react: { text: '⏳', key: msg.key } });
+          }
+        }
+
+        if (mode === 'all') {
+          const rand = emojis[Math.floor(Math.random() * emojis.length)];
+          await sock.sendMessage(jid, { react: { text: rand, key: msg.key } });
+        }
+      }
+    } catch (e) {
+      console.error('[AutoReact Error]', e.message);
+    }
+    
+    // Unwrap containers first
+    const content = getMessageContent(msg);
+    
+    // ===== CHECK AND FORWARD MESSAGE =====
+    await checkAndForwardMessage(sock, msg, from, content);
+    
+    // Still check for actual message content for regular processing
+    let actualMessageTypes = [];
+    if (content) {
+      const allKeys = Object.keys(content);
+      const protocolMessages = ['protocolMessage', 'senderKeyDistributionMessage', 'messageContextInfo'];
+      actualMessageTypes = allKeys.filter(key => !protocolMessages.includes(key));
+    }
+    
+    const sender = msg.key.fromMe ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : msg.key.participant || msg.key.remoteJid;
+    const isGroup = from.endsWith('@g.us');
+    
+    const groupMetadata = isGroup ? await getGroupMetadata(sock, from) : null;
+    
+    // Anti-group mention protection
+    if (isGroup) {
+      try {
+        await handleAntigroupmention(sock, msg, groupMetadata);
+      } catch (error) {
+        console.error('Error in antigroupmention handler:', error);
+      }
+    }
+    
+    // Track group message statistics
+    if (isGroup) {
+      addMessage(from, sender);
+    }
+    
+    // Return early for non-group messages with no recognizable content
+    if (!content || actualMessageTypes.length === 0) return;
+    
+    // Button response handling
+    const btn = content.buttonsResponseMessage || msg.message?.buttonsResponseMessage;
+    if (btn) {
+      const buttonId = btn.selectedButtonId;
+      const displayText = btn.selectedDisplayText;
+      
+      // ===== AUTO-REPLY BUTTON HANDLER =====
+      // Handle auto-reply button clicks first
+      const autoReplied = await autoreply.handleAutoReplyButton(sock, msg, buttonId, displayText, from, sender);
+      if (autoReplied) {
+        console.log(`[AUTOREPLY] Handled button click: ${buttonId}`);
+        return;
+      }
+      
+      if (buttonId === 'btn_menu') {
+        const menuCmd = commands.get('menu');
+        if (menuCmd) {
+          await menuCmd.execute(sock, msg, [], {
+            from, sender, isGroup, groupMetadata,
+            isOwner: isOwner(sender),
+            isAdmin: await isAdmin(sock, sender, from, groupMetadata),
+            isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
+            isMod: isMod(sender),
+            reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+            react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
+          });
+        }
+        return;
+      } else if (buttonId === 'btn_ping') {
+        const pingCmd = commands.get('ping');
+        if (pingCmd) {
+          await pingCmd.execute(sock, msg, [], {
+            from, sender, isGroup, groupMetadata,
+            isOwner: isOwner(sender),
+            isAdmin: await isAdmin(sock, sender, from, groupMetadata),
+            isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
+            isMod: isMod(sender),
+            reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+            react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
+          });
+        }
+        return;
+      } else if (buttonId === 'btn_help') {
+        const listCmd = commands.get('list');
+        if (listCmd) {
+          await listCmd.execute(sock, msg, [], {
+            from, sender, isGroup, groupMetadata,
+            isOwner: isOwner(sender),
+            isAdmin: await isAdmin(sock, sender, from, groupMetadata),
+            isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
+            isMod: isMod(sender),
+            reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+            react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
+          });
+        }
+        return;
+      }
+      
+      console.log(`🔘 Button clicked: ${displayText} (${buttonId}) - letting through`);
+      return;
+    }
+    
+    // Get message body
+    let body = '';
+    if (content.conversation) {
+      body = content.conversation;
+    } else if (content.extendedTextMessage) {
+      body = content.extendedTextMessage.text || '';
+    } else if (content.imageMessage) {
+      body = content.imageMessage.caption || '';
+    } else if (content.videoMessage) {
+      body = content.videoMessage.caption || '';
+    }
+    
+    body = (body || '').trim();
+    
+    // ===== AUTO-REPLY CHECK =====
+    // Check for auto-reply commands (only in private chats, not from bot, not commands)
+    if (!isGroup && !msg.key.fromMe && body && !body.startsWith(config.prefix)) {
+      const autoReplied = await autoreply.checkAutoReply(sock, from, sender, body, (text) => sock.sendMessage(from, { text }, { quoted: msg }));
+      if (autoReplied) {
+        // Message was handled by auto-reply, don't process further
+        console.log(`[AUTOREPLY] Handled message: "${body}" from ${sender}`);
+        return;
+      }
+    }
+    
+    // Check antiall protection (owner only feature)
+    if (isGroup) {
+      const groupSettings = database.getGroupSettings(from);
+      if (groupSettings.antiall) {
+        const senderIsAdmin = await isAdmin(sock, sender, from, groupMetadata);
+        const senderIsOwner = isOwner(sender);
+        
+        if (!senderIsAdmin && !senderIsOwner) {
+          const botIsAdmin = await isBotAdmin(sock, from, groupMetadata);
+          if (botIsAdmin) {
+            await sock.sendMessage(from, { delete: msg.key });
+            return;
+          }
+        }
+      }
+      
+      // Anti-tag protection
+      if (groupSettings.antitag && !msg.key.fromMe) {
+        const ctx = content.extendedTextMessage?.contextInfo;
+        const mentionedJids = ctx?.mentionedJid || [];
+        
+        const messageText = (body || content.imageMessage?.caption || content.videoMessage?.caption || '');
+        const textMentions = messageText.match(/@[\d+\s\-()~.]+/g) || [];
+        const numericMentions = messageText.match(/@\d{10,}/g) || [];
+        
+        const uniqueNumericMentions = new Set();
+        numericMentions.forEach((mention) => {
+          const numMatch = mention.match(/@(\d+)/);
+          if (numMatch) uniqueNumericMentions.add(numMatch[1]);
+        });
+        
+        const mentionedJidCount = mentionedJids.length;
+        const numericMentionCount = uniqueNumericMentions.size;
+        const totalMentions = Math.max(mentionedJidCount, numericMentionCount);
+        
+        if (totalMentions >= 3) {
+          try {
+            const participants = groupMetadata.participants || [];
+            const mentionThreshold = Math.max(3, Math.ceil(participants.length * 0.5));
+            const hasManyNumericMentions = numericMentionCount >= 10 ||
+              (numericMentionCount >= 5 && numericMentionCount >= mentionThreshold);
+            
+            if (totalMentions >= mentionThreshold || hasManyNumericMentions) {
+              const senderIsAdmin = await isAdmin(sock, sender, from, groupMetadata);
+              const senderIsOwner = isOwner(sender);
+              
+              if (!senderIsAdmin && !senderIsOwner) {
+                const action = (groupSettings.antitagAction || 'delete').toLowerCase();
+                
+                if (action === 'delete') {
+                  try {
+                    await sock.sendMessage(from, { delete: msg.key });
+                    await sock.sendMessage(from, { 
+                      text: '⚠️ *Tagall Detected!*',
+                      mentions: [sender]
+                    }, { quoted: msg });
+                  } catch (e) {
+                    console.error('Failed to delete tagall message:', e);
+                  }
+                } else if (action === 'kick') {
+                  try {
+                    await sock.sendMessage(from, { delete: msg.key });
+                  } catch (e) {
+                    console.error('Failed to delete tagall message:', e);
+                  }
+                  
+                  const botIsAdmin = await isBotAdmin(sock, from, groupMetadata);
+                  if (botIsAdmin) {
+                    try {
+                      await sock.groupParticipantsUpdate(from, [sender], 'remove');
+                    } catch (e) {
+                      console.error('Failed to kick for antitag:', e);
+                    }
+                    const usernames = [`@${sender.split('@')[0]}`];
+                    await sock.sendMessage(from, {
+                      text: `🚫 *Antitag Detected!*\n\n${usernames.join(', ')} has been kicked for tagging all members.`,
+                      mentions: [sender],
+                    }, { quoted: msg });
+                  }
+                }
+                return;
+              }
+            }
+          } catch (e) {
+            console.error('Error during anti-tag enforcement:', e);
+          }
+        }
+      }
+    }
+    
+    // AutoSticker feature
+    if (isGroup) {
+      const groupSettings = database.getGroupSettings(from);
+      if (groupSettings.autosticker) {
+        const mediaMessage = content?.imageMessage || content?.videoMessage;
+        
+        if (mediaMessage && !body.startsWith(config.prefix)) {
+          try {
+            const stickerCmd = commands.get('sticker');
+            if (stickerCmd) {
+              await stickerCmd.execute(sock, msg, [], {
+                from, sender, isGroup, groupMetadata,
+                isOwner: isOwner(sender),
+                isAdmin: await isAdmin(sock, sender, from, groupMetadata),
+                isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
+                isMod: isMod(sender),
+                reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+                react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
+              });
+              return;
+            }
+          } catch (error) {
+            console.error('[AutoSticker Error]:', error);
+          }
+        }
+      }
+    }
+
+    // Check for active bomb games
+    try {
+      const bombModule = require('./commands/fun/bomb');
+      if (bombModule.gameState && bombModule.gameState.has(sender)) {
+        const bombCommand = commands.get('bomb');
+        if (bombCommand && bombCommand.execute) {
+          await bombCommand.execute(sock, msg, [], {
+            from, sender, isGroup, groupMetadata,
+            isOwner: isOwner(sender),
+            isAdmin: await isAdmin(sock, sender, from, groupMetadata),
+            isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
+            isMod: isMod(sender),
+            reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+            react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
+          });
+          return;
+        }
+      }
+    } catch (e) {}
+    
+    // Check for active tictactoe games
+    try {
+      const tictactoeModule = require('./commands/fun/tictactoe');
+      if (tictactoeModule.handleTicTacToeMove) {
+        const isInGame = Object.values(tictactoeModule.games || {}).some(room => 
+          room.id.startsWith('tictactoe') && 
+          [room.game.playerX, room.game.playerO].includes(sender) && 
+          room.state === 'PLAYING'
+        );
+        
+        if (isInGame) {
+          const handled = await tictactoeModule.handleTicTacToeMove(sock, msg, {
+            from, sender, isGroup, groupMetadata,
+            isOwner: isOwner(sender),
+            isAdmin: await isAdmin(sock, sender, from, groupMetadata),
+            isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
+            isMod: isMod(sender),
+            reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+            react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
+          });
+          if (handled) return;
+        }
+      }
+    } catch (e) {}
+    
+    // ===== UNIVERSAL SESSION DETECTION =====
+    const quotedMessageId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
+    const isButtonClick = !!(msg.message?.buttonsResponseMessage || 
+                            msg.message?.listResponseMessage || 
+                            msg.message?.interactiveResponseMessage ||
+                            msg.message?.templateButtonReplyMessage);
+
+    if (isButtonClick) {
+        console.log(`🔘 BUTTON CLICK DETECTED!`);
+        
+        let buttonId = null;
+        let buttonText = null;
+        
+        if (msg.message?.buttonsResponseMessage) {
+            buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
+            buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
+        } else if (msg.message?.listResponseMessage) {
+            const listReply = msg.message.listResponseMessage.singleSelectReply;
+            if (listReply) {
+                buttonId = listReply.selectedRowId;
+                buttonText = listReply.title;
+            }
+        } else if (msg.message?.interactiveResponseMessage) {
+            const interactive = msg.message.interactiveResponseMessage;
+            if (interactive.nativeFlowResponseMessage) {
+                try {
+                    const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
+                    buttonId = params.id;
+                    buttonText = params.display_text;
+                } catch (e) {}
+            }
+        } else if (msg.message?.templateButtonReplyMessage) {
+            buttonId = msg.message.templateButtonReplyMessage.selectedId;
+            buttonText = msg.message.templateButtonReplyMessage.selectedDisplayText;
+        }
+        
+        if (buttonId) {
+            // ===== AUTO-REPLY BUTTON HANDLER =====
+            // Check if this is an auto-reply button
+            const autoReplied = await autoreply.handleAutoReplyButton(sock, msg, buttonId, buttonText, from, sender);
+            if (autoReplied) {
+                console.log(`[AUTOREPLY] Handled auto-reply button: ${buttonId}`);
+                return;
+            }
+            
+            let sessionFound = null;
+            let sessionCommand = null;
+            
+            const idParts = buttonId.split('_');
+            if (idParts.length >= 2) {
+                const sessionIdentifier = idParts[1];
+                const userSessions = sessionManager.getUserSessions(sender, from);
+                for (const sess of userSessions) {
+                    if (sess.id.includes(sessionIdentifier)) {
+                        sessionFound = sess;
+                        sessionCommand = commands.get(sess.command);
+                        break;
+                    }
+                }
+            }
+            
+            if (!sessionFound && quotedMessageId) {
+                const sessionInfo = sessionManager.findSessionByRepliedMessage(quotedMessageId, sender);
+                if (sessionInfo) {
+                    sessionFound = sessionInfo.session;
+                    sessionCommand = commands.get(sessionInfo.pendingInfo.command);
+                }
+            }
+            
+            if (!sessionFound) {
+                const userSessions = sessionManager.getUserSessions(sender, from);
+                if (userSessions.length > 0) {
+                    sessionFound = userSessions.sort((a, b) => b.lastActivity - a.lastActivity)[0];
+                    sessionCommand = commands.get(sessionFound.command);
+                }
+            }
+            
+            if (sessionFound && sessionCommand && typeof sessionCommand.handleSession === 'function') {
+                sessionManager.activateSession(sender, from, sessionFound.id);
+                
+                const handled = await sessionCommand.handleSession(sock, msg, sessionFound, {
+                    from, sender, isGroup, groupMetadata,
+                    isOwner: isOwner(sender),
+                    isAdmin: await isAdmin(sock, sender, from, groupMetadata),
+                    isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
+                    isMod: isMod(sender),
+                    isButtonClick: true,
+                    reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+                    react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
+                });
+                
+                if (handled) return;
+            }
+        }
+    }
+
+    const isCommand = body.startsWith(config.prefix);
+    
+    if (quotedMessageId && !isButtonClick && !isCommand) {
+        const sessionInfo = sessionManager.findSessionByRepliedMessage(quotedMessageId, sender);
+        
+        if (sessionInfo) {
+            const { session, pendingInfo } = sessionInfo;
+            const sessionExists = sessionManager.isSessionActive(session.id);
+            
+            if (!sessionExists) return;
+            
+            sessionManager.activateSession(sender, from, session.id);
+            const sessionCommand = commands.get(pendingInfo.command);
+            
+            if (sessionCommand && typeof sessionCommand.handleSession === 'function') {
+                const handled = await sessionCommand.handleSession(sock, msg, session, {
+                    from, sender, isGroup, groupMetadata,
+                    isOwner: isOwner(sender),
+                    isAdmin: await isAdmin(sock, sender, from, groupMetadata),
+                    isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
+                    isMod: isMod(sender),
+                    isButtonClick: false,
+                    reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+                    react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
+                });
+                
+                if (handled) return;
+            }
+        } else {
+            return;
+        }
+    }
+
+    if (!isCommand) {
+        const latestSession = sessionManager.getLatestSession(sender, from);
+        
+        if (latestSession && !sessionManager.isSessionFrozen(latestSession.id)) {
+            const sessionCommand = commands.get(latestSession.command);
+            
+            if (sessionCommand && typeof sessionCommand.handleSession === 'function') {
+                const handled = await sessionCommand.handleSession(sock, msg, latestSession, {
+                    from, sender, isGroup, groupMetadata,
+                    isOwner: isOwner(sender),
+                    isAdmin: await isAdmin(sock, sender, from, groupMetadata),
+                    isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
+                    isMod: isMod(sender),
+                    isButtonClick: false,
+                    reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+                    react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
+                });
+                
+                if (handled) return;
+            }
+        }
+    }
+    
+    // Check if message starts with prefix
+    if (!body.startsWith(config.prefix)) return;
+    
+    // Parse command
+    const args = body.slice(config.prefix.length).trim().split(/\s+/);
+    const commandName = args.shift().toLowerCase();
+    
+    const command = commands.get(commandName);
+    if (!command) return;
+    
+    // ===== SELF MODE & SUBSCRIPTION CHECK =====
+    // First, check if user is owner - owner always has access
+    const isUserOwner = isOwner(sender);
+    
+    if (config.selfMode && !isUserOwner) {
+        const isSubscribed = await database.isUserAllowed(sender);
+        
+        if (!isSubscribed) {
+            // Silent block for non-subscribed non-owner users
+            console.log(`[SELF-MODE] Blocked command "${commandName}" from non-subscribed user ${sender}`);
+            return;
+        }
+    }
+    
+    // Check owner-only commands - only owners can use these
+    if (command.ownerOnly && !isUserOwner) {
+        return sock.sendMessage(from, { text: config.messages.ownerOnly }, { quoted: msg });
+    }
+    
+    // Check moderator commands
+    if (command.modOnly && !isMod(sender) && !isUserOwner) {
+        return sock.sendMessage(from, { text: '🔒 This command is only for moderators!' }, { quoted: msg });
+    }
+    
+    // Check group-only commands
+    if (command.groupOnly && !isGroup) {
+        return sock.sendMessage(from, { text: config.messages.groupOnly }, { quoted: msg });
+    }
+    
+    // Check private-only commands
+    if (command.privateOnly && isGroup) {
+        return sock.sendMessage(from, { text: config.messages.privateOnly }, { quoted: msg });
+    }
+    
+    // Check admin-only commands
+    if (command.adminOnly && !(await isAdmin(sock, sender, from, groupMetadata)) && !isUserOwner) {
+        return sock.sendMessage(from, { text: config.messages.adminOnly }, { quoted: msg });
+    }
+    
+    // Check bot admin needed
+    if (command.botAdminNeeded) {
+        const botIsAdmin = await isBotAdmin(sock, from, groupMetadata);
+        if (!botIsAdmin) {
+            return sock.sendMessage(from, { text: config.messages.botAdminNeeded }, { quoted: msg });
+        }
+    }
+    
+    // Auto-typing
+    if (config.autoTyping) {
+        await sock.sendPresenceUpdate('composing', from);
+    }
+    
+    console.log(`Executing command: ${commandName} from ${sender}`);
+    
+    await command.execute(sock, msg, args, {
+        from, sender, isGroup, groupMetadata,
+        isOwner: isUserOwner,
+        isAdmin: await isAdmin(sock, sender, from, groupMetadata),
+        isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
+        isMod: isMod(sender),
+        reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
+        react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
+    });
+    
+  } catch (error) {
+    console.error('Error in message handler:', error);
+    
+    if (error.message && error.message.includes('rate-overlimit')) {
+      console.warn('⚠️ Rate limit reached.');
+      return;
+    }
+    
+    try {
+      await sock.sendMessage(msg.key.remoteJid, { 
+        text: `${config.messages.error}\n\n${error.message}` 
+      }, { quoted: msg });
+    } catch (e) {}
+  }
+};
+
+// Group participant update handler
+const handleGroupUpdate = async (sock, update) => {
+  try {
+    const { id, participants, action } = update;
+    
+    if (!id || !id.endsWith('@g.us')) return;
+    
+    const groupSettings = database.getGroupSettings(id);
+    if (!groupSettings.welcome && !groupSettings.goodbye) return;
+    
+    const groupMetadata = await getGroupMetadata(sock, id);
+    if (!groupMetadata) return;
+    
+    const getParticipantJid = (participant) => {
+      if (typeof participant === 'string') return participant;
+      if (participant && participant.id) return participant.id;
+      if (participant && typeof participant === 'object') return participant.jid || participant.participant || null;
+      return null;
+    };
+    
+    for (const participant of participants) {
+      const participantJid = getParticipantJid(participant);
+      if (!participantJid) continue;
+      
+      const participantNumber = participantJid.split('@')[0];
+      
+      if (action === 'add' && groupSettings.welcome) {
+        try {
+          let displayName = participantNumber;
+          
+          const participantInfo = groupMetadata.participants.find(p => {
+            const pId = p.id || p.jid || p.participant;
+            const pPhone = p.phoneNumber;
+            return pId === participantJid || 
+                   pId?.split('@')[0] === participantNumber ||
+                   pPhone === participantJid ||
+                   pPhone?.split('@')[0] === participantNumber;
+          });
+          
+          let phoneJid = null;
+          if (participantInfo && participantInfo.phoneNumber) {
+            phoneJid = participantInfo.phoneNumber;
+          } else {
+            try {
+              const normalized = normalizeJidWithLid(participantJid);
+              if (normalized && normalized.includes('@s.whatsapp.net')) {
+                phoneJid = normalized;
+              }
+            } catch (e) {
+              if (participantJid.includes('@s.whatsapp.net')) {
+                phoneJid = participantJid;
+              }
+            }
+          }
+          
+          if (phoneJid) {
+            try {
+              if (sock.store && sock.store.contacts && sock.store.contacts[phoneJid]) {
+                const contact = sock.store.contacts[phoneJid];
+                if (contact.notify && contact.notify.trim() && !contact.notify.match(/^\d+$/)) {
+                  displayName = contact.notify.trim();
+                } else if (contact.name && contact.name.trim() && !contact.name.match(/^\d+$/)) {
+                  displayName = contact.name.trim();
+                }
+              }
+              
+              if (displayName === participantNumber) {
+                try {
+                  await sock.onWhatsApp(phoneJid);
+                  if (sock.store && sock.store.contacts && sock.store.contacts[phoneJid]) {
+                    const contact = sock.store.contacts[phoneJid];
+                    if (contact.notify && contact.notify.trim() && !contact.notify.match(/^\d+$/)) {
+                      displayName = contact.notify.trim();
+                    }
+                  }
+                } catch (fetchError) {}
+              }
+            } catch (contactError) {}
+          }
+          
+          if (displayName === participantNumber && participantInfo) {
+            if (participantInfo.notify && participantInfo.notify.trim() && !participantInfo.notify.match(/^\d+$/)) {
+              displayName = participantInfo.notify.trim();
+            } else if (participantInfo.name && participantInfo.name.trim() && !participantInfo.name.match(/^\d+$/)) {
+              displayName = participantInfo.name.trim();
+            }
+          }
+          
+          let profilePicUrl = '';
+          try {
+            profilePicUrl = await sock.profilePictureUrl(participantJid, 'image');
+          } catch (ppError) {
+            profilePicUrl = 'https://img.pyrocdn.com/dbKUgahg.png';
+          }
+          
+          const groupName = groupMetadata.subject || 'the group';
+          const groupDesc = groupMetadata.desc || 'No description';
+          const now = new Date();
+          const timeString = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+          
+          const welcomeMsg = `╭╼━≪•𝙽𝙴𝚆 𝙼𝙴𝙼𝙱𝙴𝚁•≫━╾╮\n┃𝚆𝙴𝙻𝙲𝙾𝙼𝙴: @${displayName} 👋\n┃Member count: #${groupMetadata.participants.length}\n┃𝚃𝙸𝙼𝙴: ${timeString}⏰\n╰━━━━━━━━━━━━━━━╯\n\n*@${displayName}* Welcome to *${groupName}*! 🎉\n*Group 𝙳𝙴𝚂𝙲𝚁𝙸𝙿𝚃𝙸𝙾𝙽*\n${groupDesc}\n\n> *ᴘᴏᴡᴇʀᴇᴅ ʙʏ ${config.botName}*`;
+          
+          const apiUrl = `https://api.some-random-api.com/welcome/img/7/gaming4?type=join&textcolor=white&username=${encodeURIComponent(displayName)}&guildName=${encodeURIComponent(groupName)}&memberCount=${groupMetadata.participants.length}&avatar=${encodeURIComponent(profilePicUrl)}`;
+          
+          const imageResponse = await axios.get(apiUrl, { responseType: 'arraybuffer' });
+          const imageBuffer = Buffer.from(imageResponse.data);
+          
+          await sock.sendMessage(id, { 
+            image: imageBuffer,
+            caption: welcomeMsg,
+            mentions: [participantJid] 
+          });
+        } catch (welcomeError) {
+          let message = groupSettings.welcomeMessage || 'Welcome @user to @group! 👋\nEnjoy your stay!';
+          message = message.replace('@user', `@${participantNumber}`);
+          message = message.replace('@group', groupMetadata.subject || 'the group');
+          
+          await sock.sendMessage(id, { 
+            text: message, 
+            mentions: [participantJid] 
+          });
+        }
+      } else if (action === 'remove' && groupSettings.goodbye) {
+        try {
+          let displayName = participantNumber;
+          
+          const participantInfo = groupMetadata.participants.find(p => {
+            const pId = p.id || p.jid || p.participant;
+            const pPhone = p.phoneNumber;
+            return pId === participantJid || 
+                   pId?.split('@')[0] === participantNumber ||
+                   pPhone === participantJid ||
+                   pPhone?.split('@')[0] === participantNumber;
+          });
+          
+          let phoneJid = null;
+          if (participantInfo && participantInfo.phoneNumber) {
+            phoneJid = participantInfo.phoneNumber;
+          } else {
+            try {
+              const normalized = normalizeJidWithLid(participantJid);
+              if (normalized && normalized.includes('@s.whatsapp.net')) {
+                phoneJid = normalized;
+              }
+            } catch (e) {
+              if (participantJid.includes('@s.whatsapp.net')) {
+                phoneJid = participantJid;
+              }
+            }
+          }
+          
+          if (phoneJid) {
+            try {
+              if (sock.store && sock.store.contacts && sock.store.contacts[phoneJid]) {
+                const contact = sock.store.contacts[phoneJid];
+                if (contact.notify && contact.notify.trim() && !contact.notify.match(/^\d+$/)) {
+                  displayName = contact.notify.trim();
+                } else if (contact.name && contact.name.trim() && !contact.name.match(/^\d+$/)) {
+                  displayName = contact.name.trim();
+                }
+              }
+              
+              if (displayName === participantNumber) {
+                try {
+                  await sock.onWhatsApp(phoneJid);
+                  if (sock.store && sock.store.contacts && sock.store.contacts[phoneJid]) {
+                    const contact = sock.store.contacts[phoneJid];
+                    if (contact.notify && contact.notify.trim() && !contact.notify.match(/^\d+$/)) {
+                      displayName = contact.notify.trim();
+                    }
+                  }
+                } catch (fetchError) {}
+              }
+            } catch (contactError) {}
+          }
+          
+          if (displayName === participantNumber && participantInfo) {
+            if (participantInfo.notify && participantInfo.notify.trim() && !participantInfo.notify.match(/^\d+$/)) {
+              displayName = participantInfo.notify.trim();
+            } else if (participantInfo.name && participantInfo.name.trim() && !participantInfo.name.match(/^\d+$/)) {
+              displayName = participantInfo.name.trim();
+            }
+          }
+          
+          let profilePicUrl = '';
+          try {
+            profilePicUrl = await sock.profilePictureUrl(participantJid, 'image');
+          } catch (ppError) {
+            profilePicUrl = 'https://img.pyrocdn.com/dbKUgahg.png';
+          }
+          
+          const groupName = groupMetadata.subject || 'the group';
+          const goodbyeMsg = `Goodbye @${displayName} 👋 We will never miss you!`;
+          
+          const apiUrl = `https://api.some-random-api.com/welcome/img/7/gaming4?type=leave&textcolor=white&username=${encodeURIComponent(displayName)}&guildName=${encodeURIComponent(groupName)}&memberCount=${groupMetadata.participants.length}&avatar=${encodeURIComponent(profilePicUrl)}`;
+          
+          const imageResponse = await axios.get(apiUrl, { responseType: 'arraybuffer' });
+          const imageBuffer = Buffer.from(imageResponse.data);
+          
+          await sock.sendMessage(id, { 
+            image: imageBuffer,
+            caption: goodbyeMsg,
+            mentions: [participantJid] 
+          });
+        } catch (goodbyeError) {
+          const goodbyeMsg = `Goodbye @${participantNumber} 👋 We will never miss you! 💀`;
+          await sock.sendMessage(id, { 
+            text: goodbyeMsg, 
+            mentions: [participantJid] 
+          });
+        }
+      }
+    }
+  } catch (error) {
+    if (!error.message || !error.message.includes('forbidden')) {
+      console.error('Error handling group update:', error);
+    }
+  }
+};
+
+// Antilink handler
+const handleAntilink = async (sock, msg, groupMetadata) => {
+  try {
+    const from = msg.key.remoteJid;
+    const sender = msg.key.participant || msg.key.remoteJid;
+    
+    const groupSettings = database.getGroupSettings(from);
+    if (!groupSettings.antilink) return;
+    
+    const body = msg.message?.conversation || 
+                  msg.message?.extendedTextMessage?.text || 
+                  msg.message?.imageMessage?.caption || 
+                  msg.message?.videoMessage?.caption || '';
+    
+    const linkPattern = /(https?:\/\/)?([a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]*\.)+[a-zA-Z]{2,}(\/[^\s]*)?/i;
+    
+    if (linkPattern.test(body)) {
+      const senderIsAdmin = await isAdmin(sock, sender, from, groupMetadata);
+      const senderIsOwner = isOwner(sender);
+      
+      if (senderIsAdmin || senderIsOwner) return;
+      
+      const botIsAdmin = await isBotAdmin(sock, from, groupMetadata);
+      const action = (groupSettings.antilinkAction || 'delete').toLowerCase();
+      
+      if (action === 'kick' && botIsAdmin) {
+        try {
+          await sock.sendMessage(from, { delete: msg.key });
+          await sock.groupParticipantsUpdate(from, [sender], 'remove');
+          await sock.sendMessage(from, { 
+            text: `🔗 Anti-link triggered. Link removed.`,
+            mentions: [sender]
+          }, { quoted: msg });
+        } catch (e) {
+          console.error('Failed to kick for antilink:', e);
+        }
+      } else {
+        try {
+          await sock.sendMessage(from, { delete: msg.key });
+          await sock.sendMessage(from, { 
+            text: `🔗 Anti-link triggered. Link removed.`,
+            mentions: [sender]
+          }, { quoted: msg });
+        } catch (e) {
+          console.error('Failed to delete message for antilink:', e);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error in antilink handler:', error);
+  }
+};
+
+// Anti-group mention handler
+const handleAntigroupmention = async (sock, msg, groupMetadata) => {
+  try {
+    const from = msg.key.remoteJid;
+    const sender = msg.key.participant || msg.key.remoteJid;
+    
+    const groupSettings = database.getGroupSettings(from);
+    if (!groupSettings.antigroupmention) return;
+    
+    let isForwardedStatus = false;
+    
+    if (msg.message) {
+      isForwardedStatus = isForwardedStatus || !!msg.message.groupStatusMentionMessage;
+      isForwardedStatus = isForwardedStatus || (msg.message.protocolMessage && msg.message.protocolMessage.type === 25);
+      
+      isForwardedStatus = isForwardedStatus || 
+        (msg.message.extendedTextMessage && msg.message.extendedTextMessage.contextInfo && 
+         msg.message.extendedTextMessage.contextInfo.forwardedNewsletterMessageInfo);
+      isForwardedStatus = isForwardedStatus || 
+        (msg.message.conversation && msg.message.contextInfo && 
+         msg.message.contextInfo.forwardedNewsletterMessageInfo);
+      isForwardedStatus = isForwardedStatus || 
+        (msg.message.imageMessage && msg.message.imageMessage.contextInfo && 
+         msg.message.imageMessage.contextInfo.forwardedNewsletterMessageInfo);
+      isForwardedStatus = isForwardedStatus || 
+        (msg.message.videoMessage && msg.message.videoMessage.contextInfo && 
+         msg.message.videoMessage.contextInfo.forwardedNewsletterMessageInfo);
+      isForwardedStatus = isForwardedStatus || 
+        (msg.message.contextInfo && msg.message.contextInfo.forwardedNewsletterMessageInfo);
+      
+      if (msg.message.contextInfo) {
+        const ctx = msg.message.contextInfo;
+        isForwardedStatus = isForwardedStatus || !!ctx.isForwarded;
+        isForwardedStatus = isForwardedStatus || !!ctx.forwardingScore;
+        isForwardedStatus = isForwardedStatus || !!ctx.quotedMessageTimestamp;
+      }
+      
+      if (msg.message.extendedTextMessage && msg.message.extendedTextMessage.contextInfo) {
+        const extCtx = msg.message.extendedTextMessage.contextInfo;
+        isForwardedStatus = isForwardedStatus || !!extCtx.isForwarded;
+        isForwardedStatus = isForwardedStatus || !!extCtx.forwardingScore;
+      }
+    }
+    
+    if (isForwardedStatus) {
+      const senderIsAdmin = await isAdmin(sock, sender, from, groupMetadata);
+      const senderIsOwner = isOwner(sender);
+      
+      if (senderIsAdmin || senderIsOwner) return;
+      
+      const botIsAdmin = await isBotAdmin(sock, from, groupMetadata);
+      const action = (groupSettings.antigroupmentionAction || 'delete').toLowerCase();
+      
+      if (action === 'kick' && botIsAdmin) {
+        try {
+          await sock.sendMessage(from, { delete: msg.key });
+          await sock.groupParticipantsUpdate(from, [sender], 'remove');
+        } catch (e) {
+          console.error('Failed to kick for antigroupmention:', e);
+        }
+      } else {
+        try {
+          await sock.sendMessage(from, { delete: msg.key });
+        } catch (e) {
+          console.error('Failed to delete message for antigroupmention:', e);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error in antigroupmention handler:', error);
+  }
+};
+
+// Anti-call feature initializer
+const initializeAntiCall = (sock) => {
+  sock.ev.on('call', async (calls) => {
+    try {
+      delete require.cache[require.resolve('./config')];
+      const config = require('./config');
+      
+      if (!config.defaultGroupSettings.anticall) return;
+
+      for (const call of calls) {
+        if (call.status === 'offer') {
+          await sock.rejectCall(call.id, call.from);
+          await sock.updateBlockStatus(call.from, 'block');
+          await sock.sendMessage(call.from, {
+            text: '🚫 Calls are not allowed. You have been blocked.'
+          });
+        }
+      }
+    } catch (err) {
+      console.error('[ANTICALL ERROR]', err);
+    }
+  });
+};
+
 module.exports = {
-  // Group settings
-  getGroupSettings,
-  updateGroupSettings,
-  
-  // User data
-  getUser,
-  updateUser,
-  
-  // Warnings
-  getWarnings,
-  addWarning,
-  removeWarning,
-  clearWarnings,
-  
-  // Moderators
-  getModerators,
-  addModerator,
-  removeModerator,
-  isModerator,
-  
-  // Forwarding
-  getGroupForwarding,
-  setGroupForwarding,
-  removeGroupForwarding,
-  toggleGroupForwarding,
-  getAllGroupForwardings,
-  getAllGroupForwardingsIncludingDisabled,
-  hasGroupForwarding,
-  getForwardingTarget,
-  updateForwardingFilters,
-  getForwardingStats,
-  loadForwardingsOnStart,
-  
-  // User Subscription
-  isUserAllowed,
-  addUserSubscription,
-  removeUserSubscription,
-  getAllSubscribedUsers,
-  getSubscribedUserCount,
-  canUseBot,
-  loadUsersOnStart,
-  
-  // Helper
-  isOwner
+  handleMessage,
+  handleGroupUpdate,
+  handleAntilink,
+  handleAntigroupmention,
+  initializeAntiCall,
+  isOwner,
+  isAdmin,
+  isBotAdmin,
+  isMod,
+  getGroupMetadata,
+  findParticipant
 };
