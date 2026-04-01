@@ -697,6 +697,14 @@ const handleMessage = async (sock, msg) => {
       const buttonId = btn.selectedButtonId;
       const displayText = btn.selectedDisplayText;
       
+      // ===== AUTO-REPLY BUTTON HANDLER =====
+      // Handle auto-reply button clicks first
+      const autoReplied = await autoreply.handleAutoReplyButton(sock, msg, buttonId, displayText, from, sender);
+      if (autoReplied) {
+        console.log(`[AUTOREPLY] Handled button click: ${buttonId}`);
+        return;
+      }
+      
       if (buttonId === 'btn_menu') {
         const menuCmd = commands.get('menu');
         if (menuCmd) {
@@ -970,6 +978,14 @@ const handleMessage = async (sock, msg) => {
         }
         
         if (buttonId) {
+            // ===== AUTO-REPLY BUTTON HANDLER =====
+            // Check if this is an auto-reply button
+            const autoReplied = await autoreply.handleAutoReplyButton(sock, msg, buttonId, buttonText, from, sender);
+            if (autoReplied) {
+                console.log(`[AUTOREPLY] Handled auto-reply button: ${buttonId}`);
+                return;
+            }
+            
             let sessionFound = null;
             let sessionCommand = null;
             
