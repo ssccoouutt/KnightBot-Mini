@@ -699,7 +699,7 @@ const handleMessage = async (sock, msg) => {
       
       // ===== AUTO-REPLY BUTTON HANDLER =====
       // Handle auto-reply button clicks first
-      const autoReplied = await autoreply.handleAutoReplyButton(sock, msg, buttonId, displayText, from, sender);
+      const autoReplied = await autoreply.handleAutoReplyButton(sock, msg, buttonId, displayText, from, sender, (text) => sock.sendMessage(from, { text }, { quoted: msg }));
       if (autoReplied) {
         console.log(`[AUTOREPLY] Handled button click: ${buttonId}`);
         return;
@@ -980,7 +980,7 @@ const handleMessage = async (sock, msg) => {
         if (buttonId) {
             // ===== AUTO-REPLY BUTTON HANDLER =====
             // Check if this is an auto-reply button
-            const autoReplied = await autoreply.handleAutoReplyButton(sock, msg, buttonId, buttonText, from, sender);
+            const autoReplied = await autoreply.handleAutoReplyButton(sock, msg, buttonId, buttonText, from, sender, (text) => sock.sendMessage(from, { text }, { quoted: msg }));
             if (autoReplied) {
                 console.log(`[AUTOREPLY] Handled auto-reply button: ${buttonId}`);
                 return;
