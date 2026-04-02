@@ -313,8 +313,8 @@ async function checkAndReply(sock, from, sender, message, reply) {
         const rule = autoreplyRules.get(trimmedMsg);
         
         if (rule.buttons && rule.buttons.length > 0) {
-            // Send with buttons
-            const sessionId = `${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+            // Send with buttons - use simple timestamp as session ID
+            const sessionId = Date.now().toString();
             const buttons = rule.buttons.map((btn, idx) => ({
                 id: `autoreply_${sessionId}_${idx}`,
                 text: btn.text
@@ -327,8 +327,8 @@ async function checkAndReply(sock, from, sender, message, reply) {
                 aimode: FORCE_AI_MODE
             }, {});
             
-            // Store button handlers with their replies (keep for 30 minutes)
-            buttonHandlers.set(`autoreply_${sessionId}`, {
+            // Store button handlers with their replies
+            buttonHandlers.set(sessionId, {
                 command: trimmedMsg,
                 buttons: rule.buttons,
                 originalMessageId: sentMsg.key.id,
@@ -336,9 +336,12 @@ async function checkAndReply(sock, from, sender, message, reply) {
                 sessionId: sessionId
             });
             
-            // Clean up old handlers after 30 minutes (not 5 minutes)
+            console.log(`[AUTOREPLY] Stored handler for session: ${sessionId} with ${rule.buttons.length} buttons`);
+            
+            // Clean up old handlers after 30 minutes
             setTimeout(() => {
-                buttonHandlers.delete(`autoreply_${sessionId}`);
+                buttonHandlers.delete(sessionId);
+                console.log(`[AUTOREPLY] Cleaned up handler for session: ${sessionId}`);
             }, 30 * 60 * 1000);
             
         } else {
@@ -355,14 +358,18 @@ async function checkAndReply(sock, from, sender, message, reply) {
 async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, reply) {
     console.log(`[AUTOREPLY] Handling button click: ${buttonId}, Text: ${buttonText}`);
     
-    // Extract session ID from button ID (format: autoreply_<sessionId>_<index>)
+    // Extract session ID and button index from button ID
+    // Format: autoreply_<sessionId>_<index>
     const parts = buttonId.split('_');
-    if (parts.length >= 2 && parts[0] === 'autoreply') {
-        const sessionId = parts[1];
-        const buttonIndex = parseInt(parts[2]);
+    if (parts.length >= 3 && parts[0] === 'autoreply') {
+        // The session ID is everything between the first and last underscore
+        const buttonIndex = parseInt(parts[parts.length - 1]);
+        const sessionId = parts.slice(1, -1).join('_');
+        
+        console.log(`[AUTOREPLY] Extracted sessionId: ${sessionId}, buttonIndex: ${buttonIndex}`);
         
         // Find handler by session ID
-        const handler = buttonHandlers.get(`autoreply_${sessionId}`);
+        const handler = buttonHandlers.get(sessionId);
         
         if (handler && handler.buttons && handler.buttons[buttonIndex]) {
             const button = handler.buttons[buttonIndex];
@@ -377,10 +384,10 @@ async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, 
                 console.log(`[AUTOREPLY] No reply configured for button: ${button.id}`);
             }
             
-            // Don't delete the handler - keep it for multiple clicks
-            // Only the timeout will clean it up after 30 minutes
-            
             return true;
+        } else {
+            console.log(`[AUTOREPLY] Handler not found for sessionId: ${sessionId}`);
+            console.log(`[AUTOREPLY] Available handlers: ${Array.from(buttonHandlers.keys()).join(', ')}`);
         }
     }
     
@@ -460,7 +467,6 @@ module.exports = {
             
             const command = parts[0];
             let text = parts[1];
-            // Parse escape sequences in text
             text = parseEscapeSequences(text);
             let buttons = [];
             
