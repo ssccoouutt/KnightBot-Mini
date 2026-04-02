@@ -320,7 +320,7 @@ async function checkAndReply(sock, from, sender, message, reply) {
         
         if (rule.buttons && rule.buttons.length > 0) {
             // Send with buttons
-            const sessionId = `${sender}_${Date.now()}`;
+            const sessionId = `${Date.now()}`;
             const buttons = rule.buttons.map((btn, idx) => ({
                 id: `autoreply_${sessionId}_${idx}`,
                 text: btn.text
@@ -333,17 +333,18 @@ async function checkAndReply(sock, from, sender, message, reply) {
                 aimode: FORCE_AI_MODE
             }, {});
             
-            // Store button handlers
-            buttonHandlers.set(sentMsg.key.id, {
+            // Store button handlers with the button ID pattern
+            buttonHandlers.set(`autoreply_${sessionId}`, {
                 command: trimmedMsg,
                 buttons: rule.buttons,
                 originalMessageId: sentMsg.key.id,
-                timestamp: Date.now()
+                timestamp: Date.now(),
+                sessionId: sessionId
             });
             
             // Clean up old handlers after 5 minutes
             setTimeout(() => {
-                buttonHandlers.delete(sentMsg.key.id);
+                buttonHandlers.delete(`autoreply_${sessionId}`);
             }, 5 * 60 * 1000);
             
         } else {
@@ -360,31 +361,17 @@ async function checkAndReply(sock, from, sender, message, reply) {
 async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, reply) {
     console.log(`[AUTOREPLY] Handling button click: ${buttonId}, Text: ${buttonText}`);
     
-    // Get the original message ID that the button belongs to
-    const quotedMessage = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
-    let handler = null;
-    
-    // Try to find handler by the message ID the button is replying to
-    if (quotedMessage && buttonHandlers.has(quotedMessage)) {
-        handler = buttonHandlers.get(quotedMessage);
-    }
-    
-    // If not found by quoted message, try to find by button ID pattern
-    if (!handler && buttonId && buttonId.startsWith('autoreply_')) {
-        const parts = buttonId.split('_');
-        if (parts.length >= 2) {
-            const messageId = parts.slice(0, -1).join('_');
-            if (buttonHandlers.has(messageId)) {
-                handler = buttonHandlers.get(messageId);
-            }
-        }
-    }
-    
-    if (handler) {
-        const buttonIndex = buttonId.split('_').pop();
-        const button = handler.buttons[parseInt(buttonIndex)];
+    // Extract session ID from button ID (format: autoreply_<sessionId>_<index>)
+    const parts = buttonId.split('_');
+    if (parts.length >= 2 && parts[0] === 'autoreply') {
+        const sessionId = parts[1];
+        const buttonIndex = parseInt(parts[2]);
         
-        if (button) {
+        // Find handler by session ID
+        const handler = buttonHandlers.get(`autoreply_${sessionId}`);
+        
+        if (handler && handler.buttons && handler.buttons[buttonIndex]) {
+            const button = handler.buttons[buttonIndex];
             console.log(`[AUTOREPLY] Button clicked: ${button.id} - ${button.text}`);
             
             // Handle specific button actions
@@ -428,8 +415,14 @@ async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, 
             }
             
             // Send the response
-            await sock.sendMessage(from, { text: responseText }, { quoted: msg });
+            await reply(responseText);
             console.log(`[AUTOREPLY] Sent response for button: ${button.id}`);
+            
+            // Clean up handler after use
+            setTimeout(() => {
+                buttonHandlers.delete(`autoreply_${sessionId}`);
+            }, 5000);
+            
             return true;
         }
     }
