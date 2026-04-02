@@ -25,6 +25,9 @@ let tokenExpiry = null;
 // Store autoreply rules in memory
 let autoreplyRules = new Map();
 
+// Store button handlers for auto-reply buttons
+const buttonHandlers = new Map();
+
 // Default rules with buttons
 const DEFAULT_RULES = {
     "Need-Gemini-Pro": {
@@ -330,14 +333,18 @@ async function checkAndReply(sock, from, sender, message, reply) {
                 aimode: FORCE_AI_MODE
             }, {});
             
-            // Store button handlers in a temporary map
-            if (!global.autoreplyButtonHandlers) {
-                global.autoreplyButtonHandlers = new Map();
-            }
-            global.autoreplyButtonHandlers.set(sentMsg.key.id, {
+            // Store button handlers
+            buttonHandlers.set(sentMsg.key.id, {
                 command: trimmedMsg,
-                buttons: rule.buttons
+                buttons: rule.buttons,
+                originalMessageId: sentMsg.key.id,
+                timestamp: Date.now()
             });
+            
+            // Clean up old handlers after 5 minutes
+            setTimeout(() => {
+                buttonHandlers.delete(sentMsg.key.id);
+            }, 5 * 60 * 1000);
             
         } else {
             // Send as plain text
@@ -350,91 +357,84 @@ async function checkAndReply(sock, from, sender, message, reply) {
     return false;
 }
 
-async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender) {
-    // Handle autoreply button clicks
-    if (buttonId && buttonId.startsWith('autoreply_')) {
+async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, reply) {
+    console.log(`[AUTOREPLY] Handling button click: ${buttonId}, Text: ${buttonText}`);
+    
+    // Get the original message ID that the button belongs to
+    const quotedMessage = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
+    let handler = null;
+    
+    // Try to find handler by the message ID the button is replying to
+    if (quotedMessage && buttonHandlers.has(quotedMessage)) {
+        handler = buttonHandlers.get(quotedMessage);
+    }
+    
+    // If not found by quoted message, try to find by button ID pattern
+    if (!handler && buttonId && buttonId.startsWith('autoreply_')) {
         const parts = buttonId.split('_');
-        const idx = parseInt(parts[2]);
-        
-        // Get the stored handler info
-        if (global.autoreplyButtonHandlers && global.autoreplyButtonHandlers.has(msg.key.id)) {
-            const handler = global.autoreplyButtonHandlers.get(msg.key.id);
-            const button = handler.buttons[idx];
-            
-            if (button) {
-                // Handle specific button actions
-                switch (button.id) {
-                    case 'gemini_text':
-                        await sock.sendMessage(from, {
-                            text: "💬 *Text Query*\n\nUse: `.gemini <your question>`\n\nExample: `.gemini What is artificial intelligence?`"
-                        }, { quoted: msg });
-                        break;
-                    case 'gemini_media':
-                        await sock.sendMessage(from, {
-                            text: "🖼️ *Analyze Media*\n\nReply to any image/video/document with:\n`.gemini`\n\nOr send a file URL:\n`.gemini <question> --file <url>`"
-                        }, { quoted: msg });
-                        break;
-                    case 'gemini_url':
-                        await sock.sendMessage(from, {
-                            text: "🔗 *File URL*\n\nUse: `.gemini <question> --file <url>`\n\nExample: `.gemini What's in this PDF? --file https://example.com/doc.pdf`"
-                        }, { quoted: msg });
-                        break;
-                    case 'yt_video':
-                        await sock.sendMessage(from, {
-                            text: "📹 *Download Video*\n\nUse: `.ytvideo <url>`\n\nExample: `.ytvideo https://youtu.be/xxxxx`"
-                        }, { quoted: msg });
-                        break;
-                    case 'yt_audio':
-                        await sock.sendMessage(from, {
-                            text: "🎵 *Download Audio*\n\nUse: `.song <url>`\n\nExample: `.song https://youtu.be/xxxxx`"
-                        }, { quoted: msg });
-                        break;
-                    case 'ig_media':
-                        await sock.sendMessage(from, {
-                            text: "📷 *Download Media*\n\nUse: `.instagram <url>`\n\nExample: `.instagram https://www.instagram.com/p/xxxxx`"
-                        }, { quoted: msg });
-                        break;
-                    case 'ig_sticker':
-                        await sock.sendMessage(from, {
-                            text: "🔘 *Convert to Sticker*\n\nUse: `.igs <url>` or `.igsc <url>`\n\nExample: `.igs https://www.instagram.com/p/xxxxx`"
-                        }, { quoted: msg });
-                        break;
-                    case 'help_gemini':
-                        await sock.sendMessage(from, {
-                            text: "🤖 *Gemini AI Help*\n\n• `.gemini <question>` - Ask a question\n• Reply to media with `.gemini` - Analyze media\n• `.gemini <q> --file <url>` - Analyze file URL"
-                        }, { quoted: msg });
-                        break;
-                    case 'help_media':
-                        await sock.sendMessage(from, {
-                            text: "🎬 *Media Downloaders*\n\n• `.ytvideo <url>` - YouTube video\n• `.song <url>` - YouTube audio\n• `.instagram <url>` - Instagram\n• `.tiktok <url>` - TikTok\n• `.facebook <url>` - Facebook"
-                        }, { quoted: msg });
-                        break;
-                    case 'help_commands':
-                        await sock.sendMessage(from, {
-                            text: "📋 *All Commands*\n\nUse `.menu` to see all available commands.\nUse `.list` for detailed command list."
-                        }, { quoted: msg });
-                        break;
-                    case 'help_channel':
-                        await sock.sendMessage(from, {
-                            text: "📢 *Join Our Channel*\n\nhttps://whatsapp.com/channel/0029Va90zAnIHphOuO8Msp3A\n\nGet updates, new features, and announcements!"
-                        }, { quoted: msg });
-                        break;
-                    default:
-                        // Generic response for custom buttons
-                        await sock.sendMessage(from, {
-                            text: `📌 *${button.text}*\n\nYou selected: ${button.text}\n\nType .menu for available commands.`
-                        }, { quoted: msg });
-                }
-                
-                // Clean up handler
-                setTimeout(() => {
-                    global.autoreplyButtonHandlers.delete(msg.key.id);
-                }, 60000);
-                
-                return true;
+        if (parts.length >= 2) {
+            const messageId = parts.slice(0, -1).join('_');
+            if (buttonHandlers.has(messageId)) {
+                handler = buttonHandlers.get(messageId);
             }
         }
     }
+    
+    if (handler) {
+        const buttonIndex = buttonId.split('_').pop();
+        const button = handler.buttons[parseInt(buttonIndex)];
+        
+        if (button) {
+            console.log(`[AUTOREPLY] Button clicked: ${button.id} - ${button.text}`);
+            
+            // Handle specific button actions
+            let responseText = '';
+            switch (button.id) {
+                case 'gemini_text':
+                    responseText = "💬 *Text Query*\n\nUse: `.gemini <your question>`\n\nExample: `.gemini What is artificial intelligence?`";
+                    break;
+                case 'gemini_media':
+                    responseText = "🖼️ *Analyze Media*\n\nReply to any image/video/document with:\n`.gemini`\n\nOr send a file URL:\n`.gemini <question> --file <url>`";
+                    break;
+                case 'gemini_url':
+                    responseText = "🔗 *File URL*\n\nUse: `.gemini <question> --file <url>`\n\nExample: `.gemini What's in this PDF? --file https://example.com/doc.pdf`";
+                    break;
+                case 'yt_video':
+                    responseText = "📹 *Download Video*\n\nUse: `.ytvideo <url>`\n\nExample: `.ytvideo https://youtu.be/xxxxx`";
+                    break;
+                case 'yt_audio':
+                    responseText = "🎵 *Download Audio*\n\nUse: `.song <url>`\n\nExample: `.song https://youtu.be/xxxxx`";
+                    break;
+                case 'ig_media':
+                    responseText = "📷 *Download Media*\n\nUse: `.instagram <url>`\n\nExample: `.instagram https://www.instagram.com/p/xxxxx`";
+                    break;
+                case 'ig_sticker':
+                    responseText = "🔘 *Convert to Sticker*\n\nUse: `.igs <url>` or `.igsc <url>`\n\nExample: `.igs https://www.instagram.com/p/xxxxx`";
+                    break;
+                case 'help_gemini':
+                    responseText = "🤖 *Gemini AI Help*\n\n• `.gemini <question>` - Ask a question\n• Reply to media with `.gemini` - Analyze media\n• `.gemini <q> --file <url>` - Analyze file URL";
+                    break;
+                case 'help_media':
+                    responseText = "🎬 *Media Downloaders*\n\n• `.ytvideo <url>` - YouTube video\n• `.song <url>` - YouTube audio\n• `.instagram <url>` - Instagram\n• `.tiktok <url>` - TikTok\n• `.facebook <url>` - Facebook";
+                    break;
+                case 'help_commands':
+                    responseText = "📋 *All Commands*\n\nUse `.menu` to see all available commands.\nUse `.list` for detailed command list.";
+                    break;
+                case 'help_channel':
+                    responseText = "📢 *Join Our Channel*\n\nhttps://whatsapp.com/channel/0029Va90zAnIHphOuO8Msp3A\n\nGet updates, new features, and announcements!";
+                    break;
+                default:
+                    responseText = `📌 *${button.text}*\n\nYou selected: ${button.text}\n\nType .menu for available commands.`;
+            }
+            
+            // Send the response
+            await sock.sendMessage(from, { text: responseText }, { quoted: msg });
+            console.log(`[AUTOREPLY] Sent response for button: ${button.id}`);
+            return true;
+        }
+    }
+    
+    console.log(`[AUTOREPLY] No handler found for button: ${buttonId}`);
     return false;
 }
 
@@ -456,9 +456,9 @@ module.exports = {
                        `*Rules Count:* ${autoreplyRules.size}\n\n` +
                        `*Commands:*\n` +
                        `• \`.autoreply list\` - Show all rules\n` +
-                       `• \`.autoreply add <command> <text> [buttons]\` - Add rule\n` +
+                       `• \`.autoreply add <command> | <text> | [buttons]\` - Add rule\n` +
                        `• \`.autoreply remove <command>\` - Remove rule\n` +
-                       `• \`.autoreply update <command> <text> [buttons]\` - Update rule\n` +
+                       `• \`.autoreply update <command> | <text> | [buttons]\` - Update rule\n` +
                        `• \`.autoreply reload\` - Reload from Drive\n` +
                        `• \`.autoreply help\` - Show help\n\n` +
                        `*Button format:* id:text,id:text\n` +
@@ -619,8 +619,8 @@ async function checkAutoReply(sock, from, sender, message, reply) {
 }
 
 // Function to handle button clicks from auto-reply messages
-async function handleAutoReplyButton(sock, msg, buttonId, buttonText, from, sender) {
-    return await handleButtonClick(sock, msg, buttonId, buttonText, from, sender);
+async function handleAutoReplyButton(sock, msg, buttonId, buttonText, from, sender, reply) {
+    return await handleButtonClick(sock, msg, buttonId, buttonText, from, sender, reply);
 }
 
 module.exports.checkAutoReply = checkAutoReply;
