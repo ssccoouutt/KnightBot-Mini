@@ -26,8 +26,17 @@ let tokenExpiry = null;
 // Store autoreply rules in memory
 let autoreplyRules = new Map();
 
-// Store button handlers for auto-reply buttons
+// Store button handlers for auto-reply buttons (keep them alive)
 const buttonHandlers = new Map();
+
+// Helper function to parse escape sequences
+function parseEscapeSequences(str) {
+    if (!str) return str;
+    return str.replace(/\\n/g, '\n')
+              .replace(/\\t/g, '\t')
+              .replace(/\\r/g, '\r')
+              .replace(/\\\\/g, '\\');
+}
 
 // Default rules with buttons and their replies
 const DEFAULT_RULES = {
@@ -38,21 +47,6 @@ const DEFAULT_RULES = {
             { id: "help_media", text: "🎬 Media Downloaders", reply: "🎬 *Media Downloaders*\n\n• `.ytvideo <url>` - YouTube video\n• `.song <url>` - YouTube audio\n• `.instagram <url>` - Instagram\n• `.tiktok <url>` - TikTok\n• `.facebook <url>` - Facebook" },
             { id: "help_commands", text: "📋 All Commands", reply: "📋 *All Commands*\n\nUse `.menu` to see all available commands.\nUse `.list` for detailed command list." },
             { id: "help_channel", text: "📢 Join Channel", reply: "📢 *Join Our Channel*\n\nhttps://whatsapp.com/channel/0029Va90zAnIHphOuO8Msp3A\n\nGet updates, new features, and announcements!" }
-        ]
-    },
-    "Need-Gemini-Pro": {
-        text: "🤖 *Gemini Pro Access*\n\nYou can use Gemini AI with the following options:",
-        buttons: [
-            { id: "gemini_text", text: "💬 Text Query", reply: "💬 *Text Query*\n\nUse: `.gemini <your question>`\n\nExample: `.gemini What is artificial intelligence?`" },
-            { id: "gemini_media", text: "🖼️ Analyze Media", reply: "🖼️ *Analyze Media*\n\nReply to any image/video/document with:\n`.gemini`\n\nOr send a file URL:\n`.gemini <question> --file <url>`" },
-            { id: "gemini_url", text: "🔗 File URL", reply: "🔗 *File URL*\n\nUse: `.gemini <question> --file <url>`\n\nExample: `.gemini What's in this PDF? --file https://example.com/doc.pdf`" }
-        ]
-    },
-    "Need-YouTube-Downloader": {
-        text: "🎬 *YouTube Downloader*\n\nDownload YouTube videos/audio with these options:",
-        buttons: [
-            { id: "yt_video", text: "📹 Download Video", reply: "📹 *Download Video*\n\nUse: `.ytvideo <url>`\n\nExample: `.ytvideo https://youtu.be/xxxxx`" },
-            { id: "yt_audio", text: "🎵 Download Audio", reply: "🎵 *Download Audio*\n\nUse: `.song <url>`\n\nExample: `.song https://youtu.be/xxxxx`" }
         ]
     }
 };
@@ -118,7 +112,7 @@ function rulesToText(rules) {
     let text = '# KnightBot-Mini AutoReply Rules\n';
     text += '# Format: COMMAND | TEXT | BUTTONS\n';
     text += '# Buttons format: id:text:reply,id:text:reply\n';
-    text += '# Reply can use \\n for new lines\n';
+    text += '# Use \\n for new lines in replies\n';
     text += '# Example: Need-Help | Help message | help1:🤖 Option 1:This is reply 1,help2:🎬 Option 2:This is reply 2\n';
     text += `# Last updated: ${new Date().toLocaleString()}\n\n`;
     
@@ -145,7 +139,7 @@ function textToRules(text) {
         const parts = trimmed.split('|').map(p => p.trim());
         if (parts.length >= 2) {
             const command = parts[0];
-            let replyText = parts[1].replace(/\\n/g, '\n');
+            let replyText = parseEscapeSequences(parts[1]);
             let buttons = [];
             
             if (parts.length >= 3 && parts[2]) {
@@ -155,7 +149,7 @@ function textToRules(text) {
                     if (btnParts.length >= 3) {
                         const id = btnParts[0];
                         const text = btnParts[1];
-                        const reply = btnParts.slice(2).join(':').replace(/\\n/g, '\n');
+                        const reply = parseEscapeSequences(btnParts.slice(2).join(':'));
                         if (id && text && reply) {
                             buttons.push({ id, text, reply });
                         }
@@ -320,7 +314,7 @@ async function checkAndReply(sock, from, sender, message, reply) {
         
         if (rule.buttons && rule.buttons.length > 0) {
             // Send with buttons
-            const sessionId = `${Date.now()}`;
+            const sessionId = `${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
             const buttons = rule.buttons.map((btn, idx) => ({
                 id: `autoreply_${sessionId}_${idx}`,
                 text: btn.text
@@ -333,7 +327,7 @@ async function checkAndReply(sock, from, sender, message, reply) {
                 aimode: FORCE_AI_MODE
             }, {});
             
-            // Store button handlers with their replies
+            // Store button handlers with their replies (keep for 30 minutes)
             buttonHandlers.set(`autoreply_${sessionId}`, {
                 command: trimmedMsg,
                 buttons: rule.buttons,
@@ -342,10 +336,10 @@ async function checkAndReply(sock, from, sender, message, reply) {
                 sessionId: sessionId
             });
             
-            // Clean up old handlers after 5 minutes
+            // Clean up old handlers after 30 minutes (not 5 minutes)
             setTimeout(() => {
                 buttonHandlers.delete(`autoreply_${sessionId}`);
-            }, 5 * 60 * 1000);
+            }, 30 * 60 * 1000);
             
         } else {
             // Send as plain text
@@ -383,10 +377,8 @@ async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, 
                 console.log(`[AUTOREPLY] No reply configured for button: ${button.id}`);
             }
             
-            // Clean up handler after use
-            setTimeout(() => {
-                buttonHandlers.delete(`autoreply_${sessionId}`);
-            }, 5000);
+            // Don't delete the handler - keep it for multiple clicks
+            // Only the timeout will clean it up after 30 minutes
             
             return true;
         }
@@ -420,7 +412,7 @@ module.exports = {
                        `*Button Format:*\n` +
                        `id:text:reply,id:text:reply\n` +
                        `*Example:*\n` +
-                       `.autoreply add Need-Help | Help message | btn1:🤖 Option 1:This is reply 1,btn2:🎬 Option 2:This is reply 2`);
+                       `.autoreply add Shop-Menu | 🛒 *Shop Menu*\\n\\nWhat would you like? | buy1:📱 iPhone:iPhone 15 - $999\\n\\nClick .buy,btn2:💻 MacBook:MacBook Pro - $1999\\n\\nClick .buy`);
         }
         
         const subCommand = args[0].toLowerCase();
@@ -456,7 +448,7 @@ module.exports = {
         
         if (subCommand === 'add') {
             if (args.length < 3) {
-                return reply('❌ Usage: .autoreply add <command> | <text> | <buttons>\n\nExample: .autoreply add Need-Help | Help message | btn1:🤖 Option 1:This is reply 1,btn2:🎬 Option 2:This is reply 2');
+                return reply('❌ Usage: .autoreply add <command> | <text> | <buttons>\n\nExample: .autoreply add Shop-Menu | 🛒 *Shop Menu*\\n\\nWhat would you like? | buy1:📱 iPhone:iPhone 15 - $999\\n\\nClick .buy,btn2:💻 MacBook:MacBook Pro - $1999\\n\\nClick .buy');
             }
             
             const fullArgs = args.slice(1).join(' ');
@@ -467,7 +459,9 @@ module.exports = {
             }
             
             const command = parts[0];
-            const text = parts[1];
+            let text = parts[1];
+            // Parse escape sequences in text
+            text = parseEscapeSequences(text);
             let buttons = [];
             
             if (parts.length >= 3 && parts[2]) {
@@ -477,7 +471,8 @@ module.exports = {
                     if (btnParts.length >= 3) {
                         const id = btnParts[0];
                         const btnText = btnParts[1];
-                        const btnReply = btnParts.slice(2).join(':');
+                        let btnReply = btnParts.slice(2).join(':');
+                        btnReply = parseEscapeSequences(btnReply);
                         buttons.push({ id, text: btnText, reply: btnReply });
                     } else {
                         return reply(`❌ Invalid button format: ${btn}\n\nUse: id:text:reply`);
@@ -503,7 +498,8 @@ module.exports = {
             }
             
             const command = parts[0];
-            const text = parts[1];
+            let text = parts[1];
+            text = parseEscapeSequences(text);
             let buttons = [];
             
             if (parts.length >= 3 && parts[2]) {
@@ -513,7 +509,8 @@ module.exports = {
                     if (btnParts.length >= 3) {
                         const id = btnParts[0];
                         const btnText = btnParts[1];
-                        const btnReply = btnParts.slice(2).join(':');
+                        let btnReply = btnParts.slice(2).join(':');
+                        btnReply = parseEscapeSequences(btnReply);
                         buttons.push({ id, text: btnText, reply: btnReply });
                     } else {
                         return reply(`❌ Invalid button format: ${btn}\n\nUse: id:text:reply`);
