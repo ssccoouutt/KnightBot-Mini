@@ -22,7 +22,7 @@ const UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=
 const FILE_URL = "https://www.googleapis.com/drive/v3/files";
 
 // GitHub Configuration
-const GITHUB_TOKEN = "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";
+const GITHUB_TOKEN = "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";
 const GITHUB_USERNAME = "ssccoouutt";
 
 let cachedToken = null;
