@@ -79,7 +79,7 @@ module.exports = {
     github: {
         token: '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', // Replace with your actual token
         username: 'ssccoouutt' // Replace with your GitHub username
-    }
+    },
     
     // Timezone
     timezone: 'Asia/Kolkata',
