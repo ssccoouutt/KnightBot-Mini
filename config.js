@@ -75,6 +75,11 @@ module.exports = {
       botAdminNeeded: '🤖 Bot needs to be admin to execute this command!',
       invalidCommand: '❓ Invalid command! Type .menu for help'
     },
+    // Add to your config.js
+    github: {
+        token: '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', // Replace with your actual token
+        username: 'ssccoouutt' // Replace with your GitHub username
+    }
     
     // Timezone
     timezone: 'Asia/Kolkata',
