@@ -905,4 +905,223 @@ async function pushToGitHub(sock, from, sender, reply, react, session, commitMes
     try {
         const { token, username } = await getGitHubCredentials();
         
-        const { successCount, totalCount, failedFiles, message } = await pushModifiedFilesTo
+        const { successCount, totalCount, failedFiles, message } = await pushModifiedFilesToGitHub(session, token, username, commitMessagePrefix, sock, from);
+        
+        let resultText = '';
+        
+        if (successCount > 0) {
+            resultText = `✅ *Changes Pushed to GitHub!*\n\n` +
+                        `📁 *Repo:* ${session.data.repoName}\n` +
+                        `📊 *Files Pushed:* ${successCount}/${totalCount}\n\n`;
+            
+            if (failedFiles.length > 0) {
+                resultText += `⚠️ *Failed to push ${failedFiles.length} file(s):*\n`;
+                for (const failed of failedFiles) {
+                    resultText += `• \`${failed.file}\`\n  └ ${failed.error}\n`;
+                }
+                resultText += `\n`;
+            }
+            
+            resultText += `🔗 *GitHub Link:*\nhttps://github.com/${username}/${session.data.repoName}\n\n`;
+            resultText += `> *Powered by ${config.botName}*`;
+            
+            await sock.sendMessage(from, {
+                text: resultText,
+                edit: processingMsg.key
+            });
+            
+            sessionManager.updateSession(sender, from, { hasChanges: false, modifiedFiles: [] });
+            await react('✅');
+        } else {
+            await sock.sendMessage(from, {
+                text: `❌ *Failed to push changes*\n\n${message || 'No files were uploaded. Please check your GitHub token and try again.'}`,
+                edit: processingMsg.key
+            });
+            await react('❌');
+        }
+        
+    } catch (error) {
+        await sock.sendMessage(from, {
+            text: `❌ *Push failed*\n\nError: ${error.message}`,
+            edit: processingMsg.key
+        });
+        await react('❌');
+    }
+}
+
+// ==================== MAIN COMMAND ====================
+
+module.exports = {
+    name: 'audit',
+    aliases: ['search', 'grep', 'find'],
+    description: 'Search through GitHub repository files with replace functionality',
+    usage: '.audit <github_repo_url>\n.audit <github_repo_url> <search_term>',
+    category: 'owner',
+    ownerOnly: true,
+
+    async execute(sock, msg, args, context) {
+        const { from, sender, reply, react } = context;
+        
+        if (args.length === 0) {
+            return reply(`🔍 *Audit/Search Command*\n\n` +
+                       `*Usage:*\n` +
+                       `• \`${config.prefix}audit <github_repo_url>\` - Load repo for searching\n` +
+                       `• \`${config.prefix}audit <github_repo_url> <search_term>\` - Search immediately\n\n` +
+                       `*Examples:*\n` +
+                       `• \`${config.prefix}audit https://github.com/user/repo\`\n` +
+                       `• \`${config.prefix}audit https://github.com/user/repo api_key\``);
+        }
+        
+        const firstArg = args[0];
+        
+        // Check if it's a GitHub URL
+        if (firstArg.includes('github.com')) {
+            const repoUrl = firstArg;
+            const searchTerm = args[1];
+            
+            await react('📥');
+            const processingMsg = await reply(`🔄 *Loading repository...*\n\nRepo: ${repoUrl}\n\nPlease wait, downloading...`);
+            
+            try {
+                await getGitHubCredentials();
+                
+                const updateProgress = (msg) => {
+                    sock.sendMessage(from, { text: `🔄 *${msg}*`, edit: processingMsg.key }).catch(() => {});
+                };
+                
+                const { extractedFolder, repoName, tempDir } = await downloadGitHubRepo(repoUrl, updateProgress);
+                
+                const session = sessionManager.createSession(sender, from, 'audit', {
+                    repoUrl: repoUrl,
+                    repoName: repoName,
+                    extractedFolder: extractedFolder,
+                    tempDir: tempDir,
+                    caseSensitive: false,
+                    fileExtensions: null,
+                    searchResults: null,
+                    waitingForSearch: false,
+                    waitingForReplace: false,
+                    waitingForFileName: false,
+                    waitingForFileSelection: false,
+                    pendingSearch: null,
+                    hasChanges: false,
+                    modifiedFiles: [],
+                    searchMode: null,
+                    specificFiles: null,
+                    foundFiles: null
+                });
+                
+                if (searchTerm) {
+                    // Search immediately with the provided term
+                    sessionManager.updateSession(sender, from, { searchMode: 'all', waitingForSearch: true });
+                    await performSearch(sock, from, sender, reply, react, session, searchTerm);
+                } else {
+                    await sock.sendMessage(from, {
+                        text: `✅ *Repository Loaded Successfully!*\n\n📁 *Repo:* ${repoName}\n📊 *Status:* Ready for search`,
+                        edit: processingMsg.key
+                    });
+                    await showFileModeSelection(sock, from, sender, reply, session);
+                }
+                
+                await react('✅');
+                
+            } catch (error) {
+                await sock.sendMessage(from, {
+                    text: `❌ *Failed to load repository*\n\nError: ${error.message}`,
+                    edit: processingMsg.key
+                });
+                await react('❌');
+            }
+            return;
+        }
+        
+        return reply(`❌ Invalid usage. Provide a GitHub repository URL.`);
+    },
+    
+    async handleSession(sock, msg, session, context) {
+        const { from, sender, reply, react, isButtonClick } = context;
+        
+        if (isButtonClick) {
+            let buttonId = null;
+            let buttonText = null;
+            
+            if (msg.message?.buttonsResponseMessage) {
+                buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
+                buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
+            } else if (msg.message?.listResponseMessage) {
+                const listReply = msg.message.listResponseMessage.singleSelectReply;
+                if (listReply) {
+                    buttonId = listReply.selectedRowId;
+                    buttonText = listReply.title;
+                }
+            } else if (msg.message?.interactiveResponseMessage) {
+                const interactive = msg.message.interactiveResponseMessage;
+                if (interactive.nativeFlowResponseMessage) {
+                    try {
+                        const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
+                        buttonId = params.id;
+                        buttonText = params.display_text;
+                    } catch (e) {}
+                }
+            } else if (msg.message?.templateButtonReplyMessage) {
+                buttonId = msg.message.templateButtonReplyMessage.selectedId;
+                buttonText = msg.message.templateButtonReplyMessage.selectedDisplayText;
+            }
+            
+            if (buttonId) {
+                const handled = await handleButtonClick(sock, msg, buttonId, buttonText, from, sender, reply, react);
+                if (handled) {
+                    return true;
+                }
+            }
+            return true;
+        }
+        
+        // Handle text input
+        let text = '';
+        if (msg.message?.conversation) {
+            text = msg.message.conversation.trim();
+        } else if (msg.message?.extendedTextMessage?.text) {
+            text = msg.message.extendedTextMessage.text.trim();
+        }
+        
+        if (!text) return true;
+        
+        if (text.toLowerCase() === 'cancel') {
+            sessionManager.updateSession(sender, from, { 
+                waitingForSearch: false, 
+                waitingForReplace: false,
+                waitingForFileName: false,
+                waitingForFileSelection: false
+            });
+            await showFileModeSelection(sock, from, sender, reply, session);
+            return true;
+        }
+        
+        // Handle replace text input
+        if (session.data.waitingForReplace && session.data.replaceSearchTerm) {
+            sessionManager.updateSession(sender, from, { waitingForReplace: false });
+            await performReplace(sock, from, sender, reply, react, session, session.data.replaceSearchTerm, text);
+            return true;
+        }
+        
+        // Handle file name input for single file mode
+        if (session.data.waitingForFileName) {
+            sessionManager.updateSession(sender, from, { waitingForFileName: false });
+            await handleFileNameInput(sock, from, sender, reply, react, session, text);
+            return true;
+        }
+        
+        // Handle search text input
+        if (session.data.waitingForSearch) {
+            sessionManager.updateSession(sender, from, { waitingForSearch: false, pendingSearch: text });
+            await performSearch(sock, from, sender, reply, react, session, text);
+            return true;
+        }
+        
+        return true;
+    }
+};
+
+// Export the button handler
+module.exports.handleButtonClick = handleButtonClick;
