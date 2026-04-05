@@ -9,9 +9,6 @@ const unzipper = require('unzipper');
 const FormData = require('form-data');
 const config = require('../../config');
 
-// Force AI mode ON for gifted buttons
-const FORCE_AI_MODE = true;
-
 // Google Drive Configuration
 const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download";
 const GITHUB_CONFIG_FILE_ID = "1EUSHauprcg3at2vAONYXelJuHHMBZq2b";
@@ -23,6 +20,9 @@ let tokenExpiry = null;
 let cachedGitHubToken = null;
 let cachedGitHubUsername = null;
 let githubTokenExpiry = null;
+
+// Track failed files
+let failedFiles = [];
 
 // ==================== GOOGLE DRIVE TOKEN FUNCTIONS ====================
 
@@ -229,17 +229,11 @@ async function uploadFileToGitHub(repoName, filePath, githubPath, token, usernam
             }
         );
         
-        return response.status === 200 || response.status === 201;
+        return { success: true, error: null };
         
     } catch (error) {
         const errorMsg = error.response?.data?.message || error.message;
-        // Skip secret detection errors (false positives)
-        if (errorMsg.includes('Secret detected') || errorMsg.includes('secret scanning')) {
-            console.log(`[CLONE] ⚠️ Skipping secret detection for ${githubPath} (false positive)`);
-            return true; // Treat as success
-        }
-        console.error(`[CLONE] Upload to GitHub failed for ${githubPath}:`, errorMsg);
-        return false;
+        return { success: false, error: errorMsg, file: githubPath };
     }
 }
 
@@ -332,7 +326,6 @@ async function listDriveFilesRecursive(folderId, currentPath = '') {
             const itemPath = currentPath ? path.join(currentPath, item.name) : item.name;
             
             if (item.mimeType === 'application/vnd.google-apps.folder') {
-                // Recursively get subfolder contents
                 const subItems = await listDriveFilesRecursive(item.id, itemPath);
                 result.push(...subItems);
             } else {
@@ -358,7 +351,6 @@ async function downloadFileFromDrive(fileId, filePath) {
         const token = await getAccessToken();
         if (!token) throw new Error('No access token');
         
-        // Ensure directory exists
         const dir = path.dirname(filePath);
         if (!fs.existsSync(dir)) {
             fs.mkdirSync(dir, { recursive: true });
@@ -459,7 +451,6 @@ async function uploadFolderToDrive(localPath, parentFolderId = null) {
         const itemPath = path.join(localPath, item);
         
         if (fs.statSync(itemPath).isDirectory()) {
-            // Create subfolder in Drive
             const folderId = await createDriveFolder(item, parentFolderId);
             const result = await uploadFolderToDrive(itemPath, folderId);
             successCount += result.successCount;
@@ -483,6 +474,7 @@ async function uploadFolderToGitHub(localPath, repoName, token, username, basePa
     const items = fs.readdirSync(localPath);
     let successCount = 0;
     let totalCount = 0;
+    const localFailedFiles = [];
     
     for (const item of items) {
         const itemPath = path.join(localPath, item);
@@ -490,20 +482,24 @@ async function uploadFolderToGitHub(localPath, repoName, token, username, basePa
         const githubPath = relativePath.replace(/\\/g, '/');
         
         if (fs.statSync(itemPath).isDirectory()) {
-            // Create folder in GitHub (by creating a .gitkeep file or just recursing)
-            // GitHub doesn't need explicit folder creation
             const result = await uploadFolderToGitHub(itemPath, repoName, token, username, relativePath);
             successCount += result.successCount;
             totalCount += result.totalCount;
+            localFailedFiles.push(...(result.failedFiles || []));
         } else {
             totalCount++;
-            const uploaded = await uploadFileToGitHub(repoName, itemPath, githubPath, token, username);
-            if (uploaded) successCount++;
-            console.log(`[CLONE] ${uploaded ? '✅' : '❌'} Uploaded: ${githubPath}`);
+            const result = await uploadFileToGitHub(repoName, itemPath, githubPath, token, username);
+            if (result.success) {
+                successCount++;
+                console.log(`[CLONE] ✅ Uploaded: ${githubPath}`);
+            } else {
+                console.log(`[CLONE] ❌ Failed: ${githubPath} - ${result.error}`);
+                localFailedFiles.push({ file: githubPath, error: result.error });
+            }
         }
     }
     
-    return { successCount, totalCount };
+    return { successCount, totalCount, failedFiles: localFailedFiles };
 }
 
 // ==================== MAIN COMMAND ====================
@@ -532,6 +528,9 @@ module.exports = {
         
         const link = args[0];
         const customName = args[1];
+        
+        // Reset failed files tracking
+        failedFiles = [];
         
         // Check if it's Drive to GitHub operation
         if (link.includes('drive.google.com') || link.includes('drive/folder')) {
@@ -633,7 +632,6 @@ async function handleDriveToGitHub(sock, from, driveLink, repoName, processingMs
         edit: processingMsg.key
     });
     
-    // Get all files recursively with their paths
     const files = await listDriveFilesRecursive(folderId);
     
     await sock.sendMessage(from, {
@@ -668,21 +666,42 @@ async function handleDriveToGitHub(sock, from, driveLink, repoName, processingMs
         });
     }
     
-    const { successCount, totalCount } = await uploadFolderToGitHub(tempDir, targetRepoName, githubToken, githubUsername);
+    const { successCount, totalCount, failedFiles: uploadFailedFiles } = await uploadFolderToGitHub(tempDir, targetRepoName, githubToken, githubUsername);
     
     fs.rmSync(tempDir, { recursive: true, force: true });
     
     const repoLink = `https://github.com/${githubUsername}/${targetRepoName}`;
     
-    await sock.sendMessage(from, {
-        text: `✅ *Clone Completed!*\n\n` +
+    // Build result message
+    let resultMessage = `✅ *Clone Completed!*\n\n` +
               `📥 *Source:* Google Drive\n` +
               `📤 *Destination:* GitHub Repo\n\n` +
               `📁 *Repo:* ${targetRepoName}\n` +
               `📁 *Folder Structure:* Preserved\n` +
               `📊 *Files Uploaded:* ${successCount}/${totalCount}\n\n` +
-              `🔗 *GitHub Link:*\n${repoLink}\n\n` +
-              `> *Powered by ${config.botName}*`,
+              `🔗 *GitHub Link:*\n${repoLink}\n\n`;
+    
+    // Show failed files if any
+    if (uploadFailedFiles && uploadFailedFiles.length > 0) {
+        resultMessage += `⚠️ *Failed to upload ${uploadFailedFiles.length} file(s):*\n`;
+        for (const failed of uploadFailedFiles) {
+            let errorMsg = failed.error;
+            if (errorMsg.includes('Secret detected')) {
+                errorMsg = '⚠️ Secret detected (false positive - contains API keys or tokens)';
+            }
+            resultMessage += `• \`${failed.file}\`\n  └ ${errorMsg}\n`;
+        }
+        resultMessage += `\n💡 *Note:* These files may contain sensitive information (API keys, tokens, etc.)\n`;
+        resultMessage += `GitHub's secret scanning blocked them. You can:\n`;
+        resultMessage += `• Remove sensitive data and upload manually\n`;
+        resultMessage += `• Add them to .gitignore\n`;
+        resultMessage += `• Use GitHub's secret scanning allowlist\n`;
+    }
+    
+    resultMessage += `\n> *Powered by ${config.botName}*`;
+    
+    await sock.sendMessage(from, {
+        text: resultMessage,
         edit: processingMsg.key
     });
 }
