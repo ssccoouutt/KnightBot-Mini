@@ -1,6 +1,6 @@
 /**
  * Audit Command - Search through GitHub repository files with replace functionality
- * COMPLETE FIXED VERSION - Preserves file structure
+ * COMPLETE FIXED VERSION - Supports multi-word search and selective file replacement
  */
 
 const axios = require('axios');
@@ -194,7 +194,6 @@ async function downloadGitHubRepo(repoUrl, onProgress) {
             
             const items = fs.readdirSync(dir);
             
-            // Look for common repo indicators
             const hasGitDir = items.includes('.git');
             const hasPackageJson = items.includes('package.json');
             const hasRequirements = items.includes('requirements.txt');
@@ -447,7 +446,6 @@ async function pushModifiedFilesToGitHub(session, token, username, commitMessage
     let failedFiles = [];
     
     for (const file of modifiedFiles) {
-        // Get the correct relative path from repo root
         let relativePath = path.relative(repoRoot, file.path);
         relativePath = relativePath.replace(/\\/g, '/');
         
@@ -530,7 +528,7 @@ function formatResults(results, searchTerm) {
         output += `*... and ${results.length - 15} more files*\n\n`;
     }
     
-    output += `💡 Use the buttons below to replace text or push changes.`;
+    output += `💡 Use the buttons below to:\n• Replace text in ALL files\n• Replace text in SELECTED files only`;
     
     return output;
 }
@@ -679,6 +677,76 @@ async function handleFileSelectionChoice(sock, from, sender, reply, react, sessi
     }
 }
 
+async function showFileSelectionForReplace(sock, from, sender, reply, session, searchResults) {
+    const sessionId = session.id.split(':').pop();
+    const buttons = [];
+    
+    // Add button for ALL files
+    buttons.push({ id: `replace_all_${sessionId}`, text: '📁 Replace in ALL files' });
+    
+    // Add button for each file
+    for (let i = 0; i < Math.min(searchResults.length, 10); i++) {
+        const result = searchResults[i];
+        const fileName = path.basename(result.file);
+        const relativePath = result.relativePath;
+        const displayText = relativePath.length > 40 ? relativePath.substring(0, 37) + '...' : relativePath;
+        buttons.push({
+            id: `replace_file_${sessionId}_${i}`,
+            text: `📄 ${displayText}`
+        });
+    }
+    
+    buttons.push({ id: 'cancel', text: '❌ Cancel' });
+    
+    // Store search results in session for later use
+    sessionManager.updateSession(sender, from, {
+        searchResults: searchResults,
+        waitingForFileReplaceSelection: true
+    });
+    
+    const sentMsg = await sendButtons(sock, from, {
+        text: `✏️ *Select files to replace*\n\nFound ${searchResults.length} file(s) with matches.\n\nChoose which files to apply replacements to:`,
+        footer: 'Audit Tool',
+        buttons: buttons,
+        aimode: FORCE_AI_MODE
+    }, {});
+    
+    sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'audit');
+}
+
+async function handleFileReplaceSelection(sock, from, sender, reply, react, session, buttonId) {
+    const parts = buttonId.split('_');
+    const action = parts[1];
+    const sessionId = parts[2];
+    const index = parseInt(parts[3]);
+    const searchResults = session.data.searchResults;
+    
+    if (action === 'all') {
+        // Replace in all files
+        sessionManager.updateSession(sender, from, {
+            waitingForReplace: true,
+            replaceSearchTerm: session.data.lastSearchTerm,
+            replaceSpecificFiles: searchResults.map(r => r.file)
+        });
+        await reply(`🔧 *Replace Mode*\n\nSearching for: \`${session.data.lastSearchTerm}\`\n\nPlease send the text you want to replace it with.\n\nType \`cancel\` to cancel.`);
+        return true;
+    }
+    
+    if (action === 'file' && !isNaN(index) && index >= 0 && index < searchResults.length) {
+        // Replace in specific file only
+        sessionManager.updateSession(sender, from, {
+            waitingForReplace: true,
+            replaceSearchTerm: session.data.lastSearchTerm,
+            replaceSpecificFiles: [searchResults[index].file]
+        });
+        await reply(`🔧 *Replace Mode*\n\nSelected file: \`${searchResults[index].fileName}\`\n\nSearching for: \`${session.data.lastSearchTerm}\`\n\nPlease send the text you want to replace it with.\n\nType \`cancel\` to cancel.`);
+        return true;
+    }
+    
+    await reply(`❌ Invalid selection.`);
+    return true;
+}
+
 // ==================== BUTTON HANDLER ====================
 
 async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, reply, react) {
@@ -712,9 +780,21 @@ async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, 
     }
     
     if (buttonId === 'start_replace') {
-        sessionManager.updateSession(sender, from, { waitingForReplace: true, replaceSearchTerm: session.data.lastSearchTerm });
-        await reply(`🔧 *Replace Mode*\n\nSearching for: \`${session.data.lastSearchTerm}\`\n\nPlease send the text you want to replace it with.\n\nType \`cancel\` to cancel.`);
+        // Show file selection for replace
+        if (session.data.searchResults && session.data.searchResults.length > 0) {
+            await showFileSelectionForReplace(sock, from, sender, reply, session, session.data.searchResults);
+        } else {
+            await reply(`❌ No search results found. Please perform a search first.`);
+        }
         return true;
+    }
+    
+    if (buttonId && buttonId.startsWith('replace_all_')) {
+        return await handleFileReplaceSelection(sock, from, sender, reply, react, session, buttonId);
+    }
+    
+    if (buttonId && buttonId.startsWith('replace_file_')) {
+        return await handleFileReplaceSelection(sock, from, sender, reply, react, session, buttonId);
     }
     
     if (buttonId === 'push_to_github') {
@@ -729,27 +809,8 @@ async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, 
         return await handleFileSelection(sock, from, sender, reply, react, session, buttonId);
     }
     
-    // Handle file selection buttons
     if (buttonId && buttonId.startsWith('select_file_')) {
-        console.log(`[AUDIT] Handling file selection button: ${buttonId}`);
-        const parts = buttonId.split('_');
-        const index = parseInt(parts[3]);
-        const foundFiles = session.data.foundFiles;
-        
-        if (foundFiles && !isNaN(index) && index >= 0 && index < foundFiles.length) {
-            sessionManager.updateSession(sender, from, {
-                searchMode: 'single',
-                specificFiles: [foundFiles[index]],
-                waitingForSearch: true,
-                waitingForFileSelection: false,
-                foundFiles: null
-            });
-            await reply(`🔍 *Search Mode: Single File*\n\nSelected: \`${foundFiles[index]}\`\n\nSend me the word/phrase you want to search for.`);
-            return true;
-        } else {
-            await reply(`❌ Invalid selection.`);
-            return true;
-        }
+        return await handleFileSelectionChoice(sock, from, sender, reply, react, session, buttonId);
     }
     
     return false;
@@ -877,7 +938,9 @@ async function performSearch(sock, from, sender, reply, react, session, searchTe
             searchResults: results,
             lastSearchTerm: searchTerm,
             waitingForReplace: false,
-            hasChanges: false
+            hasChanges: false,
+            waitingForFileReplaceSelection: false,
+            replaceSpecificFiles: null
         });
         
         await sock.sendMessage(from, {
@@ -904,12 +967,11 @@ async function performReplace(sock, from, sender, reply, react, session, searchT
     try {
         const isCaseSensitive = session.data.caseSensitive || false;
         const modifiedFilesList = [];
-        const searchMode = session.data.searchMode || 'all';
-        const specificFiles = session.data.specificFiles || null;
+        const specificFiles = session.data.replaceSpecificFiles || null;
         
         let result;
         
-        if (searchMode === 'single' && specificFiles && specificFiles.length > 0) {
+        if (specificFiles && specificFiles.length > 0) {
             result = await replaceInDirectory(null, searchTerm, replaceTerm, isCaseSensitive, null, modifiedFilesList, specificFiles);
         } else {
             result = await replaceInDirectory(session.data.extractedFolder, searchTerm, replaceTerm, isCaseSensitive, null, modifiedFilesList, null);
@@ -926,7 +988,8 @@ async function performReplace(sock, from, sender, reply, react, session, searchT
             modifiedFiles: modifiedFilesList,
             lastReplaceSearch: searchTerm,
             lastReplaceTerm: replaceTerm,
-            waitingForReplace: false
+            waitingForReplace: false,
+            replaceSpecificFiles: null
         });
         
         await sock.sendMessage(from, {
@@ -1017,14 +1080,16 @@ module.exports = {
                        `• \`${config.prefix}audit <github_repo_url> <search_term>\` - Search immediately\n\n` +
                        `*Examples:*\n` +
                        `• \`${config.prefix}audit https://github.com/user/repo\`\n` +
-                       `• \`${config.prefix}audit https://github.com/user/repo api_key\``);
+                       `• \`${config.prefix}audit https://github.com/user/repo "api key"\`\n` +
+                       `• \`${config.prefix}audit https://github.com/user/repo "multi word search"\``);
         }
         
         const firstArg = args[0];
         
         if (firstArg.includes('github.com')) {
             const repoUrl = firstArg;
-            const searchTerm = args[1];
+            // Join all remaining args as the search term (supports multi-word phrases)
+            const searchTerm = args.slice(1).join(' ');
             
             await react('📥');
             const processingMsg = await reply(`🔄 *Loading repository...*\n\nRepo: ${repoUrl}\n\nPlease wait, downloading...`);
@@ -1049,14 +1114,16 @@ module.exports = {
                     waitingForReplace: false,
                     waitingForFileName: false,
                     waitingForFileSelection: false,
+                    waitingForFileReplaceSelection: false,
                     hasChanges: false,
                     modifiedFiles: [],
                     searchMode: null,
                     specificFiles: null,
-                    foundFiles: null
+                    foundFiles: null,
+                    replaceSpecificFiles: null
                 });
                 
-                if (searchTerm) {
+                if (searchTerm && searchTerm.trim().length > 0) {
                     sessionManager.updateSession(sender, from, { searchMode: 'all', waitingForSearch: true });
                     await performSearch(sock, from, sender, reply, react, session, searchTerm);
                 } else {
@@ -1133,24 +1200,28 @@ module.exports = {
                 waitingForSearch: false, 
                 waitingForReplace: false,
                 waitingForFileName: false,
-                waitingForFileSelection: false
+                waitingForFileSelection: false,
+                waitingForFileReplaceSelection: false
             });
             await showFileModeSelection(sock, from, sender, reply, session);
             return true;
         }
         
+        // Handle replace text input
         if (session.data.waitingForReplace && session.data.replaceSearchTerm) {
             sessionManager.updateSession(sender, from, { waitingForReplace: false });
             await performReplace(sock, from, sender, reply, react, session, session.data.replaceSearchTerm, text);
             return true;
         }
         
+        // Handle file name input for single file mode
         if (session.data.waitingForFileName) {
             sessionManager.updateSession(sender, from, { waitingForFileName: false });
             await handleFileNameInput(sock, from, sender, reply, react, session, text);
             return true;
         }
         
+        // Handle search text input
         if (session.data.waitingForSearch) {
             sessionManager.updateSession(sender, from, { waitingForSearch: false, pendingSearch: text });
             await performSearch(sock, from, sender, reply, react, session, text);
