@@ -283,7 +283,6 @@ async function searchDirectory(dirPath, searchTerm, fileExtensions = null, isCas
             
             const fileResults = await searchInFile(itemPath, searchTerm, isCaseSensitive);
             if (fileResults && fileResults.length > 0) {
-                // Get relative path from the extracted folder
                 let relativePath = itemPath;
                 results.push({
                     file: itemPath,
@@ -328,10 +327,13 @@ async function replaceInDirectory(dirPath, searchTerm, replaceTerm, fileExtensio
             if (changed) {
                 totalReplacements += replaceCount;
                 affectedFiles++;
+                // Store relative path from the extracted folder root
+                let relativePath = itemPath;
                 modifiedFilesList.push({
                     path: itemPath,
                     fileName: item,
-                    replacements: replaceCount
+                    replacements: replaceCount,
+                    relativePath: relativePath
                 });
                 console.log(`[AUDIT] Modified: ${item} (${replaceCount} replacements)`);
             }
@@ -362,22 +364,17 @@ async function pushModifiedFilesToGitHub(session, token, username, commitMessage
     let successCount = 0;
     let failedFiles = [];
     
-    // Find the root folder name
+    // Find the root folder name (the actual repo folder inside extracted)
     const rootItems = fs.readdirSync(extractedFolder);
     const repoRoot = path.join(extractedFolder, rootItems[0]);
     
     for (const file of modifiedFiles) {
         // Get relative path from repo root
         let relativePath = path.relative(repoRoot, file.path);
+        
+        // If the file is not under repoRoot (shouldn't happen), use the stored relative path
         if (relativePath.startsWith('..')) {
-            // If file is not under repo root, try to find the correct relative path
-            const searchPath = file.path;
-            const repoRootIndex = searchPath.indexOf(rootItems[0]);
-            if (repoRootIndex !== -1) {
-                relativePath = searchPath.substring(repoRootIndex + rootItems[0].length + 1);
-            } else {
-                relativePath = path.basename(file.path);
-            }
+            relativePath = path.basename(file.path);
         }
         
         relativePath = relativePath.replace(/\\/g, '/');
@@ -462,7 +459,7 @@ function formatResults(results, searchTerm) {
         output += `*... and ${results.length - 15} more files*\n\n`;
     }
     
-    output += `💡 Use \`.audit replace <search> <replace>\` to replace text in these files.`;
+    output += `💡 Use the buttons below to replace text or push changes.`;
     
     return output;
 }
@@ -487,7 +484,7 @@ function formatReplaceResults(totalReplacements, affectedFiles, modifiedFiles) {
         output += `\n`;
     }
     
-    output += `💡 Use \`.audit push "Your commit message"\` to push changes to GitHub.`;
+    output += `💡 Click the "Push to GitHub" button below to upload your changes.`;
     
     return output;
 }
@@ -531,6 +528,14 @@ async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, 
         return true;
     }
     
+    if (buttonId === 'push_to_github') {
+        const commitMessage = session.data.lastReplaceTerm 
+            ? `Replace "${session.data.lastSearchTerm}" with "${session.data.lastReplaceTerm}"`
+            : 'Updated files via audit command';
+        await pushToGitHub(sock, from, sender, reply, session, commitMessage);
+        return true;
+    }
+    
     if (buttonId && buttonId.startsWith('search_')) {
         return false;
     }
@@ -541,32 +546,48 @@ async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, 
 async function showSearchOptions(sock, from, sender, reply, session) {
     const sessionId = session.id.split(':').pop();
     const hasResults = session.data.searchResults && session.data.searchResults.length > 0;
+    const hasChanges = session.data.hasChanges && session.data.modifiedFiles && session.data.modifiedFiles.length > 0;
     
     const buttons = [
         { id: `search_${sessionId}`, text: '🔍 New Search' },
         { id: 'export_results', text: '📄 Export Results' }
     ];
     
-    if (hasResults) {
+    if (hasResults && !hasChanges) {
         buttons.push({ id: 'start_replace', text: '✏️ Replace Text' });
+    }
+    
+    if (hasChanges) {
+        buttons.push({ id: 'push_to_github', text: '📤 Push to GitHub' });
     }
     
     buttons.push({ id: 'case_sensitive', text: session.data.caseSensitive ? '🔒 Case: ON' : '🔓 Case: OFF' });
     buttons.push({ id: 'clear_repo', text: '🗑️ Clear Repository' });
     
-    const sentMsg = await sendButtons(sock, from, {
-        text: `🔍 *Search Options*\n\n` +
+    let statusText = `🔍 *Search Options*\n\n` +
               `📁 *Repo:* ${session.data.repoName}\n` +
-              `🔒 *Case Sensitive:* ${session.data.caseSensitive ? 'ON' : 'OFF'}\n` +
-              `${hasResults ? `📊 *Last Search:* "${session.data.lastSearchTerm}" (${session.data.searchResults.length} files)\n` : ''}\n` +
-              `Send me the word/phrase you want to search for, or adjust options below.`,
+              `🔒 *Case Sensitive:* ${session.data.caseSensitive ? 'ON' : 'OFF'}\n`;
+    
+    if (hasResults) {
+        statusText += `📊 *Last Search:* "${session.data.lastSearchTerm}" (${session.data.searchResults.length} files)\n`;
+    }
+    
+    if (hasChanges) {
+        statusText += `✏️ *Pending Changes:* ${session.data.modifiedFiles.length} file(s) modified\n`;
+        statusText += `💡 Click "Push to GitHub" to upload your changes.\n\n`;
+    } else {
+        statusText += `\nSend me the word/phrase you want to search for, or adjust options below.`;
+    }
+    
+    const sentMsg = await sendButtons(sock, from, {
+        text: statusText,
         footer: 'Audit Tool',
         buttons: buttons,
         aimode: FORCE_AI_MODE
     }, {});
     
     sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'audit');
-    sessionManager.updateSession(sender, from, { waitingForSearch: true });
+    sessionManager.updateSession(sender, from, { waitingForSearch: !hasChanges });
 }
 
 async function exportSearchResults(sock, from, sender, reply, session) {
@@ -637,7 +658,8 @@ async function performSearch(sock, from, sender, reply, react, session, searchTe
         sessionManager.updateSession(sender, from, {
             searchResults: results,
             lastSearchTerm: searchTerm,
-            waitingForReplace: false
+            waitingForReplace: false,
+            hasChanges: false
         });
         
         await sock.sendMessage(from, {
@@ -681,7 +703,8 @@ async function performReplace(sock, from, sender, reply, react, session, searchT
             affectedFiles: affectedFiles,
             modifiedFiles: modifiedFilesList,
             lastReplaceSearch: searchTerm,
-            lastReplaceTerm: replaceTerm
+            lastReplaceTerm: replaceTerm,
+            waitingForReplace: false
         });
         
         await sock.sendMessage(from, {
@@ -701,14 +724,13 @@ async function performReplace(sock, from, sender, reply, react, session, searchT
     }
 }
 
-async function pushToGitHub(sock, from, sender, reply, react, session, commitMessage) {
-    await react('📤');
-    const processingMsg = await reply(`📤 *Pushing changes to GitHub...*\n\nCommit: ${commitMessage}\n\nPlease wait...`);
+async function pushToGitHub(sock, from, sender, reply, session, commitMessage) {
+    await reply(`📤 *Pushing changes to GitHub...*\n\nCommit: ${commitMessage}\n\nPlease wait...`);
     
     try {
         const { token, username } = await getGitHubCredentials();
         
-        const { successCount, totalCount, failedFiles } = await pushModifiedFilesToGitHub(session, token, username, commitMessage, sock, from, processingMsg);
+        const { successCount, totalCount, failedFiles } = await pushModifiedFilesToGitHub(session, token, username, commitMessage, sock, from, null);
         
         let resultText = '';
         
@@ -729,24 +751,18 @@ async function pushToGitHub(sock, from, sender, reply, react, session, commitMes
             
             resultText += `> *Powered by ${config.botName}*`;
             
-            await sock.sendMessage(from, {
-                text: resultText,
-                edit: processingMsg.key
-            });
+            await reply(resultText);
+            
+            // Clear the modified files after successful push
+            sessionManager.updateSession(sender, from, { hasChanges: false, modifiedFiles: [] });
             await react('✅');
         } else {
-            await sock.sendMessage(from, {
-                text: `❌ *Failed to push changes*\n\nNo files were uploaded. Please check your GitHub token and try again.`,
-                edit: processingMsg.key
-            });
+            await reply(`❌ *Failed to push changes*\n\nNo files were uploaded. Please check your GitHub token and try again.`);
             await react('❌');
         }
         
     } catch (error) {
-        await sock.sendMessage(from, {
-            text: `❌ *Push failed*\n\nError: ${error.message}`,
-            edit: processingMsg.key
-        });
+        await reply(`❌ *Push failed*\n\nError: ${error.message}`);
         await react('❌');
     }
 }
@@ -757,7 +773,7 @@ module.exports = {
     name: 'audit',
     aliases: ['search', 'grep', 'find'],
     description: 'Search through GitHub repository files with replace functionality',
-    usage: '.audit <github_repo_url>\n.audit <github_repo_url> <search_term>\n.audit search <search_term>\n.audit replace <search> <replace>\n.audit push <commit_message>',
+    usage: '.audit <github_repo_url>\n.audit <github_repo_url> <search_term>\n.audit search <search_term>\n.audit replace <search> <replace>',
     category: 'owner',
     ownerOnly: true,
 
@@ -770,14 +786,12 @@ module.exports = {
                        `• \`${config.prefix}audit <github_repo_url>\` - Load repo for searching\n` +
                        `• \`${config.prefix}audit <github_repo_url> <search_term>\` - Search immediately\n` +
                        `• \`${config.prefix}audit search <term>\` - Search loaded repo\n` +
-                       `• \`${config.prefix}audit replace <search> <replace>\` - Replace text in loaded repo\n` +
-                       `• \`${config.prefix}audit push <commit_message>\` - Push changes to GitHub\n\n` +
+                       `• \`${config.prefix}audit replace <search> <replace>\` - Replace text in loaded repo\n\n` +
                        `*Examples:*\n` +
                        `• \`${config.prefix}audit https://github.com/user/repo\`\n` +
                        `• \`${config.prefix}audit https://github.com/user/repo telegram\`\n` +
                        `• \`${config.prefix}audit search api_key\`\n` +
-                       `• \`${config.prefix}audit replace .com example.com\`\n` +
-                       `• \`${config.prefix}audit push "Updated URLs"\``);
+                       `• \`${config.prefix}audit replace "old text" "new text"\``);
         }
         
         const firstArg = args[0];
@@ -807,18 +821,6 @@ module.exports = {
             const searchTerm = args[1];
             const replaceTerm = args.slice(2).join(' ');
             await performReplace(sock, from, sender, reply, react, session, searchTerm, replaceTerm);
-            return;
-        }
-        
-        // Handle push command
-        if (firstArg === 'push') {
-            const commitMessage = args.slice(1).join(' ') || 'Updated files via audit command';
-            
-            if (!session.data.hasChanges) {
-                return reply(`⚠️ *No changes to push*\n\nNo replacements have been made yet. Use \`.audit replace\` first.`);
-            }
-            
-            await pushToGitHub(sock, from, sender, reply, react, session, commitMessage);
             return;
         }
         
