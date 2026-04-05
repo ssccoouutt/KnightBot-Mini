@@ -196,6 +196,23 @@ async function downloadGitHubRepo(repoUrl, onProgress) {
     }
 }
 
+async function findFilesByName(dirPath, fileName, results = []) {
+    const items = fs.readdirSync(dirPath);
+    
+    for (const item of items) {
+        const itemPath = path.join(dirPath, item);
+        const stat = fs.statSync(itemPath);
+        
+        if (stat.isDirectory()) {
+            await findFilesByName(itemPath, fileName, results);
+        } else if (item === fileName) {
+            results.push(itemPath);
+        }
+    }
+    
+    return results;
+}
+
 async function searchInFile(filePath, searchTerm, isCaseSensitive = false) {
     try {
         const content = fs.readFileSync(filePath, 'utf8');
@@ -216,7 +233,7 @@ async function searchInFile(filePath, searchTerm, isCaseSensitive = false) {
                 results.push({
                     lineNumber: i + 1,
                     line: line,
-                    preview: line // Show full line, no truncation
+                    preview: line
                 });
             }
         }
@@ -256,17 +273,24 @@ async function replaceInFile(filePath, searchTerm, replaceTerm, isCaseSensitive 
     }
 }
 
-async function searchDirectory(dirPath, searchTerm, fileExtensions = null, isCaseSensitive = false, onProgress) {
+async function searchDirectory(dirPath, searchTerm, fileExtensions = null, isCaseSensitive = false, onProgress, specificFiles = null) {
     const results = [];
-    const items = fs.readdirSync(dirPath);
+    let items;
+    
+    if (specificFiles) {
+        items = specificFiles;
+    } else {
+        items = fs.readdirSync(dirPath);
+    }
+    
     let processedCount = 0;
     
     for (const item of items) {
-        const itemPath = path.join(dirPath, item);
+        const itemPath = specificFiles ? item : path.join(dirPath, item);
         const stat = fs.statSync(itemPath);
         
         if (stat.isDirectory()) {
-            const subResults = await searchDirectory(itemPath, searchTerm, fileExtensions, isCaseSensitive, onProgress);
+            const subResults = await searchDirectory(itemPath, searchTerm, fileExtensions, isCaseSensitive, onProgress, null);
             results.push(...subResults);
         } else {
             processedCount++;
@@ -274,8 +298,7 @@ async function searchDirectory(dirPath, searchTerm, fileExtensions = null, isCas
                 onProgress(`Searching... (${processedCount} files processed)`);
             }
             
-            // Skip binary files
-            const ext = path.extname(item).toLowerCase();
+            const ext = path.extname(itemPath).toLowerCase();
             const textExtensions = ['.txt', '.js', '.json', '.md', '.py', '.html', '.css', '.xml', '.yml', '.yaml', '.cfg', '.conf', '.ini', '.log', '.sh', '.bat', '.ps1'];
             if (!textExtensions.includes(ext)) {
                 continue;
@@ -283,11 +306,10 @@ async function searchDirectory(dirPath, searchTerm, fileExtensions = null, isCas
             
             const fileResults = await searchInFile(itemPath, searchTerm, isCaseSensitive);
             if (fileResults && fileResults.length > 0) {
-                let relativePath = itemPath;
                 results.push({
                     file: itemPath,
-                    fileName: item,
-                    relativePath: relativePath,
+                    fileName: path.basename(itemPath),
+                    relativePath: itemPath,
                     matches: fileResults
                 });
             }
@@ -297,18 +319,25 @@ async function searchDirectory(dirPath, searchTerm, fileExtensions = null, isCas
     return results;
 }
 
-async function replaceInDirectory(dirPath, searchTerm, replaceTerm, fileExtensions = null, isCaseSensitive = false, onProgress, modifiedFilesList) {
-    const items = fs.readdirSync(dirPath);
+async function replaceInDirectory(dirPath, searchTerm, replaceTerm, fileExtensions = null, isCaseSensitive = false, onProgress, modifiedFilesList, specificFiles = null) {
+    let items;
+    
+    if (specificFiles) {
+        items = specificFiles;
+    } else {
+        items = fs.readdirSync(dirPath);
+    }
+    
     let totalReplacements = 0;
     let affectedFiles = 0;
     let processedCount = 0;
     
     for (const item of items) {
-        const itemPath = path.join(dirPath, item);
+        const itemPath = specificFiles ? item : path.join(dirPath, item);
         const stat = fs.statSync(itemPath);
         
         if (stat.isDirectory()) {
-            const result = await replaceInDirectory(itemPath, searchTerm, replaceTerm, fileExtensions, isCaseSensitive, onProgress, modifiedFilesList);
+            const result = await replaceInDirectory(itemPath, searchTerm, replaceTerm, fileExtensions, isCaseSensitive, onProgress, modifiedFilesList, null);
             totalReplacements += result.totalReplacements;
             affectedFiles += result.affectedFiles;
         } else {
@@ -317,7 +346,7 @@ async function replaceInDirectory(dirPath, searchTerm, replaceTerm, fileExtensio
                 onProgress(`Replacing... (${processedCount} files processed, ${totalReplacements} replacements so far)`);
             }
             
-            const ext = path.extname(item).toLowerCase();
+            const ext = path.extname(itemPath).toLowerCase();
             const textExtensions = ['.txt', '.js', '.json', '.md', '.py', '.html', '.css', '.xml', '.yml', '.yaml', '.cfg', '.conf', '.ini', '.log', '.sh', '.bat', '.ps1'];
             if (!textExtensions.includes(ext)) {
                 continue;
@@ -327,14 +356,13 @@ async function replaceInDirectory(dirPath, searchTerm, replaceTerm, fileExtensio
             if (changed) {
                 totalReplacements += replaceCount;
                 affectedFiles++;
-                let relativePath = itemPath;
                 modifiedFilesList.push({
                     path: itemPath,
-                    fileName: item,
+                    fileName: path.basename(itemPath),
                     replacements: replaceCount,
-                    relativePath: relativePath
+                    relativePath: itemPath
                 });
-                console.log(`[AUDIT] Modified: ${item} (${replaceCount} replacements)`);
+                console.log(`[AUDIT] Modified: ${path.basename(itemPath)} (${replaceCount} replacements)`);
             }
         }
     }
@@ -363,12 +391,17 @@ async function pushModifiedFilesToGitHub(session, token, username, commitMessage
         let relativePath = path.relative(repoRoot, file.path);
         
         if (relativePath.startsWith('..')) {
-            relativePath = path.basename(file.path);
+            // Try to find the correct relative path
+            const repoRootIndex = file.path.indexOf(rootItems[0]);
+            if (repoRootIndex !== -1) {
+                relativePath = file.path.substring(repoRootIndex + rootItems[0].length + 1);
+            } else {
+                relativePath = path.basename(file.path);
+            }
         }
         
         relativePath = relativePath.replace(/\\/g, '/');
         
-        // Create commit message with filename
         const fileName = path.basename(file.path);
         const commitMessage = `${commitMessagePrefix} ${fileName}`;
         
@@ -434,7 +467,6 @@ function formatResults(results, searchTerm) {
         const previewCount = Math.min(result.matches.length, 3);
         for (let j = 0; j < previewCount; j++) {
             const match = result.matches[j];
-            // Show full line, no truncation
             const fullLine = match.line;
             output += `   └ 📍 Line ${match.lineNumber}: \`${fullLine}\`\n`;
         }
@@ -478,6 +510,125 @@ function formatReplaceResults(totalReplacements, affectedFiles, modifiedFiles) {
     output += `💡 Click the "Push to GitHub" button below to upload your changes.`;
     
     return output;
+}
+
+async function showFileModeSelection(sock, from, sender, reply, session) {
+    const sessionId = session.id.split(':').pop();
+    
+    const buttons = [
+        { id: `mode_all_${sessionId}`, text: '📁 Search All Files' },
+        { id: `mode_single_${sessionId}`, text: '📄 Search Single File' },
+        { id: 'clear_repo', text: '🗑️ Clear Repository' }
+    ];
+    
+    const sentMsg = await sendButtons(sock, from, {
+        text: `🔍 *Search Mode Selection*\n\n` +
+              `📁 *Repo:* ${session.data.repoName}\n\n` +
+              `How would you like to search?\n\n` +
+              `• *All Files* - Search through every text file in the repository\n` +
+              `• *Single File* - Search only in a specific file\n\n` +
+              `Choose an option below:`,
+        footer: 'Audit Tool',
+        buttons: buttons,
+        aimode: FORCE_AI_MODE
+    }, {});
+    
+    sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'audit');
+}
+
+async function handleFileSelection(sock, from, sender, reply, react, session, buttonId) {
+    const sessionId = session.id.split(':').pop();
+    
+    if (buttonId.includes('mode_all')) {
+        sessionManager.updateSession(sender, from, { searchMode: 'all', waitingForSearch: true });
+        await reply(`🔍 *Search Mode: All Files*\n\nSend me the word/phrase you want to search for.`);
+        return true;
+    }
+    
+    if (buttonId.includes('mode_single')) {
+        sessionManager.updateSession(sender, from, { searchMode: 'single', waitingForFileName: true });
+        await reply(`📄 *Search Mode: Single File*\n\nSend me the exact filename (e.g., config.js) you want to search in.\n\nType \`cancel\` to go back.`);
+        return true;
+    }
+    
+    return false;
+}
+
+async function handleFileNameInput(sock, from, sender, reply, react, session, fileName) {
+    const extractedFolder = session.data.extractedFolder;
+    
+    // Find all files with this name
+    const rootItems = fs.readdirSync(extractedFolder);
+    const repoRoot = path.join(extractedFolder, rootItems[0]);
+    
+    const foundFiles = await findFilesByName(repoRoot, fileName, []);
+    
+    if (foundFiles.length === 0) {
+        await reply(`❌ No file named "${fileName}" found in the repository.`);
+        sessionManager.updateSession(sender, from, { waitingForFileName: true });
+        return;
+    }
+    
+    if (foundFiles.length === 1) {
+        // Single file found, proceed with search
+        sessionManager.updateSession(sender, from, {
+            searchMode: 'single',
+            specificFiles: foundFiles,
+            waitingForSearch: true,
+            waitingForFileName: false
+        });
+        await reply(`🔍 *Search Mode: Single File*\n\nFound: \`${foundFiles[0]}\`\n\nSend me the word/phrase you want to search for.`);
+    } else {
+        // Multiple files with same name, show selection buttons
+        const sessionId = session.id.split(':').pop();
+        const buttons = [];
+        
+        for (let i = 0; i < foundFiles.length; i++) {
+            const filePath = foundFiles[i];
+            const relativePath = path.relative(repoRoot, filePath);
+            buttons.push({
+                id: `select_file_${sessionId}_${i}`,
+                text: relativePath.length > 40 ? relativePath.substring(0, 37) + '...' : relativePath
+            });
+        }
+        
+        buttons.push({ id: 'cancel', text: '❌ Cancel' });
+        
+        // Store found files in session
+        sessionManager.updateSession(sender, from, {
+            foundFiles: foundFiles,
+            waitingForFileSelection: true,
+            waitingForFileName: false
+        });
+        
+        const sentMsg = await sendButtons(sock, from, {
+            text: `📁 *Multiple files named "${fileName}" found*\n\nSelect which file to search in:`,
+            footer: 'Audit Tool',
+            buttons: buttons,
+            aimode: FORCE_AI_MODE
+        }, {});
+        
+        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'audit');
+    }
+}
+
+async function handleFileSelectionChoice(sock, from, sender, reply, react, session, buttonId) {
+    const parts = buttonId.split('_');
+    const index = parseInt(parts[3]);
+    const foundFiles = session.data.foundFiles;
+    
+    if (index >= 0 && index < foundFiles.length) {
+        sessionManager.updateSession(sender, from, {
+            searchMode: 'single',
+            specificFiles: [foundFiles[index]],
+            waitingForSearch: true,
+            waitingForFileSelection: false,
+            foundFiles: null
+        });
+        await reply(`🔍 *Search Mode: Single File*\n\nSelected: \`${foundFiles[index]}\`\n\nSend me the word/phrase you want to search for.`);
+    } else {
+        await reply(`❌ Invalid selection.`);
+    }
 }
 
 // ==================== BUTTON HANDLER ====================
@@ -525,6 +676,14 @@ async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, 
             : 'Update';
         await pushToGitHub(sock, from, sender, reply, react, session, commitMessagePrefix);
         return true;
+    }
+    
+    if (buttonId && (buttonId.includes('mode_all') || buttonId.includes('mode_single'))) {
+        return await handleFileSelection(sock, from, sender, reply, react, session, buttonId);
+    }
+    
+    if (buttonId && buttonId.startsWith('select_file_')) {
+        return await handleFileSelectionChoice(sock, from, sender, reply, react, session, buttonId);
     }
     
     if (buttonId && buttonId.startsWith('search_')) {
@@ -639,10 +798,22 @@ async function performSearch(sock, from, sender, reply, react, session, searchTe
     
     try {
         const isCaseSensitive = session.data.caseSensitive || false;
+        const searchMode = session.data.searchMode || 'all';
+        const specificFiles = session.data.specificFiles || null;
         
-        const results = await searchDirectory(session.data.extractedFolder, searchTerm, null, isCaseSensitive, (msg) => {
-            sock.sendMessage(from, { text: `🔍 *${msg}*`, edit: processingMsg.key }).catch(() => {});
-        });
+        let results;
+        
+        if (searchMode === 'single' && specificFiles && specificFiles.length > 0) {
+            // Search only in specific files
+            results = await searchDirectory(null, searchTerm, null, isCaseSensitive, (msg) => {
+                sock.sendMessage(from, { text: `🔍 *${msg}*`, edit: processingMsg.key }).catch(() => {});
+            }, specificFiles);
+        } else {
+            // Search all files
+            results = await searchDirectory(session.data.extractedFolder, searchTerm, null, isCaseSensitive, (msg) => {
+                sock.sendMessage(from, { text: `🔍 *${msg}*`, edit: processingMsg.key }).catch(() => {});
+            }, null);
+        }
         
         const formattedResults = formatResults(results, searchTerm);
         
@@ -677,14 +848,26 @@ async function performReplace(sock, from, sender, reply, react, session, searchT
     try {
         const isCaseSensitive = session.data.caseSensitive || false;
         const modifiedFilesList = [];
+        const searchMode = session.data.searchMode || 'all';
+        const specificFiles = session.data.specificFiles || null;
         
-        const { totalReplacements, affectedFiles } = await replaceInDirectory(
-            session.data.extractedFolder, searchTerm, replaceTerm, null, isCaseSensitive,
-            (msg) => {
-                sock.sendMessage(from, { text: `✏️ *${msg}*`, edit: processingMsg.key }).catch(() => {});
-            },
-            modifiedFilesList
-        );
+        let result;
+        
+        if (searchMode === 'single' && specificFiles && specificFiles.length > 0) {
+            result = await replaceInDirectory(null, searchTerm, replaceTerm, null, isCaseSensitive,
+                (msg) => {
+                    sock.sendMessage(from, { text: `✏️ *${msg}*`, edit: processingMsg.key }).catch(() => {});
+                },
+                modifiedFilesList, specificFiles);
+        } else {
+            result = await replaceInDirectory(session.data.extractedFolder, searchTerm, replaceTerm, null, isCaseSensitive,
+                (msg) => {
+                    sock.sendMessage(from, { text: `✏️ *${msg}*`, edit: processingMsg.key }).catch(() => {});
+                },
+                modifiedFilesList, null);
+        }
+        
+        const { totalReplacements, affectedFiles } = result;
         
         const formattedResults = formatReplaceResults(totalReplacements, affectedFiles, modifiedFilesList);
         
@@ -722,288 +905,4 @@ async function pushToGitHub(sock, from, sender, reply, react, session, commitMes
     try {
         const { token, username } = await getGitHubCredentials();
         
-        const { successCount, totalCount, failedFiles, message } = await pushModifiedFilesToGitHub(session, token, username, commitMessagePrefix, sock, from);
-        
-        let resultText = '';
-        
-        if (successCount > 0) {
-            resultText = `✅ *Changes Pushed to GitHub!*\n\n` +
-                        `📁 *Repo:* ${session.data.repoName}\n` +
-                        `📊 *Files Pushed:* ${successCount}/${totalCount}\n\n`;
-            
-            if (failedFiles.length > 0) {
-                resultText += `⚠️ *Failed to push ${failedFiles.length} file(s):*\n`;
-                for (const failed of failedFiles) {
-                    resultText += `• \`${failed.file}\`\n  └ ${failed.error}\n`;
-                }
-                resultText += `\n`;
-            }
-            
-            resultText += `🔗 *GitHub Link:*\nhttps://github.com/${username}/${session.data.repoName}\n\n`;
-            resultText += `> *Powered by ${config.botName}*`;
-            
-            await sock.sendMessage(from, {
-                text: resultText,
-                edit: processingMsg.key
-            });
-            
-            // Clear the modified files after successful push
-            sessionManager.updateSession(sender, from, { hasChanges: false, modifiedFiles: [] });
-            await react('✅');
-        } else {
-            await sock.sendMessage(from, {
-                text: `❌ *Failed to push changes*\n\n${message || 'No files were uploaded. Please check your GitHub token and try again.'}`,
-                edit: processingMsg.key
-            });
-            await react('❌');
-        }
-        
-    } catch (error) {
-        await sock.sendMessage(from, {
-            text: `❌ *Push failed*\n\nError: ${error.message}`,
-            edit: processingMsg.key
-        });
-        await react('❌');
-    }
-}
-
-// ==================== MAIN COMMAND ====================
-
-module.exports = {
-    name: 'audit',
-    aliases: ['search', 'grep', 'find'],
-    description: 'Search through GitHub repository files with replace functionality',
-    usage: '.audit <github_repo_url>\n.audit <github_repo_url> <search_term>\n.audit search <search_term>\n.audit replace <search> <replace>',
-    category: 'owner',
-    ownerOnly: true,
-
-    async execute(sock, msg, args, context) {
-        const { from, sender, reply, react } = context;
-        
-        if (args.length === 0) {
-            return reply(`🔍 *Audit/Search Command*\n\n` +
-                       `*Usage:*\n` +
-                       `• \`${config.prefix}audit <github_repo_url>\` - Load repo for searching\n` +
-                       `• \`${config.prefix}audit <github_repo_url> <search_term>\` - Search immediately\n` +
-                       `• \`${config.prefix}audit search <term>\` - Search loaded repo\n` +
-                       `• \`${config.prefix}audit replace <search> <replace>\` - Replace text in loaded repo\n\n` +
-                       `*Examples:*\n` +
-                       `• \`${config.prefix}audit https://github.com/user/repo\`\n` +
-                       `• \`${config.prefix}audit https://github.com/user/repo telegram\`\n` +
-                       `• \`${config.prefix}audit search api_key\`\n` +
-                       `• \`${config.prefix}audit replace "old text" "new text"\``);
-        }
-        
-        const firstArg = args[0];
-        
-        // Check if it's a GitHub URL
-        if (firstArg.includes('github.com')) {
-            const repoUrl = firstArg;
-            const searchTerm = args[1];
-            
-            if (searchTerm) {
-                await handleRepoLoadAndSearch(sock, from, sender, reply, react, repoUrl, searchTerm);
-            } else {
-                await handleRepoLoad(sock, from, sender, reply, react, repoUrl);
-            }
-            return;
-        }
-        
-        // Get user's active audit session
-        const session = sessionManager.getLatestSession(sender, from);
-        
-        if (!session || session.command !== 'audit' || !session.data.extractedFolder) {
-            return reply(`❌ *No repository loaded*\n\nPlease load a repository first:\n\`${config.prefix}audit <github_repo_url>\``);
-        }
-        
-        // Handle replace command
-        if (firstArg === 'replace' && args.length >= 3) {
-            const searchTerm = args[1];
-            const replaceTerm = args.slice(2).join(' ');
-            await performReplace(sock, from, sender, reply, react, session, searchTerm, replaceTerm);
-            return;
-        }
-        
-        // Handle search command
-        if (firstArg === 'search' && args[1]) {
-            const searchTerm = args[1];
-            await performSearch(sock, from, sender, reply, react, session, searchTerm);
-            return;
-        }
-        
-        return reply(`❌ Invalid usage. Use \`.audit help\` for more information.`);
-    },
-    
-    async handleSession(sock, msg, session, context) {
-        const { from, sender, reply, react, isButtonClick } = context;
-        
-        if (isButtonClick) {
-            let buttonId = null;
-            let buttonText = null;
-            
-            if (msg.message?.buttonsResponseMessage) {
-                buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
-                buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
-            } else if (msg.message?.listResponseMessage) {
-                const listReply = msg.message.listResponseMessage.singleSelectReply;
-                if (listReply) {
-                    buttonId = listReply.selectedRowId;
-                    buttonText = listReply.title;
-                }
-            } else if (msg.message?.interactiveResponseMessage) {
-                const interactive = msg.message.interactiveResponseMessage;
-                if (interactive.nativeFlowResponseMessage) {
-                    try {
-                        const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
-                        buttonId = params.id;
-                        buttonText = params.display_text;
-                    } catch (e) {}
-                }
-            } else if (msg.message?.templateButtonReplyMessage) {
-                buttonId = msg.message.templateButtonReplyMessage.selectedId;
-                buttonText = msg.message.templateButtonReplyMessage.selectedDisplayText;
-            }
-            
-            if (buttonId) {
-                const handled = await handleButtonClick(sock, msg, buttonId, buttonText, from, sender, reply, react);
-                if (handled) {
-                    return true;
-                }
-            }
-            return true;
-        }
-        
-        // Handle text input
-        let text = '';
-        if (msg.message?.conversation) {
-            text = msg.message.conversation.trim();
-        } else if (msg.message?.extendedTextMessage?.text) {
-            text = msg.message.extendedTextMessage.text.trim();
-        }
-        
-        if (!text) return true;
-        
-        if (text.toLowerCase() === 'cancel') {
-            sessionManager.updateSession(sender, from, { waitingForSearch: false, waitingForReplace: false });
-            await reply(`❌ Operation cancelled.`);
-            return true;
-        }
-        
-        // Handle replace text input
-        if (session.data.waitingForReplace && session.data.replaceSearchTerm) {
-            sessionManager.updateSession(sender, from, { waitingForReplace: false });
-            await performReplace(sock, from, sender, reply, react, session, session.data.replaceSearchTerm, text);
-            return true;
-        }
-        
-        // Handle search text input
-        if (session.data.waitingForSearch) {
-            sessionManager.updateSession(sender, from, { waitingForSearch: false, pendingSearch: text });
-            await performSearch(sock, from, sender, reply, react, session, text);
-            return true;
-        }
-        
-        return true;
-    }
-};
-
-// Export the button handler
-module.exports.handleButtonClick = handleButtonClick;
-
-// ==================== HELPER FUNCTIONS ====================
-
-async function handleRepoLoad(sock, from, sender, reply, react, repoUrl) {
-    await react('📥');
-    const processingMsg = await reply(`🔄 *Loading repository...*\n\nRepo: ${repoUrl}\n\nPlease wait, downloading...`);
-    
-    try {
-        await getGitHubCredentials();
-        
-        const updateProgress = (msg) => {
-            sock.sendMessage(from, { text: `🔄 *${msg}*`, edit: processingMsg.key }).catch(() => {});
-        };
-        
-        const { extractedFolder, repoName, tempDir } = await downloadGitHubRepo(repoUrl, updateProgress);
-        
-        const session = sessionManager.createSession(sender, from, 'audit', {
-            repoUrl: repoUrl,
-            repoName: repoName,
-            extractedFolder: extractedFolder,
-            tempDir: tempDir,
-            caseSensitive: false,
-            fileExtensions: null,
-            searchResults: null,
-            waitingForSearch: false,
-            waitingForReplace: false,
-            pendingSearch: null,
-            hasChanges: false,
-            modifiedFiles: []
-        });
-        
-        await sock.sendMessage(from, {
-            text: `✅ *Repository Loaded Successfully!*\n\n📁 *Repo:* ${repoName}\n📊 *Status:* Ready for search\n\nWhat would you like to do?`,
-            edit: processingMsg.key
-        });
-        
-        await showSearchOptions(sock, from, sender, reply, session);
-        await react('✅');
-        
-    } catch (error) {
-        await sock.sendMessage(from, {
-            text: `❌ *Failed to load repository*\n\nError: ${error.message}`,
-            edit: processingMsg.key
-        });
-        await react('❌');
-    }
-}
-
-async function handleRepoLoadAndSearch(sock, from, sender, reply, react, repoUrl, searchTerm) {
-    await react('📥');
-    const processingMsg = await reply(`🔄 *Loading repository and searching...*\n\nRepo: ${repoUrl}\nSearch: "${searchTerm}"\n\nPlease wait...`);
-    
-    try {
-        await getGitHubCredentials();
-        
-        const updateProgress = (msg) => {
-            sock.sendMessage(from, { text: `🔄 *${msg}*`, edit: processingMsg.key }).catch(() => {});
-        };
-        
-        const { extractedFolder, repoName, tempDir } = await downloadGitHubRepo(repoUrl, updateProgress);
-        
-        updateProgress('Searching files...');
-        
-        const results = await searchDirectory(extractedFolder, searchTerm, null, false, updateProgress);
-        
-        const formattedResults = formatResults(results, searchTerm);
-        
-        const session = sessionManager.createSession(sender, from, 'audit', {
-            repoUrl: repoUrl,
-            repoName: repoName,
-            extractedFolder: extractedFolder,
-            tempDir: tempDir,
-            caseSensitive: false,
-            fileExtensions: null,
-            searchResults: results,
-            lastSearchTerm: searchTerm,
-            waitingForSearch: false,
-            waitingForReplace: false,
-            hasChanges: false,
-            modifiedFiles: []
-        });
-        
-        await sock.sendMessage(from, {
-            text: formattedResults,
-            edit: processingMsg.key
-        });
-        
-        await showSearchOptions(sock, from, sender, reply, session);
-        await react('✅');
-        
-    } catch (error) {
-        await sock.sendMessage(from, {
-            text: `❌ *Failed*\n\nError: ${error.message}`,
-            edit: processingMsg.key
-        });
-        await react('❌');
-    }
-}
+        const { successCount, totalCount, failedFiles, message } = await pushModifiedFilesTo
