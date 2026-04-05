@@ -216,7 +216,7 @@ async function searchInFile(filePath, searchTerm, isCaseSensitive = false) {
                 results.push({
                     lineNumber: i + 1,
                     line: line,
-                    preview: line.substring(0, 100).trim()
+                    preview: line // Show full line, no truncation
                 });
             }
         }
@@ -342,7 +342,7 @@ async function replaceInDirectory(dirPath, searchTerm, replaceTerm, fileExtensio
     return { totalReplacements, affectedFiles };
 }
 
-async function pushModifiedFilesToGitHub(session, token, username, commitMessage, sock, from) {
+async function pushModifiedFilesToGitHub(session, token, username, commitMessagePrefix, sock, from) {
     const repoName = session.data.repoName;
     const extractedFolder = session.data.extractedFolder;
     const modifiedFiles = session.data.modifiedFiles || [];
@@ -367,6 +367,10 @@ async function pushModifiedFilesToGitHub(session, token, username, commitMessage
         }
         
         relativePath = relativePath.replace(/\\/g, '/');
+        
+        // Create commit message with filename
+        const fileName = path.basename(file.path);
+        const commitMessage = `${commitMessagePrefix} ${fileName}`;
         
         try {
             const content = fs.readFileSync(file.path, 'utf8');
@@ -399,7 +403,7 @@ async function pushModifiedFilesToGitHub(session, token, username, commitMessage
             );
             
             successCount++;
-            console.log(`[AUDIT] ✅ Pushed: ${relativePath}`);
+            console.log(`[AUDIT] ✅ Pushed: ${relativePath} (${commitMessage})`);
             
         } catch (error) {
             console.error(`[AUDIT] ❌ Failed to push ${relativePath}:`, error.response?.data?.message || error.message);
@@ -430,8 +434,9 @@ function formatResults(results, searchTerm) {
         const previewCount = Math.min(result.matches.length, 3);
         for (let j = 0; j < previewCount; j++) {
             const match = result.matches[j];
-            const linePreview = match.preview.length > 80 ? match.preview.substring(0, 80) + '...' : match.preview;
-            output += `   └ 📍 Line ${match.lineNumber}: \`${linePreview}\`\n`;
+            // Show full line, no truncation
+            const fullLine = match.line;
+            output += `   └ 📍 Line ${match.lineNumber}: \`${fullLine}\`\n`;
         }
         
         if (result.matches.length > 3) {
@@ -515,10 +520,10 @@ async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, 
     }
     
     if (buttonId === 'push_to_github') {
-        const commitMessage = session.data.lastReplaceTerm 
-            ? `Replace "${session.data.lastSearchTerm}" with "${session.data.lastReplaceTerm}"`
-            : 'Updated files via audit command';
-        await pushToGitHub(sock, from, sender, reply, react, session, commitMessage);
+        const commitMessagePrefix = session.data.lastReplaceTerm 
+            ? `Replace "${session.data.lastSearchTerm}" with "${session.data.lastReplaceTerm}" in`
+            : 'Update';
+        await pushToGitHub(sock, from, sender, reply, react, session, commitMessagePrefix);
         return true;
     }
     
@@ -710,23 +715,21 @@ async function performReplace(sock, from, sender, reply, react, session, searchT
     }
 }
 
-async function pushToGitHub(sock, from, sender, reply, react, session, commitMessage) {
+async function pushToGitHub(sock, from, sender, reply, react, session, commitMessagePrefix) {
     await react('📤');
-    const processingMsg = await reply(`📤 *Pushing changes to GitHub...*\n\nCommit: ${commitMessage}\n\nPlease wait...`);
+    const processingMsg = await reply(`📤 *Pushing changes to GitHub...*\n\nPlease wait...`);
     
     try {
         const { token, username } = await getGitHubCredentials();
         
-        const { successCount, totalCount, failedFiles, message } = await pushModifiedFilesToGitHub(session, token, username, commitMessage, sock, from);
+        const { successCount, totalCount, failedFiles, message } = await pushModifiedFilesToGitHub(session, token, username, commitMessagePrefix, sock, from);
         
         let resultText = '';
         
         if (successCount > 0) {
             resultText = `✅ *Changes Pushed to GitHub!*\n\n` +
                         `📁 *Repo:* ${session.data.repoName}\n` +
-                        `📊 *Files Pushed:* ${successCount}/${totalCount}\n` +
-                        `💬 *Commit:* ${commitMessage}\n\n` +
-                        `🔗 *GitHub Link:*\nhttps://github.com/${username}/${session.data.repoName}\n\n`;
+                        `📊 *Files Pushed:* ${successCount}/${totalCount}\n\n`;
             
             if (failedFiles.length > 0) {
                 resultText += `⚠️ *Failed to push ${failedFiles.length} file(s):*\n`;
@@ -736,6 +739,7 @@ async function pushToGitHub(sock, from, sender, reply, react, session, commitMes
                 resultText += `\n`;
             }
             
+            resultText += `🔗 *GitHub Link:*\nhttps://github.com/${username}/${session.data.repoName}\n\n`;
             resultText += `> *Powered by ${config.botName}*`;
             
             await sock.sendMessage(from, {
