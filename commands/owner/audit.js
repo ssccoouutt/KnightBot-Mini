@@ -327,7 +327,6 @@ async function replaceInDirectory(dirPath, searchTerm, replaceTerm, fileExtensio
             if (changed) {
                 totalReplacements += replaceCount;
                 affectedFiles++;
-                // Store relative path from the extracted folder root
                 let relativePath = itemPath;
                 modifiedFilesList.push({
                     path: itemPath,
@@ -343,23 +342,14 @@ async function replaceInDirectory(dirPath, searchTerm, replaceTerm, fileExtensio
     return { totalReplacements, affectedFiles };
 }
 
-async function pushModifiedFilesToGitHub(session, token, username, commitMessage, sock, from, processingMsg) {
+async function pushModifiedFilesToGitHub(session, token, username, commitMessage, sock, from) {
     const repoName = session.data.repoName;
     const extractedFolder = session.data.extractedFolder;
     const modifiedFiles = session.data.modifiedFiles || [];
     
     if (modifiedFiles.length === 0) {
-        await sock.sendMessage(from, {
-            text: `⚠️ *No files were modified*\n\nNo changes to push. Use \`.audit replace\` first.`,
-            edit: processingMsg.key
-        });
-        return false;
+        return { successCount: 0, totalCount: 0, failedFiles: [], message: "No files were modified" };
     }
-    
-    await sock.sendMessage(from, {
-        text: `📤 *Pushing ${modifiedFiles.length} modified file(s) to GitHub...*\n\nPlease wait...`,
-        edit: processingMsg.key
-    });
     
     let successCount = 0;
     let failedFiles = [];
@@ -372,7 +362,6 @@ async function pushModifiedFilesToGitHub(session, token, username, commitMessage
         // Get relative path from repo root
         let relativePath = path.relative(repoRoot, file.path);
         
-        // If the file is not under repoRoot (shouldn't happen), use the stored relative path
         if (relativePath.startsWith('..')) {
             relativePath = path.basename(file.path);
         }
@@ -383,7 +372,6 @@ async function pushModifiedFilesToGitHub(session, token, username, commitMessage
             const content = fs.readFileSync(file.path, 'utf8');
             const base64Content = Buffer.from(content).toString('base64');
             
-            // Check if file exists on GitHub
             let sha = null;
             try {
                 const checkResponse = await axios.get(
@@ -393,9 +381,7 @@ async function pushModifiedFilesToGitHub(session, token, username, commitMessage
                 if (checkResponse.data && checkResponse.data.sha) {
                     sha = checkResponse.data.sha;
                 }
-            } catch (e) {
-                // File doesn't exist, will be created
-            }
+            } catch (e) {}
             
             await axios.put(
                 `https://api.github.com/repos/${username}/${repoName}/contents/${relativePath}`,
@@ -491,7 +477,7 @@ function formatReplaceResults(totalReplacements, affectedFiles, modifiedFiles) {
 
 // ==================== BUTTON HANDLER ====================
 
-async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, reply) {
+async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, reply, react) {
     console.log(`[AUDIT] Handling button: ${buttonId}`);
     
     const session = sessionManager.getLatestSession(sender, from);
@@ -532,7 +518,7 @@ async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, 
         const commitMessage = session.data.lastReplaceTerm 
             ? `Replace "${session.data.lastSearchTerm}" with "${session.data.lastReplaceTerm}"`
             : 'Updated files via audit command';
-        await pushToGitHub(sock, from, sender, reply, session, commitMessage);
+        await pushToGitHub(sock, from, sender, reply, react, session, commitMessage);
         return true;
     }
     
@@ -724,13 +710,14 @@ async function performReplace(sock, from, sender, reply, react, session, searchT
     }
 }
 
-async function pushToGitHub(sock, from, sender, reply, session, commitMessage) {
-    await reply(`📤 *Pushing changes to GitHub...*\n\nCommit: ${commitMessage}\n\nPlease wait...`);
+async function pushToGitHub(sock, from, sender, reply, react, session, commitMessage) {
+    await react('📤');
+    const processingMsg = await reply(`📤 *Pushing changes to GitHub...*\n\nCommit: ${commitMessage}\n\nPlease wait...`);
     
     try {
         const { token, username } = await getGitHubCredentials();
         
-        const { successCount, totalCount, failedFiles } = await pushModifiedFilesToGitHub(session, token, username, commitMessage, sock, from, null);
+        const { successCount, totalCount, failedFiles, message } = await pushModifiedFilesToGitHub(session, token, username, commitMessage, sock, from);
         
         let resultText = '';
         
@@ -751,18 +738,27 @@ async function pushToGitHub(sock, from, sender, reply, session, commitMessage) {
             
             resultText += `> *Powered by ${config.botName}*`;
             
-            await reply(resultText);
+            await sock.sendMessage(from, {
+                text: resultText,
+                edit: processingMsg.key
+            });
             
             // Clear the modified files after successful push
             sessionManager.updateSession(sender, from, { hasChanges: false, modifiedFiles: [] });
             await react('✅');
         } else {
-            await reply(`❌ *Failed to push changes*\n\nNo files were uploaded. Please check your GitHub token and try again.`);
+            await sock.sendMessage(from, {
+                text: `❌ *Failed to push changes*\n\n${message || 'No files were uploaded. Please check your GitHub token and try again.'}`,
+                edit: processingMsg.key
+            });
             await react('❌');
         }
         
     } catch (error) {
-        await reply(`❌ *Push failed*\n\nError: ${error.message}`);
+        await sock.sendMessage(from, {
+            text: `❌ *Push failed*\n\nError: ${error.message}`,
+            edit: processingMsg.key
+        });
         await react('❌');
     }
 }
@@ -865,7 +861,7 @@ module.exports = {
             }
             
             if (buttonId) {
-                const handled = await handleButtonClick(sock, msg, buttonId, buttonText, from, sender, (text) => sock.sendMessage(from, { text }, { quoted: msg }));
+                const handled = await handleButtonClick(sock, msg, buttonId, buttonText, from, sender, reply, react);
                 if (handled) {
                     return true;
                 }
