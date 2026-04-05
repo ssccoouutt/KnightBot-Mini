@@ -1,6 +1,6 @@
 /**
  * Audit Command - Search through GitHub repository files with replace functionality
- * FIXED VERSION - Proper recursive directory search
+ * COMPLETE FIXED VERSION - Preserves file structure
  */
 
 const axios = require('axios');
@@ -186,7 +186,7 @@ async function downloadGitHubRepo(repoUrl, onProgress) {
         
         fs.unlinkSync(zipPath);
         
-        // Find the actual root directory - recursively find the first directory that contains a recognizable repo structure
+        // Find the actual root directory
         let extractedFolder = extractDir;
         
         function findRepoRoot(dir, depth = 0) {
@@ -197,14 +197,13 @@ async function downloadGitHubRepo(repoUrl, onProgress) {
             // Look for common repo indicators
             const hasGitDir = items.includes('.git');
             const hasPackageJson = items.includes('package.json');
+            const hasRequirements = items.includes('requirements.txt');
             const hasReadme = items.some(i => i.toLowerCase().includes('readme'));
             
-            // If this directory has repo characteristics, use it
-            if (hasGitDir || hasPackageJson || hasReadme) {
+            if (hasGitDir || hasPackageJson || hasRequirements || hasReadme) {
                 return dir;
             }
             
-            // If there's exactly one subdirectory, go into it
             const subDirs = items.filter(item => {
                 const itemPath = path.join(dir, item);
                 try {
@@ -237,23 +236,13 @@ async function downloadGitHubRepo(repoUrl, onProgress) {
 // ==================== RECURSIVE FILE SEARCH FUNCTIONS ====================
 
 async function findFilesByName(dirPath, fileName, results = []) {
-    console.log(`[AUDIT-DEBUG] Searching for ${fileName} in ${dirPath}`);
-    
-    // Check if dirPath exists
-    if (!fs.existsSync(dirPath)) {
-        console.log(`[AUDIT-DEBUG] Path does not exist: ${dirPath}`);
-        return results;
-    }
+    if (!fs.existsSync(dirPath)) return results;
     
     const stat = fs.statSync(dirPath);
-    if (!stat.isDirectory()) {
-        console.log(`[AUDIT-DEBUG] Path is not a directory: ${dirPath}`);
-        return results;
-    }
+    if (!stat.isDirectory()) return results;
     
     try {
         const items = fs.readdirSync(dirPath);
-        console.log(`[AUDIT-DEBUG] Found ${items.length} items in ${dirPath}`);
         
         for (const item of items) {
             const itemPath = path.join(dirPath, item);
@@ -262,19 +251,16 @@ async function findFilesByName(dirPath, fileName, results = []) {
                 const itemStat = fs.statSync(itemPath);
                 
                 if (itemStat.isDirectory()) {
-                    // Recursively search subdirectories
-                    console.log(`[AUDIT-DEBUG] Entering directory: ${itemPath}`);
                     await findFilesByName(itemPath, fileName, results);
                 } else if (item === fileName) {
-                    console.log(`[AUDIT-DEBUG] ✅ Found file: ${itemPath}`);
                     results.push(itemPath);
                 }
             } catch (err) {
-                console.log(`[AUDIT-DEBUG] Error accessing ${itemPath}: ${err.message}`);
+                // Skip inaccessible files
             }
         }
     } catch (error) {
-        console.error(`[AUDIT-DEBUG] Error reading directory ${dirPath}:`, error.message);
+        // Skip directories that can't be read
     }
     
     return results;
@@ -340,20 +326,15 @@ async function replaceInFile(filePath, searchTerm, replaceTerm, isCaseSensitive 
     }
 }
 
-async function searchDirectory(dirPath, searchTerm, fileExtensions = null, isCaseSensitive = false, onProgress, specificFiles = null) {
+async function searchDirectory(dirPath, searchTerm, isCaseSensitive = false, onProgress, specificFiles = null) {
     const results = [];
     let items;
     
     if (specificFiles && specificFiles.length > 0) {
         items = specificFiles;
-        console.log(`[AUDIT-DEBUG] Searching ${items.length} specific files`);
     } else {
-        if (!fs.existsSync(dirPath)) {
-            console.log(`[AUDIT-DEBUG] Directory does not exist: ${dirPath}`);
-            return results;
-        }
+        if (!fs.existsSync(dirPath)) return results;
         items = fs.readdirSync(dirPath);
-        console.log(`[AUDIT-DEBUG] Searching directory: ${dirPath} with ${items.length} items`);
     }
     
     let processedCount = 0;
@@ -367,7 +348,7 @@ async function searchDirectory(dirPath, searchTerm, fileExtensions = null, isCas
             const stat = fs.statSync(itemPath);
             
             if (stat.isDirectory()) {
-                const subResults = await searchDirectory(itemPath, searchTerm, fileExtensions, isCaseSensitive, onProgress, null);
+                const subResults = await searchDirectory(itemPath, searchTerm, isCaseSensitive, onProgress, null);
                 results.push(...subResults);
             } else {
                 processedCount++;
@@ -377,9 +358,7 @@ async function searchDirectory(dirPath, searchTerm, fileExtensions = null, isCas
                 
                 const ext = path.extname(itemPath).toLowerCase();
                 const textExtensions = ['.txt', '.js', '.json', '.md', '.py', '.html', '.css', '.xml', '.yml', '.yaml', '.cfg', '.conf', '.ini', '.log', '.sh', '.bat', '.ps1'];
-                if (!textExtensions.includes(ext)) {
-                    continue;
-                }
+                if (!textExtensions.includes(ext)) continue;
                 
                 const fileResults = await searchInFile(itemPath, searchTerm, isCaseSensitive);
                 if (fileResults && fileResults.length > 0) {
@@ -392,22 +371,20 @@ async function searchDirectory(dirPath, searchTerm, fileExtensions = null, isCas
                 }
             }
         } catch (error) {
-            console.error(`[AUDIT-DEBUG] Error processing ${itemPath}:`, error.message);
+            // Skip problematic files
         }
     }
     
     return results;
 }
 
-async function replaceInDirectory(dirPath, searchTerm, replaceTerm, fileExtensions = null, isCaseSensitive = false, onProgress, modifiedFilesList, specificFiles = null) {
+async function replaceInDirectory(dirPath, searchTerm, replaceTerm, isCaseSensitive = false, onProgress, modifiedFilesList, specificFiles = null) {
     let items;
     
     if (specificFiles && specificFiles.length > 0) {
         items = specificFiles;
     } else {
-        if (!fs.existsSync(dirPath)) {
-            return { totalReplacements: 0, affectedFiles: 0 };
-        }
+        if (!fs.existsSync(dirPath)) return { totalReplacements: 0, affectedFiles: 0 };
         items = fs.readdirSync(dirPath);
     }
     
@@ -424,7 +401,7 @@ async function replaceInDirectory(dirPath, searchTerm, replaceTerm, fileExtensio
             const stat = fs.statSync(itemPath);
             
             if (stat.isDirectory()) {
-                const result = await replaceInDirectory(itemPath, searchTerm, replaceTerm, fileExtensions, isCaseSensitive, onProgress, modifiedFilesList, null);
+                const result = await replaceInDirectory(itemPath, searchTerm, replaceTerm, isCaseSensitive, onProgress, modifiedFilesList, null);
                 totalReplacements += result.totalReplacements;
                 affectedFiles += result.affectedFiles;
             } else {
@@ -435,9 +412,7 @@ async function replaceInDirectory(dirPath, searchTerm, replaceTerm, fileExtensio
                 
                 const ext = path.extname(itemPath).toLowerCase();
                 const textExtensions = ['.txt', '.js', '.json', '.md', '.py', '.html', '.css', '.xml', '.yml', '.yaml', '.cfg', '.conf', '.ini', '.log', '.sh', '.bat', '.ps1'];
-                if (!textExtensions.includes(ext)) {
-                    continue;
-                }
+                if (!textExtensions.includes(ext)) continue;
                 
                 const { replaceCount, changed } = await replaceInFile(itemPath, searchTerm, replaceTerm, isCaseSensitive);
                 if (changed) {
@@ -452,7 +427,7 @@ async function replaceInDirectory(dirPath, searchTerm, replaceTerm, fileExtensio
                 }
             }
         } catch (error) {
-            console.error(`[AUDIT-DEBUG] Error processing ${itemPath}:`, error.message);
+            // Skip problematic files
         }
     }
     
@@ -472,6 +447,7 @@ async function pushModifiedFilesToGitHub(session, token, username, commitMessage
     let failedFiles = [];
     
     for (const file of modifiedFiles) {
+        // Get the correct relative path from repo root
         let relativePath = path.relative(repoRoot, file.path);
         relativePath = relativePath.replace(/\\/g, '/');
         
@@ -509,9 +485,10 @@ async function pushModifiedFilesToGitHub(session, token, username, commitMessage
             );
             
             successCount++;
+            console.log(`[AUDIT] ✅ Pushed: ${relativePath}`);
             
         } catch (error) {
-            console.error(`[AUDIT] Failed to push ${relativePath}:`, error.response?.data?.message || error.message);
+            console.error(`[AUDIT] ❌ Failed to push ${relativePath}:`, error.response?.data?.message || error.message);
             failedFiles.push({ file: relativePath, error: error.response?.data?.message || error.message });
         }
     }
@@ -628,7 +605,7 @@ async function handleFileSelection(sock, from, sender, reply, react, session, bu
 async function handleFileNameInput(sock, from, sender, reply, react, session, fileName) {
     const repoRoot = session.data.extractedFolder;
     
-    console.log(`[AUDIT] Searching recursively for ${fileName} in ${repoRoot}`);
+    console.log(`[AUDIT] Searching for ${fileName} in ${repoRoot}`);
     
     if (!fs.existsSync(repoRoot)) {
         await reply(`❌ Repository folder not found. Please reload the repository.`);
@@ -638,7 +615,7 @@ async function handleFileNameInput(sock, from, sender, reply, react, session, fi
     const foundFiles = await findFilesByName(repoRoot, fileName, []);
     
     if (foundFiles.length === 0) {
-        await reply(`❌ No file named "${fileName}" found in the repository.\n\nMake sure you entered the exact filename including extension (e.g., config.js, database.js, handler.js).`);
+        await reply(`❌ No file named "${fileName}" found in the repository.\n\nMake sure you entered the exact filename including extension.`);
         sessionManager.updateSession(sender, from, { waitingForFileName: true });
         return;
     }
@@ -705,6 +682,8 @@ async function handleFileSelectionChoice(sock, from, sender, reply, react, sessi
 // ==================== BUTTON HANDLER ====================
 
 async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, reply, react) {
+    console.log(`[AUDIT] Handling button: ${buttonId}`);
+    
     const session = sessionManager.getLatestSession(sender, from);
     
     if (!session || session.command !== 'audit') {
@@ -750,8 +729,27 @@ async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, 
         return await handleFileSelection(sock, from, sender, reply, react, session, buttonId);
     }
     
+    // Handle file selection buttons
     if (buttonId && buttonId.startsWith('select_file_')) {
-        return await handleFileSelectionChoice(sock, from, sender, reply, react, session, buttonId);
+        console.log(`[AUDIT] Handling file selection button: ${buttonId}`);
+        const parts = buttonId.split('_');
+        const index = parseInt(parts[3]);
+        const foundFiles = session.data.foundFiles;
+        
+        if (foundFiles && !isNaN(index) && index >= 0 && index < foundFiles.length) {
+            sessionManager.updateSession(sender, from, {
+                searchMode: 'single',
+                specificFiles: [foundFiles[index]],
+                waitingForSearch: true,
+                waitingForFileSelection: false,
+                foundFiles: null
+            });
+            await reply(`🔍 *Search Mode: Single File*\n\nSelected: \`${foundFiles[index]}\`\n\nSend me the word/phrase you want to search for.`);
+            return true;
+        } else {
+            await reply(`❌ Invalid selection.`);
+            return true;
+        }
     }
     
     return false;
@@ -868,9 +866,9 @@ async function performSearch(sock, from, sender, reply, react, session, searchTe
         let results;
         
         if (searchMode === 'single' && specificFiles && specificFiles.length > 0) {
-            results = await searchDirectory(null, searchTerm, null, isCaseSensitive, null, specificFiles);
+            results = await searchDirectory(null, searchTerm, isCaseSensitive, null, specificFiles);
         } else {
-            results = await searchDirectory(session.data.extractedFolder, searchTerm, null, isCaseSensitive, null, null);
+            results = await searchDirectory(session.data.extractedFolder, searchTerm, isCaseSensitive, null, null);
         }
         
         const formattedResults = formatResults(results, searchTerm);
@@ -912,9 +910,9 @@ async function performReplace(sock, from, sender, reply, react, session, searchT
         let result;
         
         if (searchMode === 'single' && specificFiles && specificFiles.length > 0) {
-            result = await replaceInDirectory(null, searchTerm, replaceTerm, null, isCaseSensitive, null, modifiedFilesList, specificFiles);
+            result = await replaceInDirectory(null, searchTerm, replaceTerm, isCaseSensitive, null, modifiedFilesList, specificFiles);
         } else {
-            result = await replaceInDirectory(session.data.extractedFolder, searchTerm, replaceTerm, null, isCaseSensitive, null, modifiedFilesList, null);
+            result = await replaceInDirectory(session.data.extractedFolder, searchTerm, replaceTerm, isCaseSensitive, null, modifiedFilesList, null);
         }
         
         const { totalReplacements, affectedFiles } = result;
