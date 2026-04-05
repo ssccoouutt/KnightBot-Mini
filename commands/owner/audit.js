@@ -197,17 +197,21 @@ async function downloadGitHubRepo(repoUrl, onProgress) {
 }
 
 async function findFilesByName(dirPath, fileName, results = []) {
-    const items = fs.readdirSync(dirPath);
-    
-    for (const item of items) {
-        const itemPath = path.join(dirPath, item);
-        const stat = fs.statSync(itemPath);
+    try {
+        const items = fs.readdirSync(dirPath);
         
-        if (stat.isDirectory()) {
-            await findFilesByName(itemPath, fileName, results);
-        } else if (item === fileName) {
-            results.push(itemPath);
+        for (const item of items) {
+            const itemPath = path.join(dirPath, item);
+            const stat = fs.statSync(itemPath);
+            
+            if (stat.isDirectory()) {
+                await findFilesByName(itemPath, fileName, results);
+            } else if (item === fileName) {
+                results.push(itemPath);
+            }
         }
+    } catch (error) {
+        console.error(`[AUDIT] Error searching for ${fileName}:`, error.message);
     }
     
     return results;
@@ -277,7 +281,7 @@ async function searchDirectory(dirPath, searchTerm, fileExtensions = null, isCas
     const results = [];
     let items;
     
-    if (specificFiles) {
+    if (specificFiles && specificFiles.length > 0) {
         items = specificFiles;
     } else {
         items = fs.readdirSync(dirPath);
@@ -287,32 +291,37 @@ async function searchDirectory(dirPath, searchTerm, fileExtensions = null, isCas
     
     for (const item of items) {
         const itemPath = specificFiles ? item : path.join(dirPath, item);
-        const stat = fs.statSync(itemPath);
         
-        if (stat.isDirectory()) {
-            const subResults = await searchDirectory(itemPath, searchTerm, fileExtensions, isCaseSensitive, onProgress, null);
-            results.push(...subResults);
-        } else {
-            processedCount++;
-            if (onProgress && processedCount % 10 === 0) {
-                onProgress(`Searching... (${processedCount} files processed)`);
-            }
+        try {
+            const stat = fs.statSync(itemPath);
             
-            const ext = path.extname(itemPath).toLowerCase();
-            const textExtensions = ['.txt', '.js', '.json', '.md', '.py', '.html', '.css', '.xml', '.yml', '.yaml', '.cfg', '.conf', '.ini', '.log', '.sh', '.bat', '.ps1'];
-            if (!textExtensions.includes(ext)) {
-                continue;
+            if (stat.isDirectory()) {
+                const subResults = await searchDirectory(itemPath, searchTerm, fileExtensions, isCaseSensitive, onProgress, null);
+                results.push(...subResults);
+            } else {
+                processedCount++;
+                if (onProgress && processedCount % 10 === 0) {
+                    onProgress(`Searching... (${processedCount} files processed)`);
+                }
+                
+                const ext = path.extname(itemPath).toLowerCase();
+                const textExtensions = ['.txt', '.js', '.json', '.md', '.py', '.html', '.css', '.xml', '.yml', '.yaml', '.cfg', '.conf', '.ini', '.log', '.sh', '.bat', '.ps1'];
+                if (!textExtensions.includes(ext)) {
+                    continue;
+                }
+                
+                const fileResults = await searchInFile(itemPath, searchTerm, isCaseSensitive);
+                if (fileResults && fileResults.length > 0) {
+                    results.push({
+                        file: itemPath,
+                        fileName: path.basename(itemPath),
+                        relativePath: itemPath,
+                        matches: fileResults
+                    });
+                }
             }
-            
-            const fileResults = await searchInFile(itemPath, searchTerm, isCaseSensitive);
-            if (fileResults && fileResults.length > 0) {
-                results.push({
-                    file: itemPath,
-                    fileName: path.basename(itemPath),
-                    relativePath: itemPath,
-                    matches: fileResults
-                });
-            }
+        } catch (error) {
+            console.error(`[AUDIT] Error processing ${itemPath}:`, error.message);
         }
     }
     
@@ -322,7 +331,7 @@ async function searchDirectory(dirPath, searchTerm, fileExtensions = null, isCas
 async function replaceInDirectory(dirPath, searchTerm, replaceTerm, fileExtensions = null, isCaseSensitive = false, onProgress, modifiedFilesList, specificFiles = null) {
     let items;
     
-    if (specificFiles) {
+    if (specificFiles && specificFiles.length > 0) {
         items = specificFiles;
     } else {
         items = fs.readdirSync(dirPath);
@@ -334,36 +343,41 @@ async function replaceInDirectory(dirPath, searchTerm, replaceTerm, fileExtensio
     
     for (const item of items) {
         const itemPath = specificFiles ? item : path.join(dirPath, item);
-        const stat = fs.statSync(itemPath);
         
-        if (stat.isDirectory()) {
-            const result = await replaceInDirectory(itemPath, searchTerm, replaceTerm, fileExtensions, isCaseSensitive, onProgress, modifiedFilesList, null);
-            totalReplacements += result.totalReplacements;
-            affectedFiles += result.affectedFiles;
-        } else {
-            processedCount++;
-            if (onProgress && processedCount % 10 === 0) {
-                onProgress(`Replacing... (${processedCount} files processed, ${totalReplacements} replacements so far)`);
-            }
+        try {
+            const stat = fs.statSync(itemPath);
             
-            const ext = path.extname(itemPath).toLowerCase();
-            const textExtensions = ['.txt', '.js', '.json', '.md', '.py', '.html', '.css', '.xml', '.yml', '.yaml', '.cfg', '.conf', '.ini', '.log', '.sh', '.bat', '.ps1'];
-            if (!textExtensions.includes(ext)) {
-                continue;
+            if (stat.isDirectory()) {
+                const result = await replaceInDirectory(itemPath, searchTerm, replaceTerm, fileExtensions, isCaseSensitive, onProgress, modifiedFilesList, null);
+                totalReplacements += result.totalReplacements;
+                affectedFiles += result.affectedFiles;
+            } else {
+                processedCount++;
+                if (onProgress && processedCount % 10 === 0) {
+                    onProgress(`Replacing... (${processedCount} files processed, ${totalReplacements} replacements so far)`);
+                }
+                
+                const ext = path.extname(itemPath).toLowerCase();
+                const textExtensions = ['.txt', '.js', '.json', '.md', '.py', '.html', '.css', '.xml', '.yml', '.yaml', '.cfg', '.conf', '.ini', '.log', '.sh', '.bat', '.ps1'];
+                if (!textExtensions.includes(ext)) {
+                    continue;
+                }
+                
+                const { replaceCount, changed } = await replaceInFile(itemPath, searchTerm, replaceTerm, isCaseSensitive);
+                if (changed) {
+                    totalReplacements += replaceCount;
+                    affectedFiles++;
+                    modifiedFilesList.push({
+                        path: itemPath,
+                        fileName: path.basename(itemPath),
+                        replacements: replaceCount,
+                        relativePath: itemPath
+                    });
+                    console.log(`[AUDIT] Modified: ${path.basename(itemPath)} (${replaceCount} replacements)`);
+                }
             }
-            
-            const { replaceCount, changed } = await replaceInFile(itemPath, searchTerm, replaceTerm, isCaseSensitive);
-            if (changed) {
-                totalReplacements += replaceCount;
-                affectedFiles++;
-                modifiedFilesList.push({
-                    path: itemPath,
-                    fileName: path.basename(itemPath),
-                    replacements: replaceCount,
-                    relativePath: itemPath
-                });
-                console.log(`[AUDIT] Modified: ${path.basename(itemPath)} (${replaceCount} replacements)`);
-            }
+        } catch (error) {
+            console.error(`[AUDIT] Error processing ${itemPath}:`, error.message);
         }
     }
     
@@ -557,14 +571,18 @@ async function handleFileSelection(sock, from, sender, reply, react, session, bu
 async function handleFileNameInput(sock, from, sender, reply, react, session, fileName) {
     const extractedFolder = session.data.extractedFolder;
     
-    // Find all files with this name
+    // Find the root folder name
     const rootItems = fs.readdirSync(extractedFolder);
     const repoRoot = path.join(extractedFolder, rootItems[0]);
     
+    console.log(`[AUDIT] Searching for ${fileName} in ${repoRoot}`);
+    
     const foundFiles = await findFilesByName(repoRoot, fileName, []);
     
+    console.log(`[AUDIT] Found ${foundFiles.length} files named ${fileName}`);
+    
     if (foundFiles.length === 0) {
-        await reply(`❌ No file named "${fileName}" found in the repository.`);
+        await reply(`❌ No file named "${fileName}" found in the repository.\n\nMake sure you entered the exact filename including extension (e.g., config.js, database.js, handler.js).`);
         sessionManager.updateSession(sender, from, { waitingForFileName: true });
         return;
     }
@@ -588,7 +606,7 @@ async function handleFileNameInput(sock, from, sender, reply, react, session, fi
             const relativePath = path.relative(repoRoot, filePath);
             buttons.push({
                 id: `select_file_${sessionId}_${i}`,
-                text: relativePath.length > 40 ? relativePath.substring(0, 37) + '...' : relativePath
+                text: relativePath.length > 50 ? relativePath.substring(0, 47) + '...' : relativePath
             });
         }
         
@@ -617,7 +635,7 @@ async function handleFileSelectionChoice(sock, from, sender, reply, react, sessi
     const index = parseInt(parts[3]);
     const foundFiles = session.data.foundFiles;
     
-    if (index >= 0 && index < foundFiles.length) {
+    if (!isNaN(index) && index >= 0 && index < foundFiles.length) {
         sessionManager.updateSession(sender, from, {
             searchMode: 'single',
             specificFiles: [foundFiles[index]],
