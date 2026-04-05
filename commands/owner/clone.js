@@ -17,17 +17,17 @@ const FORCE_AI_MODE = true;
 
 // Google Drive Configuration
 const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download";
+const GITHUB_CONFIG_FILE_ID = "1EUSHauprcg3at2vAONYXelJuHHMBZq2b"; // Your GitHub config file ID
 const UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
 const FILE_URL = "https://www.googleapis.com/drive/v3/files";
 
-// GitHub Configuration from config.js
-const GITHUB_TOKEN = config.github?.token;
-const GITHUB_USERNAME = config.github?.username;
-
 let cachedToken = null;
 let tokenExpiry = null;
+let cachedGitHubToken = null;
+let cachedGitHubUsername = null;
+let githubTokenExpiry = null;
 
-// ==================== GOOGLE DRIVE FUNCTIONS ====================
+// ==================== GOOGLE DRIVE TOKEN FUNCTIONS ====================
 
 async function getAccessToken() {
     try {
@@ -83,6 +83,167 @@ async function getAccessToken() {
         return null;
     }
 }
+
+// ==================== GITHUB TOKEN FROM GOOGLE DRIVE ====================
+
+async function getGitHubCredentials() {
+    // Check cache
+    if (cachedGitHubToken && githubTokenExpiry && new Date() < githubTokenExpiry) {
+        return { token: cachedGitHubToken, username: cachedGitHubUsername };
+    }
+    
+    try {
+        console.log('[CLONE] Fetching GitHub credentials from Google Drive...');
+        
+        const driveToken = await getAccessToken();
+        if (!driveToken) throw new Error('No Drive access token');
+        
+        const response = await axios({
+            method: 'GET',
+            url: `https://www.googleapis.com/drive/v3/files/${GITHUB_CONFIG_FILE_ID}?alt=media`,
+            headers: { 'Authorization': `Bearer ${driveToken}` },
+            responseType: 'text',
+            timeout: 30000
+        });
+        
+        const content = response.data;
+        let githubToken = null;
+        let githubUsername = null;
+        
+        // Parse the text file
+        const lines = content.split('\n');
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('GITHUB_TOKEN=')) {
+                githubToken = trimmed.substring('GITHUB_TOKEN='.length).trim();
+            } else if (trimmed.startsWith('GITHUB_USERNAME=')) {
+                githubUsername = trimmed.substring('GITHUB_USERNAME='.length).trim();
+            }
+        }
+        
+        if (!githubToken || !githubUsername) {
+            throw new Error('GitHub credentials not found in the config file');
+        }
+        
+        // Cache for 1 hour
+        cachedGitHubToken = githubToken;
+        cachedGitHubUsername = githubUsername;
+        githubTokenExpiry = new Date(Date.now() + 3600 * 1000);
+        
+        console.log('[CLONE] GitHub credentials loaded successfully');
+        return { token: githubToken, username: githubUsername };
+        
+    } catch (error) {
+        console.error('[CLONE] Failed to get GitHub credentials:', error.message);
+        throw new Error(`Failed to load GitHub credentials: ${error.message}`);
+    }
+}
+
+// ==================== GITHUB FUNCTIONS ====================
+
+async function validateGitHubToken(token, username) {
+    try {
+        const response = await axios.get('https://api.github.com/user', {
+            headers: {
+                'Authorization': `token ${token}`,
+                'Accept': 'application/vnd.github.v3+json'
+            }
+        });
+        
+        if (response.status === 200) {
+            console.log('[CLONE] GitHub token is valid for user:', response.data.login);
+            return true;
+        }
+    } catch (error) {
+        if (error.response?.status === 401) {
+            throw new Error('GitHub token is invalid or expired');
+        }
+        throw error;
+    }
+}
+
+async function createGitHubRepo(repoName, token, username) {
+    try {
+        const response = await axios.post(
+            'https://api.github.com/user/repos',
+            {
+                name: repoName,
+                private: false,
+                auto_init: false
+            },
+            {
+                headers: {
+                    'Authorization': `token ${token}`,
+                    'Accept': 'application/vnd.github.v3+json'
+                }
+            }
+        );
+        
+        return response.status === 201;
+        
+    } catch (error) {
+        if (error.response?.status === 422) {
+            console.log('[CLONE] Repo already exists, will use existing');
+            return true;
+        }
+        console.error('[CLONE] Create repo failed:', error.response?.data?.message || error.message);
+        return false;
+    }
+}
+
+async function uploadFileToGitHub(repoName, filePath, githubPath, token, username) {
+    try {
+        const content = fs.readFileSync(filePath);
+        const base64Content = content.toString('base64');
+        
+        // Check if file already exists
+        let sha = null;
+        try {
+            const checkResponse = await axios.get(
+                `https://api.github.com/repos/${username}/${repoName}/contents/${githubPath}`,
+                {
+                    headers: {
+                        'Authorization': `token ${token}`,
+                        'Accept': 'application/vnd.github.v3+json'
+                    }
+                }
+            );
+            if (checkResponse.data && checkResponse.data.sha) {
+                sha = checkResponse.data.sha;
+            }
+        } catch (e) {
+            // File doesn't exist, proceed with create
+        }
+        
+        const requestBody = {
+            message: sha ? `Update ${githubPath}` : `Add ${githubPath}`,
+            content: base64Content
+        };
+        
+        if (sha) {
+            requestBody.sha = sha;
+        }
+        
+        const response = await axios.put(
+            `https://api.github.com/repos/${username}/${repoName}/contents/${githubPath}`,
+            requestBody,
+            {
+                headers: {
+                    'Authorization': `token ${token}`,
+                    'Accept': 'application/vnd.github.v3+json'
+                }
+            }
+        );
+        
+        return response.status === 200 || response.status === 201;
+        
+    } catch (error) {
+        console.error(`[CLONE] Upload to GitHub failed for ${githubPath}:`, error.response?.data?.message || error.message);
+        return false;
+    }
+}
+
+// ==================== GOOGLE DRIVE FILE FUNCTIONS ====================
 
 async function uploadFileToDrive(filePath, fileName, folderId = null) {
     try {
@@ -198,121 +359,13 @@ async function downloadFileFromDrive(fileId, filePath) {
     }
 }
 
-// ==================== GITHUB FUNCTIONS ====================
-
-async function validateGitHubToken() {
-    if (!GITHUB_TOKEN || GITHUB_TOKEN === 'YOUR_GITHUB_TOKEN_HERE') {
-        throw new Error('GitHub token not configured. Please add your GitHub token to config.js');
-    }
-    
-    try {
-        const response = await axios.get('https://api.github.com/user', {
-            headers: {
-                'Authorization': `token ${GITHUB_TOKEN}`,
-                'Accept': 'application/vnd.github.v3+json'
-            }
-        });
-        
-        if (response.status === 200) {
-            console.log('[CLONE] GitHub token is valid');
-            return true;
-        }
-    } catch (error) {
-        if (error.response?.status === 401) {
-            throw new Error('GitHub token is invalid or expired. Please update your token in config.js');
-        }
-        throw error;
-    }
-}
-
-async function createGitHubRepo(repoName) {
-    try {
-        const response = await axios.post(
-            'https://api.github.com/user/repos',
-            {
-                name: repoName,
-                private: false,
-                auto_init: false
-            },
-            {
-                headers: {
-                    'Authorization': `token ${GITHUB_TOKEN}`,
-                    'Accept': 'application/vnd.github.v3+json'
-                }
-            }
-        );
-        
-        return response.status === 201;
-        
-    } catch (error) {
-        if (error.response?.status === 422) {
-            console.log('[CLONE] Repo already exists, will use existing');
-            return true;
-        }
-        console.error('[CLONE] Create repo failed:', error.response?.data?.message || error.message);
-        return false;
-    }
-}
-
-async function uploadFileToGitHub(repoName, filePath, githubPath) {
-    try {
-        const content = fs.readFileSync(filePath);
-        const base64Content = content.toString('base64');
-        
-        // Check if file already exists
-        let sha = null;
-        try {
-            const checkResponse = await axios.get(
-                `https://api.github.com/repos/${GITHUB_USERNAME}/${repoName}/contents/${githubPath}`,
-                {
-                    headers: {
-                        'Authorization': `token ${GITHUB_TOKEN}`,
-                        'Accept': 'application/vnd.github.v3+json'
-                    }
-                }
-            );
-            if (checkResponse.data && checkResponse.data.sha) {
-                sha = checkResponse.data.sha;
-            }
-        } catch (e) {
-            // File doesn't exist, proceed with create
-        }
-        
-        const requestBody = {
-            message: sha ? `Update ${githubPath}` : `Add ${githubPath}`,
-            content: base64Content
-        };
-        
-        if (sha) {
-            requestBody.sha = sha;
-        }
-        
-        const response = await axios.put(
-            `https://api.github.com/repos/${GITHUB_USERNAME}/${repoName}/contents/${githubPath}`,
-            requestBody,
-            {
-                headers: {
-                    'Authorization': `token ${GITHUB_TOKEN}`,
-                    'Accept': 'application/vnd.github.v3+json'
-                }
-            }
-        );
-        
-        return response.status === 200 || response.status === 201;
-        
-    } catch (error) {
-        console.error(`[CLONE] Upload to GitHub failed for ${githubPath}:`, error.response?.data?.message || error.message);
-        return false;
-    }
-}
+// ==================== GITHUB REPO FUNCTIONS ====================
 
 async function downloadGitHubRepo(repoUrl) {
     try {
-        // Format: https://github.com/username/repo
         const repoPath = repoUrl.replace('https://github.com/', '').replace('.git', '').replace(/\/$/, '');
         const repoName = repoPath.split('/').pop();
         
-        // Try main branch first, then master
         let downloadUrl = `https://github.com/${repoPath}/archive/refs/heads/main.zip`;
         let response = await axios.head(downloadUrl).catch(() => null);
         
@@ -345,7 +398,6 @@ async function downloadGitHubRepo(repoUrl) {
             writer.on('error', reject);
         });
         
-        // Extract zip
         const extractDir = path.join(tempDir, `${repoName}_extracted`);
         if (fs.existsSync(extractDir)) {
             fs.rmSync(extractDir, { recursive: true, force: true });
@@ -359,11 +411,9 @@ async function downloadGitHubRepo(repoUrl) {
                 .on('error', reject);
         });
         
-        // Find the actual extracted folder (it will be repo-name-main or repo-name-master)
         const subDirs = fs.readdirSync(extractDir);
         const extractedFolder = path.join(extractDir, subDirs[0]);
         
-        // Clean up zip
         fs.unlinkSync(zipPath);
         
         return { extractedFolder, repoName };
@@ -372,31 +422,6 @@ async function downloadGitHubRepo(repoUrl) {
         console.error('[CLONE] Download GitHub repo failed:', error.message);
         throw error;
     }
-}
-
-async function uploadFolderToGitHub(localPath, repoName, basePath = '') {
-    const items = fs.readdirSync(localPath);
-    let successCount = 0;
-    let totalCount = 0;
-    
-    for (const item of items) {
-        const itemPath = path.join(localPath, item);
-        const relativePath = basePath ? path.join(basePath, item) : item;
-        const githubPath = relativePath.replace(/\\/g, '/');
-        
-        if (fs.statSync(itemPath).isDirectory()) {
-            const result = await uploadFolderToGitHub(itemPath, repoName, relativePath);
-            successCount += result.successCount;
-            totalCount += result.totalCount;
-        } else {
-            totalCount++;
-            const uploaded = await uploadFileToGitHub(repoName, itemPath, githubPath);
-            if (uploaded) successCount++;
-            console.log(`[CLONE] ${uploaded ? '✅' : '❌'} Uploaded: ${githubPath}`);
-        }
-    }
-    
-    return { successCount, totalCount };
 }
 
 async function uploadFolderToDrive(localPath, parentFolderId = null) {
@@ -427,6 +452,31 @@ async function uploadFolderToDrive(localPath, parentFolderId = null) {
     return { successCount, totalCount };
 }
 
+async function uploadFolderToGitHub(localPath, repoName, token, username, basePath = '') {
+    const items = fs.readdirSync(localPath);
+    let successCount = 0;
+    let totalCount = 0;
+    
+    for (const item of items) {
+        const itemPath = path.join(localPath, item);
+        const relativePath = basePath ? path.join(basePath, item) : item;
+        const githubPath = relativePath.replace(/\\/g, '/');
+        
+        if (fs.statSync(itemPath).isDirectory()) {
+            const result = await uploadFolderToGitHub(itemPath, repoName, token, username, relativePath);
+            successCount += result.successCount;
+            totalCount += result.totalCount;
+        } else {
+            totalCount++;
+            const uploaded = await uploadFileToGitHub(repoName, itemPath, githubPath, token, username);
+            if (uploaded) successCount++;
+            console.log(`[CLONE] ${uploaded ? '✅' : '❌'} Uploaded: ${githubPath}`);
+        }
+    }
+    
+    return { successCount, totalCount };
+}
+
 // ==================== MAIN COMMAND ====================
 
 module.exports = {
@@ -451,56 +501,34 @@ module.exports = {
                        `• \`${config.prefix}clone https://drive.google.com/drive/folders/xxx my-repo\``);
         }
         
-        // Validate GitHub token is configured for Drive to GitHub operations
         const link = args[0];
         const customName = args[1];
         
         // Check if it's Drive to GitHub operation
         if (link.includes('drive.google.com') || link.includes('drive/folder')) {
-            if (!GITHUB_TOKEN || GITHUB_TOKEN === 'YOUR_GITHUB_TOKEN_HERE') {
-                return reply(`❌ *GitHub Token Not Configured*\n\n` +
-                           `Please add your GitHub token to config.js:\n\n` +
-                           `github: {\n` +
-                           `    token: 'YOUR_GITHUB_TOKEN',\n` +
-                           `    username: 'YOUR_GITHUB_USERNAME'\n` +
-                           `}`);
-            }
-            
             try {
-                await validateGitHubToken();
+                // Load GitHub credentials from Google Drive
+                const { token: githubToken, username: githubUsername } = await getGitHubCredentials();
+                await validateGitHubToken(githubToken, githubUsername);
+                
+                await react('🔄');
+                const processingMsg = await reply(`🔄 *Processing clone request...*\n\nLink: ${link}\n\nPlease wait, this may take a while.`);
+                await handleDriveToGitHub(sock, from, link, customName, processingMsg, reply, githubToken, githubUsername);
+                return;
             } catch (error) {
-                return reply(`❌ *GitHub Authentication Failed*\n\n${error.message}\n\nPlease update your GitHub token in config.js`);
+                return reply(`❌ *GitHub Authentication Failed*\n\n${error.message}\n\nPlease check your GitHub config file on Google Drive.`);
             }
         }
         
-        await react('🔄');
-        const processingMsg = await reply(`🔄 *Processing clone request...*\n\nLink: ${link}\n\nPlease wait, this may take a while.`);
-        
-        try {
-            // Check if it's a GitHub URL
-            if (link.includes('github.com')) {
-                await handleGitHubToDrive(sock, from, link, customName, processingMsg, reply);
-            }
-            // Check if it's a Google Drive URL
-            else if (link.includes('drive.google.com') || link.includes('drive/folder')) {
-                await handleDriveToGitHub(sock, from, link, customName, processingMsg, reply);
-            }
-            else {
-                await sock.sendMessage(from, {
-                    text: `❌ Invalid link. Please provide a GitHub repo URL or Google Drive folder link.`,
-                    edit: processingMsg.key
-                });
-                await react('❌');
-            }
-            
-        } catch (error) {
-            console.error('[CLONE] Error:', error);
-            await sock.sendMessage(from, {
-                text: `❌ Clone failed: ${error.message}`,
-                edit: processingMsg.key
-            });
-            await react('❌');
+        // GitHub to Drive operation (no GitHub token needed)
+        if (link.includes('github.com')) {
+            await react('🔄');
+            const processingMsg = await reply(`🔄 *Processing clone request...*\n\nLink: ${link}\n\nPlease wait, this may take a while.`);
+            await handleGitHubToDrive(sock, from, link, customName, processingMsg, reply);
+            return;
         }
+        
+        return reply(`❌ Invalid link. Please provide a GitHub repo URL or Google Drive folder link.`);
     }
 };
 
@@ -510,7 +538,6 @@ async function handleGitHubToDrive(sock, from, repoUrl, folderName, processingMs
         edit: processingMsg.key
     });
     
-    // Download GitHub repo
     const { extractedFolder, repoName } = await downloadGitHubRepo(repoUrl);
     const targetFolderName = folderName || repoName;
     
@@ -519,7 +546,6 @@ async function handleGitHubToDrive(sock, from, repoUrl, folderName, processingMs
         edit: processingMsg.key
     });
     
-    // Create Drive folder
     const folderId = await createDriveFolder(targetFolderName);
     
     await sock.sendMessage(from, {
@@ -527,10 +553,8 @@ async function handleGitHubToDrive(sock, from, repoUrl, folderName, processingMs
         edit: processingMsg.key
     });
     
-    // Upload to Drive
     const { successCount, totalCount } = await uploadFolderToDrive(extractedFolder, folderId);
     
-    // Clean up temp files
     fs.rmSync(extractedFolder, { recursive: true, force: true });
     fs.rmSync(path.dirname(extractedFolder), { recursive: true, force: true });
     
@@ -548,8 +572,7 @@ async function handleGitHubToDrive(sock, from, repoUrl, folderName, processingMs
     });
 }
 
-async function handleDriveToGitHub(sock, from, driveLink, repoName, processingMsg, reply) {
-    // Extract folder ID from Drive link
+async function handleDriveToGitHub(sock, from, driveLink, repoName, processingMsg, reply, githubToken, githubUsername) {
     let folderId = null;
     const idMatch = driveLink.match(/folders\/([a-zA-Z0-9_-]+)/);
     if (idMatch) {
@@ -569,7 +592,6 @@ async function handleDriveToGitHub(sock, from, driveLink, repoName, processingMs
         edit: processingMsg.key
     });
     
-    // Get folder name
     const token = await getAccessToken();
     const folderInfo = await axios.get(`https://www.googleapis.com/drive/v3/files/${folderId}`, {
         headers: { 'Authorization': `Bearer ${token}` },
@@ -583,18 +605,14 @@ async function handleDriveToGitHub(sock, from, driveLink, repoName, processingMs
         edit: processingMsg.key
     });
     
-    // Create temp directory for Drive files
     const tempDir = path.join(process.cwd(), 'temp', `drive_${Date.now()}`);
     fs.mkdirSync(tempDir, { recursive: true });
     
-    // Download all files from Drive folder
     const files = await listDriveFiles(folderId);
-    let downloadedCount = 0;
     
     for (const file of files) {
         const filePath = path.join(tempDir, file.name);
         await downloadFileFromDrive(file.id, filePath);
-        downloadedCount++;
         console.log(`[CLONE] Downloaded: ${file.name}`);
     }
     
@@ -603,8 +621,7 @@ async function handleDriveToGitHub(sock, from, driveLink, repoName, processingMs
         edit: processingMsg.key
     });
     
-    // Create GitHub repo
-    const repoCreated = await createGitHubRepo(targetRepoName);
+    const repoCreated = await createGitHubRepo(targetRepoName, githubToken, githubUsername);
     
     if (!repoCreated) {
         await sock.sendMessage(from, {
@@ -618,13 +635,11 @@ async function handleDriveToGitHub(sock, from, driveLink, repoName, processingMs
         edit: processingMsg.key
     });
     
-    // Upload to GitHub
-    const { successCount, totalCount } = await uploadFolderToGitHub(tempDir, targetRepoName);
+    const { successCount, totalCount } = await uploadFolderToGitHub(tempDir, targetRepoName, githubToken, githubUsername);
     
-    // Clean up temp files
     fs.rmSync(tempDir, { recursive: true, force: true });
     
-    const repoLink = `https://github.com/${GITHUB_USERNAME}/${targetRepoName}`;
+    const repoLink = `https://github.com/${githubUsername}/${targetRepoName}`;
     
     await sock.sendMessage(from, {
         text: `✅ *Clone Completed!*\n\n` +
