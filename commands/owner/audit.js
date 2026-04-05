@@ -24,9 +24,6 @@ let cachedGitHubToken = null;
 let cachedGitHubUsername = null;
 let githubTokenExpiry = null;
 
-// Store search results for sessions
-const searchResultsCache = new Map();
-
 // ==================== TOKEN FUNCTIONS ====================
 
 async function getAccessToken() {
@@ -205,33 +202,20 @@ async function searchInFile(filePath, searchTerm, isCaseSensitive = false) {
         const lines = content.split('\n');
         const results = [];
         
-        const searchPattern = isCaseSensitive ? searchTerm : new RegExp(searchTerm, 'gi');
-        
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i];
-            let matches = [];
+            let found = false;
             
             if (isCaseSensitive) {
-                if (line.includes(searchTerm)) {
-                    const regex = new RegExp(searchTerm, 'g');
-                    let match;
-                    while ((match = regex.exec(line)) !== null) {
-                        matches.push(match.index);
-                    }
-                }
+                found = line.includes(searchTerm);
             } else {
-                const regex = new RegExp(searchTerm, 'gi');
-                let match;
-                while ((match = regex.exec(line)) !== null) {
-                    matches.push(match.index);
-                }
+                found = line.toLowerCase().includes(searchTerm.toLowerCase());
             }
             
-            if (matches.length > 0) {
+            if (found) {
                 results.push({
                     lineNumber: i + 1,
                     line: line.trim(),
-                    matches: matches,
                     preview: line.substring(0, 100).trim()
                 });
             }
@@ -239,7 +223,6 @@ async function searchInFile(filePath, searchTerm, isCaseSensitive = false) {
         
         return results;
     } catch (error) {
-        // Skip binary files or files that can't be read as text
         return null;
     }
 }
@@ -326,9 +309,181 @@ function formatResults(results, searchTerm) {
         output += `*... and ${results.length - 15} more files*\n\n`;
     }
     
-    output += `💡 Use \`.audit export ${searchTerm.replace(/\s/g, '_')}\` to get full results file.`;
+    output += `💡 Use \`.audit export\` to get full results file.`;
     
     return output;
+}
+
+// ==================== BUTTON HANDLER ====================
+
+async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, reply) {
+    console.log(`[AUDIT] Handling button: ${buttonId}`);
+    
+    // Get user's active audit session
+    const session = sessionManager.getLatestSession(sender, from);
+    
+    if (!session || session.command !== 'audit') {
+        console.log(`[AUDIT] No active audit session for ${sender}`);
+        return false;
+    }
+    
+    if (buttonId === 'export_results') {
+        await exportSearchResults(sock, from, sender, reply, session);
+        return true;
+    }
+    
+    if (buttonId === 'case_sensitive') {
+        const newState = !session.data.caseSensitive;
+        sessionManager.updateSession(sender, from, { caseSensitive: newState });
+        await showSearchOptions(sock, from, sender, reply, session);
+        return true;
+    }
+    
+    if (buttonId === 'clear_repo') {
+        // Clean up temp directory
+        if (session.data.tempDir && fs.existsSync(session.data.tempDir)) {
+            fs.rmSync(session.data.tempDir, { recursive: true, force: true });
+        }
+        sessionManager.clearSession(session.id);
+        await reply(`✅ Repository cleared from memory.`);
+        return true;
+    }
+    
+    if (buttonId && buttonId.startsWith('search_')) {
+        // This is handled by the main execute flow
+        return false;
+    }
+    
+    return false;
+}
+
+async function showSearchOptions(sock, from, sender, reply, session) {
+    const sessionId = session.id.split(':').pop();
+    
+    const buttons = [
+        { id: `search_${sessionId}`, text: '🔍 Start Search' },
+        { id: 'case_sensitive', text: session.data.caseSensitive ? '🔒 Case: ON' : '🔓 Case: OFF' },
+        { id: 'clear_repo', text: '🗑️ Clear Repository' }
+    ];
+    
+    const sentMsg = await sendButtons(sock, from, {
+        text: `🔍 *Search Options*\n\n` +
+              `📁 *Repo:* ${session.data.repoName}\n` +
+              `🔒 *Case Sensitive:* ${session.data.caseSensitive ? 'ON' : 'OFF'}\n\n` +
+              `Send me the word/phrase you want to search for, or adjust options below.`,
+        footer: 'Audit Tool',
+        buttons: buttons,
+        aimode: FORCE_AI_MODE
+    }, {});
+    
+    sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'audit');
+    sessionManager.updateSession(sender, from, { waitingForSearch: true });
+}
+
+async function exportSearchResults(sock, from, sender, reply, session) {
+    const results = session.data.searchResults;
+    const searchTerm = session.data.lastSearchTerm;
+    
+    if (!results || results.length === 0) {
+        await reply(`❌ No search results to export. Please perform a search first.`);
+        return;
+    }
+    
+    await reply(`📄 *Exporting results...*`);
+    
+    let exportContent = `Search Results for "${searchTerm}"\n`;
+    exportContent += `Repository: ${session.data.repoName}\n`;
+    exportContent += `Date: ${new Date().toLocaleString()}\n`;
+    exportContent += `Case Sensitive: ${session.data.caseSensitive ? 'Yes' : 'No'}\n`;
+    exportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    
+    for (const result of results) {
+        exportContent += `📄 File: ${result.fileName}\n`;
+        exportContent += `📍 Path: ${result.relativePath}\n`;
+        exportContent += `🎯 Matches: ${result.matches.length}\n`;
+        exportContent += `─────────────────────────────────────────────────\n`;
+        
+        for (const match of result.matches) {
+            exportContent += `  Line ${match.lineNumber}: ${match.line}\n`;
+        }
+        exportContent += `\n`;
+    }
+    
+    const tempDir = path.join(process.cwd(), 'temp');
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+    
+    const filename = `audit_results_${searchTerm.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}.txt`;
+    const filepath = path.join(tempDir, filename);
+    fs.writeFileSync(filepath, exportContent);
+    
+    await sock.sendMessage(from, {
+        document: fs.readFileSync(filepath),
+        mimetype: 'text/plain',
+        fileName: filename,
+        caption: `📄 *Search Results Export*\n\n` +
+                 `🔍 *Term:* ${searchTerm}\n` +
+                 `📊 *Files Found:* ${results.length}\n` +
+                 `📁 *Repo:* ${session.data.repoName}\n\n` +
+                 `> *Exported by ${config.botName}*`
+    });
+    
+    fs.unlinkSync(filepath);
+    
+    await reply(`✅ Results exported successfully!`);
+}
+
+async function performSearch(sock, from, sender, reply, react, session, searchTerm) {
+    await react('🔍');
+    const processingMsg = await reply(`🔍 *Searching for "${searchTerm}"...*\n\nPlease wait...`);
+    
+    try {
+        const isCaseSensitive = session.data.caseSensitive || false;
+        const fileExtensions = session.data.fileExtensions ? session.data.fileExtensions.split(',') : null;
+        
+        const results = await searchDirectory(session.data.extractedFolder, searchTerm, fileExtensions, isCaseSensitive, (msg) => {
+            sock.sendMessage(from, { text: `🔍 *${msg}*`, edit: processingMsg.key }).catch(() => {});
+        });
+        
+        const formattedResults = formatResults(results, searchTerm);
+        
+        // Update session with results
+        sessionManager.updateSession(sender, from, {
+            searchResults: results,
+            lastSearchTerm: searchTerm
+        });
+        
+        const sessionId = session.id.split(':').pop();
+        
+        const buttons = [
+            { id: `search_${sessionId}`, text: '🔍 New Search' },
+            { id: 'export_results', text: '📄 Export Results' },
+            { id: 'case_sensitive', text: session.data.caseSensitive ? '🔒 Case: ON' : '🔓 Case: OFF' },
+            { id: 'clear_repo', text: '🗑️ Clear Repository' }
+        ];
+        
+        await sock.sendMessage(from, {
+            text: formattedResults,
+            edit: processingMsg.key
+        });
+        
+        const sentMsg = await sendButtons(sock, from, {
+            text: formattedResults + '\n\nWhat would you like to do next?',
+            footer: 'Audit Tool',
+            buttons: buttons,
+            aimode: FORCE_AI_MODE
+        }, {});
+        
+        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'audit');
+        
+        await react('✅');
+        
+    } catch (error) {
+        await sock.sendMessage(from, {
+            text: `❌ *Search failed*\n\nError: ${error.message}`,
+            edit: processingMsg.key
+        });
+        await react('❌');
+    }
 }
 
 // ==================== MAIN COMMAND ====================
@@ -392,48 +547,38 @@ module.exports = {
         
         if (isButtonClick) {
             let buttonId = null;
+            let buttonText = null;
             
             if (msg.message?.buttonsResponseMessage) {
                 buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
+                buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
             } else if (msg.message?.listResponseMessage) {
                 const listReply = msg.message.listResponseMessage.singleSelectReply;
-                if (listReply) buttonId = listReply.selectedRowId;
+                if (listReply) {
+                    buttonId = listReply.selectedRowId;
+                    buttonText = listReply.title;
+                }
+            } else if (msg.message?.interactiveResponseMessage) {
+                const interactive = msg.message.interactiveResponseMessage;
+                if (interactive.nativeFlowResponseMessage) {
+                    try {
+                        const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
+                        buttonId = params.id;
+                        buttonText = params.display_text;
+                    } catch (e) {}
+                }
+            } else if (msg.message?.templateButtonReplyMessage) {
+                buttonId = msg.message.templateButtonReplyMessage.selectedId;
+                buttonText = msg.message.templateButtonReplyMessage.selectedDisplayText;
             }
             
             if (buttonId) {
-                if (buttonId.startsWith('search_')) {
-                    const parts = buttonId.split('_');
-                    const searchTerm = session.data.pendingSearch || parts.slice(1).join('_');
-                    
-                    if (searchTerm) {
-                        await performSearch(sock, from, sender, reply, react, session, searchTerm);
-                    }
-                    return true;
-                }
-                
-                if (buttonId === 'case_sensitive') {
-                    sessionManager.updateSession(sender, from, {
-                        caseSensitive: !session.data.caseSensitive
-                    });
-                    await showSearchOptions(sock, from, sender, reply, session);
-                    return true;
-                }
-                
-                if (buttonId === 'export_results') {
-                    await exportSearchResults(sock, from, sender, reply, session);
-                    return true;
-                }
-                
-                if (buttonId === 'clear_repo') {
-                    // Clean up temp directory
-                    if (session.data.tempDir && fs.existsSync(session.data.tempDir)) {
-                        fs.rmSync(session.data.tempDir, { recursive: true, force: true });
-                    }
-                    sessionManager.clearSession(session.id);
-                    await reply(`✅ Repository cleared from memory.`);
+                const handled = await handleButtonClick(sock, msg, buttonId, buttonText, from, sender, (text) => sock.sendMessage(from, { text }, { quoted: msg }));
+                if (handled) {
                     return true;
                 }
             }
+            return true;
         }
         
         // Handle text input for search term
@@ -449,7 +594,7 @@ module.exports = {
                 waitingForSearch: false,
                 pendingSearch: text
             });
-            await showSearchOptions(sock, from, sender, reply, session);
+            await performSearch(sock, from, sender, reply, react, session, text);
             return true;
         }
         
@@ -457,12 +602,14 @@ module.exports = {
     }
 };
 
+// ==================== HELPER FUNCTIONS ====================
+
 async function handleRepoLoad(sock, from, sender, reply, react, repoUrl) {
     await react('📥');
     const processingMsg = await reply(`🔄 *Loading repository...*\n\nRepo: ${repoUrl}\n\nPlease wait, downloading...`);
     
     try {
-        const { token: githubToken, username: githubUsername } = await getGitHubCredentials();
+        await getGitHubCredentials();
         
         const updateProgress = (msg) => {
             sock.sendMessage(from, { text: `🔄 *${msg}*`, edit: processingMsg.key }).catch(() => {});
@@ -483,33 +630,15 @@ async function handleRepoLoad(sock, from, sender, reply, react, repoUrl) {
             pendingSearch: null
         });
         
-        const sessionId = session.id.split(':').pop();
-        
-        const buttons = [
-            { id: `search_${sessionId}`, text: '🔍 Start Search' },
-            { id: 'clear_repo', text: '🗑️ Clear Repository' }
-        ];
-        
         await sock.sendMessage(from, {
-            text: `✅ *Repository Loaded Successfully!*\n\n` +
-                  `📁 *Repo:* ${repoName}\n` +
-                  `📊 *Status:* Ready for search\n` +
-                  `🔍 *Total Files:* Ready\n\n` +
-                  `What would you like to do?`,
-            edit: processingMsg.key
-        });
-        
-        const sentMsg = await sendButtons(sock, from, {
             text: `✅ *Repository Loaded Successfully!*\n\n` +
                   `📁 *Repo:* ${repoName}\n` +
                   `📊 *Status:* Ready for search\n\n` +
                   `What would you like to do?`,
-            footer: 'Audit Tool',
-            buttons: buttons,
-            aimode: FORCE_AI_MODE
-        }, {});
+            edit: processingMsg.key
+        });
         
-        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'audit');
+        await showSearchOptions(sock, from, sender, reply, session);
         
         await react('✅');
         
@@ -527,7 +656,7 @@ async function handleRepoLoadAndSearch(sock, from, sender, reply, react, repoUrl
     const processingMsg = await reply(`🔄 *Loading repository and searching...*\n\nRepo: ${repoUrl}\nSearch: "${searchTerm}"\n\nPlease wait...`);
     
     try {
-        const { token: githubToken, username: githubUsername } = await getGitHubCredentials();
+        await getGitHubCredentials();
         
         const updateProgress = (msg) => {
             sock.sendMessage(from, { text: `🔄 *${msg}*`, edit: processingMsg.key }).catch(() => {});
@@ -555,6 +684,11 @@ async function handleRepoLoadAndSearch(sock, from, sender, reply, react, repoUrl
             pendingSearch: null
         });
         
+        await sock.sendMessage(from, {
+            text: formattedResults,
+            edit: processingMsg.key
+        });
+        
         const sessionId = session.id.split(':').pop();
         
         const buttons = [
@@ -562,11 +696,6 @@ async function handleRepoLoadAndSearch(sock, from, sender, reply, react, repoUrl
             { id: 'export_results', text: '📄 Export Results' },
             { id: 'clear_repo', text: '🗑️ Clear Repository' }
         ];
-        
-        await sock.sendMessage(from, {
-            text: formattedResults,
-            edit: processingMsg.key
-        });
         
         const sentMsg = await sendButtons(sock, from, {
             text: formattedResults + '\n\nWhat would you like to do next?',
@@ -599,130 +728,5 @@ async function handleSearchLoadedRepo(sock, from, sender, reply, react, searchTe
     await performSearch(sock, from, sender, reply, react, session, searchTerm);
 }
 
-async function performSearch(sock, from, sender, reply, react, session, searchTerm) {
-    await react('🔍');
-    const processingMsg = await reply(`🔍 *Searching for "${searchTerm}"...*\n\nPlease wait...`);
-    
-    try {
-        const isCaseSensitive = session.data.caseSensitive || false;
-        const fileExtensions = session.data.fileExtensions ? session.data.fileExtensions.split(',') : null;
-        
-        const results = await searchDirectory(session.data.extractedFolder, searchTerm, fileExtensions, isCaseSensitive, (msg) => {
-            sock.sendMessage(from, { text: `🔍 *${msg}*`, edit: processingMsg.key }).catch(() => {});
-        });
-        
-        const formattedResults = formatResults(results, searchTerm);
-        
-        // Update session with results
-        sessionManager.updateSession(sender, from, {
-            searchResults: results,
-            lastSearchTerm: searchTerm
-        });
-        
-        const sessionId = session.id.split(':').pop();
-        
-        const buttons = [
-            { id: `search_${sessionId}`, text: '🔍 New Search' },
-            { id: 'export_results', text: '📄 Export Results' },
-            { id: 'case_sensitive', text: session.data.caseSensitive ? '🔒 Case: ON' : '🔓 Case: OFF' },
-            { id: 'clear_repo', text: '🗑️ Clear Repository' }
-        ];
-        
-        await sock.sendMessage(from, {
-            text: formattedResults,
-            edit: processingMsg.key
-        });
-        
-        const sentMsg = await sendButtons(sock, from, {
-            text: formattedResults + '\n\nWhat would you like to do next?',
-            footer: 'Audit Tool',
-            buttons: buttons,
-            aimode: FORCE_AI_MODE
-        }, {});
-        
-        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'audit');
-        
-        await react('✅');
-        
-    } catch (error) {
-        await sock.sendMessage(from, {
-            text: `❌ *Search failed*\n\nError: ${error.message}`,
-            edit: processingMsg.key
-        });
-        await react('❌');
-    }
-}
-
-async function showSearchOptions(sock, from, sender, reply, session) {
-    const sessionId = session.id.split(':').pop();
-    
-    const buttons = [
-        { id: `search_${sessionId}`, text: '🔍 Start Search' },
-        { id: 'case_sensitive', text: session.data.caseSensitive ? '🔒 Case: ON' : '🔓 Case: OFF' },
-        { id: 'clear_repo', text: '🗑️ Clear Repository' }
-    ];
-    
-    const sentMsg = await sendButtons(sock, from, {
-        text: `🔍 *Search Options*\n\n` +
-              `📁 *Repo:* ${session.data.repoName}\n` +
-              `🔒 *Case Sensitive:* ${session.data.caseSensitive ? 'ON' : 'OFF'}\n\n` +
-              `Send me the word/phrase you want to search for, or adjust options below.`,
-        footer: 'Audit Tool',
-        buttons: buttons,
-        aimode: FORCE_AI_MODE
-    }, {});
-    
-    sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'audit');
-    sessionManager.updateSession(sender, from, { waitingForSearch: true });
-}
-
-async function exportSearchResults(sock, from, sender, reply, session) {
-    const results = session.data.searchResults;
-    const searchTerm = session.data.lastSearchTerm;
-    
-    if (!results || results.length === 0) {
-        return reply(`❌ No search results to export. Please perform a search first.`);
-    }
-    
-    await reply(`📄 *Exporting results...*`);
-    
-    let exportContent = `Search Results for "${searchTerm}"\n`;
-    exportContent += `Repository: ${session.data.repoName}\n`;
-    exportContent += `Date: ${new Date().toLocaleString()}\n`;
-    exportContent += `Case Sensitive: ${session.data.caseSensitive ? 'Yes' : 'No'}\n`;
-    exportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-    
-    for (const result of results) {
-        exportContent += `📄 File: ${result.fileName}\n`;
-        exportContent += `📍 Path: ${result.relativePath}\n`;
-        exportContent += `🎯 Matches: ${result.matches.length}\n`;
-        exportContent += `─────────────────────────────────────────────────\n`;
-        
-        for (const match of result.matches) {
-            exportContent += `  Line ${match.lineNumber}: ${match.line}\n`;
-        }
-        exportContent += `\n`;
-    }
-    
-    const tempDir = path.join(process.cwd(), 'temp');
-    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-    
-    const filename = `audit_results_${searchTerm.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}.txt`;
-    const filepath = path.join(tempDir, filename);
-    fs.writeFileSync(filepath, exportContent);
-    
-    await sock.sendMessage(from, {
-        document: fs.readFileSync(filepath),
-        mimetype: 'text/plain',
-        fileName: filename,
-        caption: `📄 *Search Results Export*\n\n` +
-                 `🔍 *Term:* ${searchTerm}\n` +
-                 `📊 *Files Found:* ${results.length}\n` +
-                 `📁 *Repo:* ${session.data.repoName}\n\n` +
-                 `> *Exported by ${config.botName}*`
-    });
-    
-    fs.unlinkSync(filepath);
-    
-    await reply(`✅ Results exported successfully!`);
-}
+// Export the button handler for use in handler.js
+module.exports.handleButtonClick = handleButtonClick;
