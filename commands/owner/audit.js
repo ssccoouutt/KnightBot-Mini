@@ -1,5 +1,6 @@
 /**
  * Audit Command - Search through GitHub repository files with replace functionality
+ * DEBUG VERSION with extensive logging
  */
 
 const axios = require('axios');
@@ -188,6 +189,8 @@ async function downloadGitHubRepo(repoUrl, onProgress) {
         
         fs.unlinkSync(zipPath);
         
+        console.log(`[AUDIT] Repository extracted to: ${extractedFolder}`);
+        
         return { extractedFolder, repoName, tempDir };
         
     } catch (error) {
@@ -196,22 +199,35 @@ async function downloadGitHubRepo(repoUrl, onProgress) {
     }
 }
 
+// ==================== FILE SEARCH FUNCTIONS ====================
+
 async function findFilesByName(dirPath, fileName, results = []) {
+    console.log(`[AUDIT-DEBUG] Searching for ${fileName} in ${dirPath}`);
+    
     try {
         const items = fs.readdirSync(dirPath);
+        console.log(`[AUDIT-DEBUG] Found ${items.length} items in ${dirPath}`);
         
         for (const item of items) {
             const itemPath = path.join(dirPath, item);
-            const stat = fs.statSync(itemPath);
             
-            if (stat.isDirectory()) {
-                await findFilesByName(itemPath, fileName, results);
-            } else if (item === fileName) {
-                results.push(itemPath);
+            try {
+                const stat = fs.statSync(itemPath);
+                
+                if (stat.isDirectory()) {
+                    console.log(`[AUDIT-DEBUG] Entering directory: ${itemPath}`);
+                    await findFilesByName(itemPath, fileName, results);
+                } else if (item === fileName) {
+                    console.log(`[AUDIT-DEBUG] ✅ Found file: ${itemPath}`);
+                    results.push(itemPath);
+                }
+            } catch (err) {
+                console.log(`[AUDIT-DEBUG] Error accessing ${itemPath}: ${err.message}`);
+                // Skip files that can't be accessed
             }
         }
     } catch (error) {
-        console.error(`[AUDIT] Error searching for ${fileName}:`, error.message);
+        console.error(`[AUDIT-DEBUG] Error reading directory ${dirPath}:`, error.message);
     }
     
     return results;
@@ -219,6 +235,7 @@ async function findFilesByName(dirPath, fileName, results = []) {
 
 async function searchInFile(filePath, searchTerm, isCaseSensitive = false) {
     try {
+        console.log(`[AUDIT-DEBUG] Searching in file: ${filePath}`);
         const content = fs.readFileSync(filePath, 'utf8');
         const lines = content.split('\n');
         const results = [];
@@ -234,6 +251,7 @@ async function searchInFile(filePath, searchTerm, isCaseSensitive = false) {
             }
             
             if (found) {
+                console.log(`[AUDIT-DEBUG] Found match in ${filePath} at line ${i + 1}`);
                 results.push({
                     lineNumber: i + 1,
                     line: line,
@@ -244,12 +262,16 @@ async function searchInFile(filePath, searchTerm, isCaseSensitive = false) {
         
         return results;
     } catch (error) {
+        console.log(`[AUDIT-DEBUG] Error reading ${filePath}: ${error.message}`);
         return null;
     }
 }
 
 async function replaceInFile(filePath, searchTerm, replaceTerm, isCaseSensitive = false) {
     try {
+        console.log(`[AUDIT-DEBUG] Replacing in file: ${filePath}`);
+        console.log(`[AUDIT-DEBUG] Search: "${searchTerm}", Replace: "${replaceTerm}"`);
+        
         let content = fs.readFileSync(filePath, 'utf8');
         let newContent = content;
         let replaceCount = 0;
@@ -267,12 +289,24 @@ async function replaceInFile(filePath, searchTerm, replaceTerm, isCaseSensitive 
         }
         
         if (replaceCount > 0) {
+            console.log(`[AUDIT-DEBUG] Making ${replaceCount} replacements in ${filePath}`);
             fs.writeFileSync(filePath, newContent, 'utf8');
+            
+            // Verify the change
+            const verifyContent = fs.readFileSync(filePath, 'utf8');
+            const stillHasSearch = isCaseSensitive ? 
+                verifyContent.includes(searchTerm) : 
+                verifyContent.toLowerCase().includes(searchTerm.toLowerCase());
+            
+            console.log(`[AUDIT-DEBUG] After replace, still has search term: ${stillHasSearch}`);
+            
             return { replaceCount, changed: true };
         }
         
+        console.log(`[AUDIT-DEBUG] No replacements made in ${filePath}`);
         return { replaceCount: 0, changed: false };
     } catch (error) {
+        console.error(`[AUDIT-DEBUG] Error replacing in ${filePath}:`, error.message);
         return { replaceCount: 0, changed: false };
     }
 }
@@ -283,8 +317,10 @@ async function searchDirectory(dirPath, searchTerm, fileExtensions = null, isCas
     
     if (specificFiles && specificFiles.length > 0) {
         items = specificFiles;
+        console.log(`[AUDIT-DEBUG] Searching ${items.length} specific files`);
     } else {
         items = fs.readdirSync(dirPath);
+        console.log(`[AUDIT-DEBUG] Searching directory: ${dirPath} with ${items.length} items`);
     }
     
     let processedCount = 0;
@@ -296,6 +332,7 @@ async function searchDirectory(dirPath, searchTerm, fileExtensions = null, isCas
             const stat = fs.statSync(itemPath);
             
             if (stat.isDirectory()) {
+                console.log(`[AUDIT-DEBUG] Entering subdirectory: ${itemPath}`);
                 const subResults = await searchDirectory(itemPath, searchTerm, fileExtensions, isCaseSensitive, onProgress, null);
                 results.push(...subResults);
             } else {
@@ -321,10 +358,11 @@ async function searchDirectory(dirPath, searchTerm, fileExtensions = null, isCas
                 }
             }
         } catch (error) {
-            console.error(`[AUDIT] Error processing ${itemPath}:`, error.message);
+            console.error(`[AUDIT-DEBUG] Error processing ${itemPath}:`, error.message);
         }
     }
     
+    console.log(`[AUDIT-DEBUG] Search complete. Found ${results.length} files with matches`);
     return results;
 }
 
@@ -333,8 +371,10 @@ async function replaceInDirectory(dirPath, searchTerm, replaceTerm, fileExtensio
     
     if (specificFiles && specificFiles.length > 0) {
         items = specificFiles;
+        console.log(`[AUDIT-DEBUG] Replacing in ${items.length} specific files`);
     } else {
         items = fs.readdirSync(dirPath);
+        console.log(`[AUDIT-DEBUG] Replacing in directory: ${dirPath}`);
     }
     
     let totalReplacements = 0;
@@ -348,6 +388,7 @@ async function replaceInDirectory(dirPath, searchTerm, replaceTerm, fileExtensio
             const stat = fs.statSync(itemPath);
             
             if (stat.isDirectory()) {
+                console.log(`[AUDIT-DEBUG] Entering subdirectory for replace: ${itemPath}`);
                 const result = await replaceInDirectory(itemPath, searchTerm, replaceTerm, fileExtensions, isCaseSensitive, onProgress, modifiedFilesList, null);
                 totalReplacements += result.totalReplacements;
                 affectedFiles += result.affectedFiles;
@@ -373,14 +414,15 @@ async function replaceInDirectory(dirPath, searchTerm, replaceTerm, fileExtensio
                         replacements: replaceCount,
                         relativePath: itemPath
                     });
-                    console.log(`[AUDIT] Modified: ${path.basename(itemPath)} (${replaceCount} replacements)`);
+                    console.log(`[AUDIT-DEBUG] Modified: ${path.basename(itemPath)} (${replaceCount} replacements)`);
                 }
             }
         } catch (error) {
-            console.error(`[AUDIT] Error processing ${itemPath}:`, error.message);
+            console.error(`[AUDIT-DEBUG] Error processing ${itemPath}:`, error.message);
         }
     }
     
+    console.log(`[AUDIT-DEBUG] Replace complete. Total replacements: ${totalReplacements}, Affected files: ${affectedFiles}`);
     return { totalReplacements, affectedFiles };
 }
 
@@ -389,6 +431,8 @@ async function pushModifiedFilesToGitHub(session, token, username, commitMessage
     const extractedFolder = session.data.extractedFolder;
     const modifiedFiles = session.data.modifiedFiles || [];
     
+    console.log(`[AUDIT-DEBUG] Pushing ${modifiedFiles.length} modified files to GitHub`);
+    
     if (modifiedFiles.length === 0) {
         return { successCount: 0, totalCount: 0, failedFiles: [], message: "No files were modified" };
     }
@@ -396,21 +440,27 @@ async function pushModifiedFilesToGitHub(session, token, username, commitMessage
     let successCount = 0;
     let failedFiles = [];
     
-    // Find the root folder name (the actual repo folder inside extracted)
+    // Find the root folder name
     const rootItems = fs.readdirSync(extractedFolder);
     const repoRoot = path.join(extractedFolder, rootItems[0]);
+    console.log(`[AUDIT-DEBUG] Repo root: ${repoRoot}`);
     
     for (const file of modifiedFiles) {
         // Get relative path from repo root
         let relativePath = path.relative(repoRoot, file.path);
+        
+        console.log(`[AUDIT-DEBUG] Processing file: ${file.path}`);
+        console.log(`[AUDIT-DEBUG] Relative path: ${relativePath}`);
         
         if (relativePath.startsWith('..')) {
             // Try to find the correct relative path
             const repoRootIndex = file.path.indexOf(rootItems[0]);
             if (repoRootIndex !== -1) {
                 relativePath = file.path.substring(repoRootIndex + rootItems[0].length + 1);
+                console.log(`[AUDIT-DEBUG] Alternative relative path: ${relativePath}`);
             } else {
                 relativePath = path.basename(file.path);
+                console.log(`[AUDIT-DEBUG] Using basename: ${relativePath}`);
             }
         }
         
@@ -419,9 +469,13 @@ async function pushModifiedFilesToGitHub(session, token, username, commitMessage
         const fileName = path.basename(file.path);
         const commitMessage = `${commitMessagePrefix} ${fileName}`;
         
+        console.log(`[AUDIT-DEBUG] Pushing to: ${relativePath} with message: ${commitMessage}`);
+        
         try {
             const content = fs.readFileSync(file.path, 'utf8');
             const base64Content = Buffer.from(content).toString('base64');
+            
+            console.log(`[AUDIT-DEBUG] File content length: ${content.length} chars, Base64 length: ${base64Content.length}`);
             
             let sha = null;
             try {
@@ -431,10 +485,13 @@ async function pushModifiedFilesToGitHub(session, token, username, commitMessage
                 );
                 if (checkResponse.data && checkResponse.data.sha) {
                     sha = checkResponse.data.sha;
+                    console.log(`[AUDIT-DEBUG] Existing file SHA: ${sha}`);
                 }
-            } catch (e) {}
+            } catch (e) {
+                console.log(`[AUDIT-DEBUG] File doesn't exist on GitHub, will create new`);
+            }
             
-            await axios.put(
+            const putResponse = await axios.put(
                 `https://api.github.com/repos/${username}/${repoName}/contents/${relativePath}`,
                 {
                     message: commitMessage,
@@ -449,15 +506,16 @@ async function pushModifiedFilesToGitHub(session, token, username, commitMessage
                 }
             );
             
+            console.log(`[AUDIT-DEBUG] ✅ Push successful: ${relativePath} (Status: ${putResponse.status})`);
             successCount++;
-            console.log(`[AUDIT] ✅ Pushed: ${relativePath} (${commitMessage})`);
             
         } catch (error) {
-            console.error(`[AUDIT] ❌ Failed to push ${relativePath}:`, error.response?.data?.message || error.message);
+            console.error(`[AUDIT-DEBUG] ❌ Failed to push ${relativePath}:`, error.response?.data?.message || error.message);
             failedFiles.push({ file: relativePath, error: error.response?.data?.message || error.message });
         }
     }
     
+    console.log(`[AUDIT-DEBUG] Push complete. Success: ${successCount}/${modifiedFiles.length}`);
     return { successCount, totalCount: modifiedFiles.length, failedFiles };
 }
 
@@ -551,8 +609,6 @@ async function showFileModeSelection(sock, from, sender, reply, session) {
 }
 
 async function handleFileSelection(sock, from, sender, reply, react, session, buttonId) {
-    const sessionId = session.id.split(':').pop();
-    
     if (buttonId.includes('mode_all')) {
         sessionManager.updateSession(sender, from, { searchMode: 'all', waitingForSearch: true });
         await reply(`🔍 *Search Mode: All Files*\n\nSend me the word/phrase you want to search for.`);
@@ -571,24 +627,47 @@ async function handleFileSelection(sock, from, sender, reply, react, session, bu
 async function handleFileNameInput(sock, from, sender, reply, react, session, fileName) {
     const extractedFolder = session.data.extractedFolder;
     
-    // Find the root folder name
+    // Find the root folder
     const rootItems = fs.readdirSync(extractedFolder);
     const repoRoot = path.join(extractedFolder, rootItems[0]);
     
     console.log(`[AUDIT] Searching for ${fileName} in ${repoRoot}`);
+    
+    // Verify repoRoot exists and is a directory
+    if (!fs.existsSync(repoRoot)) {
+        console.log(`[AUDIT] Repo root does not exist: ${repoRoot}`);
+        await reply(`❌ Repository root not found. Please reload the repository.`);
+        return;
+    }
     
     const foundFiles = await findFilesByName(repoRoot, fileName, []);
     
     console.log(`[AUDIT] Found ${foundFiles.length} files named ${fileName}`);
     
     if (foundFiles.length === 0) {
-        await reply(`❌ No file named "${fileName}" found in the repository.\n\nMake sure you entered the exact filename including extension (e.g., config.js, database.js, handler.js).`);
+        // List some files to help user
+        const sampleFiles = [];
+        const listFiles = (dir, depth = 0) => {
+            if (depth > 2) return;
+            try {
+                const items = fs.readdirSync(dir);
+                for (const item of items.slice(0, 10)) {
+                    const itemPath = path.join(dir, item);
+                    const stat = fs.statSync(itemPath);
+                    if (!stat.isDirectory()) {
+                        sampleFiles.push(item);
+                    }
+                }
+            } catch (e) {}
+        };
+        listFiles(repoRoot);
+        
+        await reply(`❌ No file named "${fileName}" found in the repository.\n\nMake sure you entered the exact filename including extension (e.g., config.js, database.js, handler.js).\n\n*Sample files in repo:*\n${sampleFiles.slice(0, 10).join(', ')}`);
         sessionManager.updateSession(sender, from, { waitingForFileName: true });
         return;
     }
     
     if (foundFiles.length === 1) {
-        // Single file found, proceed with search
         sessionManager.updateSession(sender, from, {
             searchMode: 'single',
             specificFiles: foundFiles,
@@ -597,7 +676,6 @@ async function handleFileNameInput(sock, from, sender, reply, react, session, fi
         });
         await reply(`🔍 *Search Mode: Single File*\n\nFound: \`${foundFiles[0]}\`\n\nSend me the word/phrase you want to search for.`);
     } else {
-        // Multiple files with same name, show selection buttons
         const sessionId = session.id.split(':').pop();
         const buttons = [];
         
@@ -612,7 +690,6 @@ async function handleFileNameInput(sock, from, sender, reply, react, session, fi
         
         buttons.push({ id: 'cancel', text: '❌ Cancel' });
         
-        // Store found files in session
         sessionManager.updateSession(sender, from, {
             foundFiles: foundFiles,
             waitingForFileSelection: true,
@@ -822,12 +899,12 @@ async function performSearch(sock, from, sender, reply, react, session, searchTe
         let results;
         
         if (searchMode === 'single' && specificFiles && specificFiles.length > 0) {
-            // Search only in specific files
+            console.log(`[AUDIT] Searching in specific files: ${specificFiles.length} files`);
             results = await searchDirectory(null, searchTerm, null, isCaseSensitive, (msg) => {
                 sock.sendMessage(from, { text: `🔍 *${msg}*`, edit: processingMsg.key }).catch(() => {});
             }, specificFiles);
         } else {
-            // Search all files
+            console.log(`[AUDIT] Searching all files in: ${session.data.extractedFolder}`);
             results = await searchDirectory(session.data.extractedFolder, searchTerm, null, isCaseSensitive, (msg) => {
                 sock.sendMessage(from, { text: `🔍 *${msg}*`, edit: processingMsg.key }).catch(() => {});
             }, null);
@@ -851,6 +928,7 @@ async function performSearch(sock, from, sender, reply, react, session, searchTe
         await react('✅');
         
     } catch (error) {
+        console.error('[AUDIT] Search error:', error);
         await sock.sendMessage(from, {
             text: `❌ *Search failed*\n\nError: ${error.message}`,
             edit: processingMsg.key
@@ -872,12 +950,14 @@ async function performReplace(sock, from, sender, reply, react, session, searchT
         let result;
         
         if (searchMode === 'single' && specificFiles && specificFiles.length > 0) {
+            console.log(`[AUDIT] Replacing in specific files: ${specificFiles.length} files`);
             result = await replaceInDirectory(null, searchTerm, replaceTerm, null, isCaseSensitive,
                 (msg) => {
                     sock.sendMessage(from, { text: `✏️ *${msg}*`, edit: processingMsg.key }).catch(() => {});
                 },
                 modifiedFilesList, specificFiles);
         } else {
+            console.log(`[AUDIT] Replacing in all files in: ${session.data.extractedFolder}`);
             result = await replaceInDirectory(session.data.extractedFolder, searchTerm, replaceTerm, null, isCaseSensitive,
                 (msg) => {
                     sock.sendMessage(from, { text: `✏️ *${msg}*`, edit: processingMsg.key }).catch(() => {});
@@ -908,6 +988,7 @@ async function performReplace(sock, from, sender, reply, react, session, searchT
         await react('✅');
         
     } catch (error) {
+        console.error('[AUDIT] Replace error:', error);
         await sock.sendMessage(from, {
             text: `❌ *Replace failed*\n\nError: ${error.message}`,
             edit: processingMsg.key
@@ -959,6 +1040,7 @@ async function pushToGitHub(sock, from, sender, reply, react, session, commitMes
         }
         
     } catch (error) {
+        console.error('[AUDIT] Push error:', error);
         await sock.sendMessage(from, {
             text: `❌ *Push failed*\n\nError: ${error.message}`,
             edit: processingMsg.key
@@ -992,7 +1074,6 @@ module.exports = {
         
         const firstArg = args[0];
         
-        // Check if it's a GitHub URL
         if (firstArg.includes('github.com')) {
             const repoUrl = firstArg;
             const searchTerm = args[1];
@@ -1030,7 +1111,6 @@ module.exports = {
                 });
                 
                 if (searchTerm) {
-                    // Search immediately with the provided term
                     sessionManager.updateSession(sender, from, { searchMode: 'all', waitingForSearch: true });
                     await performSearch(sock, from, sender, reply, react, session, searchTerm);
                 } else {
@@ -1044,6 +1124,7 @@ module.exports = {
                 await react('✅');
                 
             } catch (error) {
+                console.error('[AUDIT] Load error:', error);
                 await sock.sendMessage(from, {
                     text: `❌ *Failed to load repository*\n\nError: ${error.message}`,
                     edit: processingMsg.key
@@ -1095,7 +1176,6 @@ module.exports = {
             return true;
         }
         
-        // Handle text input
         let text = '';
         if (msg.message?.conversation) {
             text = msg.message.conversation.trim();
@@ -1116,21 +1196,18 @@ module.exports = {
             return true;
         }
         
-        // Handle replace text input
         if (session.data.waitingForReplace && session.data.replaceSearchTerm) {
             sessionManager.updateSession(sender, from, { waitingForReplace: false });
             await performReplace(sock, from, sender, reply, react, session, session.data.replaceSearchTerm, text);
             return true;
         }
         
-        // Handle file name input for single file mode
         if (session.data.waitingForFileName) {
             sessionManager.updateSession(sender, from, { waitingForFileName: false });
             await handleFileNameInput(sock, from, sender, reply, react, session, text);
             return true;
         }
         
-        // Handle search text input
         if (session.data.waitingForSearch) {
             sessionManager.updateSession(sender, from, { waitingForSearch: false, pendingSearch: text });
             await performSearch(sock, from, sender, reply, react, session, text);
@@ -1141,5 +1218,4 @@ module.exports = {
     }
 };
 
-// Export the button handler
 module.exports.handleButtonClick = handleButtonClick;
