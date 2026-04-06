@@ -374,40 +374,9 @@ async function startBot() {
       }
       // ===== END LOAD USER SUBSCRIPTIONS =====
 
-      // ===== AUTO-START TELEGRAM BRIDGE =====
-      if (config.autoStartTelegram) {
-        try {
-          // Try to load telegram command
-          const telegramCommandPath = './commands/owner/telegram';
-          const telegramCommand = require(telegramCommandPath);
-          
-          if (telegramCommand && typeof telegramCommand.autoStart === 'function') {
-            console.log('🔄 Auto-starting Telegram bridge...');
-            
-            // Start Telegram bridge in background (don't await to not block)
-            telegramCommand.autoStart(sock).then(success => {
-              if (success) {
-                console.log('✅ Telegram bridge is now active!');
-              } else {
-                console.log('❌ Telegram bridge auto-start failed');
-              }
-            }).catch(err => {
-              console.error('❌ Telegram bridge error:', err.message);
-            });
-          } else {
-            console.log('⚠️ Telegram bridge auto-start function not found');
-          }
-        } catch (err) {
-          // Silently ignore if telegram command doesn't exist
-          // This prevents errors when telegram.js is not yet added
-          if (err.code !== 'MODULE_NOT_FOUND') {
-            console.log('⚠️ Telegram bridge not available:', err.message);
-          }
-        }
-      } else {
-        console.log('⏸️ Telegram bridge auto-start disabled in config');
-      }
-      // ===== END OF AUTO-START =====
+      // ===== TELEGRAM BRIDGE DISABLED =====
+      console.log('⏸️ Telegram bridge is disabled');
+      // ===== END TELEGRAM BRIDGE =====
 
       // Cleanup old chats (keep only active ones, e.g., last touched <1 day)
       const now = Date.now();
