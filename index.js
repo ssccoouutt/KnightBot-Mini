@@ -63,6 +63,7 @@ const {
 const qrcode = require('qrcode-terminal');
 const config = require('./config');
 const handler = require('./handler');
+const database = require('./database');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
@@ -83,6 +84,7 @@ function cleanupPuppeteerCache() {
     console.error('⚠️ Failed to cleanup Puppeteer cache:', err.message || err);
   }
 }
+
 // Optimized in-memory store with hard limits (Map-based for better memory management)
 const store = {
   messages: new Map(), // Use Map instead of plain object
@@ -312,6 +314,101 @@ async function startBot() {
       // Initialize anti-call feature
       handler.initializeAntiCall(sock);
 
+      // ===== LOAD FORWARDING CONFIGURATIONS FROM GOOGLE DRIVE =====
+      console.log('\n📤 Loading forwarding configurations from Google Drive...');
+      try {
+        const forwardings = await database.loadForwardingsOnStart();
+        console.log(`✅ Loaded ${forwardings.length} forwarding rules from Google Drive`);
+        
+        if (forwardings.length > 0) {
+          console.log('\n📋 Active Forwarding Rules:');
+          forwardings.forEach(f => {
+            console.log(`   • ${f.sourceGroupId} → ${f.targetGroupId} [${f.enabled ? 'ACTIVE' : 'DISABLED'}]`);
+            if (f.filters) {
+              const filterStr = [];
+              if (f.filters.types && f.filters.types.length > 0) filterStr.push(`types:${f.filters.types.join(',')}`);
+              if (f.filters.onlyWithCaption) filterStr.push('only with caption');
+              if (f.filters.onlyWithoutCaption) filterStr.push('only without caption');
+              if (f.filters.excludeMedia) filterStr.push('exclude media');
+              if (f.filters.excludeText) filterStr.push('exclude text');
+              if (filterStr.length > 0) {
+                console.log(`     Filters: ${filterStr.join(', ')}`);
+              }
+            }
+          });
+        }
+      } catch (driveError) {
+        console.error('❌ Failed to load forwarding configs from Google Drive:', driveError.message);
+        console.log('⚠️ Continuing without forwarding rules...');
+      }
+      // ===== END LOAD FORWARDINGS =====
+
+      // ===== LOAD USER SUBSCRIPTIONS FROM GOOGLE DRIVE =====
+      console.log('\n👥 Loading user subscriptions from Google Drive...');
+      try {
+        const users = await database.loadUsersOnStart();
+        const userCount = Object.keys(users).length;
+        console.log(`✅ Loaded ${userCount} subscribed users from Google Drive`);
+        
+        if (userCount > 0) {
+          console.log('\n📋 Subscribed Users:');
+          const userEntries = Object.entries(users);
+          // Show first 10 users to avoid spam
+          const toShow = userEntries.slice(0, 10);
+          toShow.forEach(([jid, data]) => {
+            console.log(`   • ${jid} (since: ${data.subscribedAt})`);
+          });
+          if (userEntries.length > 10) {
+            console.log(`   ... and ${userEntries.length - 10} more users`);
+          }
+        }
+        
+        if (config.selfMode) {
+          console.log(`\n🔒 Self Mode is ENABLED. Only ${userCount} subscribed users can use commands.`);
+        } else {
+          console.log(`\n🔓 Self Mode is DISABLED. All users can use commands.`);
+        }
+      } catch (userError) {
+        console.error('❌ Failed to load user subscriptions from Google Drive:', userError.message);
+        console.log('⚠️ Continuing without user subscriptions...');
+      }
+      // ===== END LOAD USER SUBSCRIPTIONS =====
+
+      // ===== AUTO-START TELEGRAM BRIDGE =====
+      if (config.autoStartTelegram) {
+        try {
+          // Try to load telegram command
+          const telegramCommandPath = './commands/owner/telegram';
+          const telegramCommand = require(telegramCommandPath);
+          
+          if (telegramCommand && typeof telegramCommand.autoStart === 'function') {
+            console.log('🔄 Auto-starting Telegram bridge...');
+            
+            // Start Telegram bridge in background (don't await to not block)
+            telegramCommand.autoStart(sock).then(success => {
+              if (success) {
+                console.log('✅ Telegram bridge is now active!');
+              } else {
+                console.log('❌ Telegram bridge auto-start failed');
+              }
+            }).catch(err => {
+              console.error('❌ Telegram bridge error:', err.message);
+            });
+          } else {
+            console.log('⚠️ Telegram bridge auto-start function not found');
+          }
+        } catch (err) {
+          // Silently ignore if telegram command doesn't exist
+          // This prevents errors when telegram.js is not yet added
+          if (err.code !== 'MODULE_NOT_FOUND') {
+            console.log('⚠️ Telegram bridge not available:', err.message);
+          }
+        }
+      } else {
+        console.log('⏸️ Telegram bridge auto-start disabled in config');
+      }
+      // ===== END OF AUTO-START =====
+
       // Cleanup old chats (keep only active ones, e.g., last touched <1 day)
       const now = Date.now();
       for (const [jid, chatMsgs] of store.messages.entries()) {
@@ -454,6 +551,7 @@ async function startBot() {
 
   return sock;
 }
+
 // Start the bot
 console.log('🚀 Starting WhatsApp MD Bot...\n');
 console.log(`📦 Bot Name: ${config.botName}`);
@@ -468,6 +566,7 @@ startBot().catch(err => {
   console.error('Error starting bot:', err);
   process.exit(1);
 });
+
 // Handle process termination
 process.on('uncaughtException', (err) => {
   // Handle ENOSPC errors gracefully without crashing
@@ -480,6 +579,7 @@ process.on('uncaughtException', (err) => {
   }
   console.error('Uncaught Exception:', err);
 });
+
 process.on('unhandledRejection', (err) => {
   // Handle ENOSPC errors gracefully
   if (err.code === 'ENOSPC' || err.errno === -28 || err.message?.includes('no space left on device')) {
@@ -497,5 +597,6 @@ process.on('unhandledRejection', (err) => {
   }
   console.error('Unhandled Rejection:', err);
 });
+
 // Export store for use in commands
 module.exports = { store };
