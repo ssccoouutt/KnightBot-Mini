@@ -42,7 +42,9 @@ async function getAccessToken() {
         
         const tempTokenFile = path.join(process.cwd(), 'temp', `token_${Date.now()}.json`);
         const tokenDir = path.dirname(tempTokenFile);
-        if (!fs.existsSync(tokenDir)) fs.mkdirSync(tokenDir, { recursive: true });
+        if (!fs.existsSync(tokenDir)) {
+            fs.mkdirSync(tokenDir, { recursive: true });
+        }
         
         const tokenWriter = fs.createWriteStream(tempTokenFile);
         tokenResponse.data.pipe(tokenWriter);
@@ -89,7 +91,9 @@ async function getGitHubCredentials() {
         console.log('[COMMIT] Fetching GitHub credentials from Google Drive...');
         
         const driveToken = await getAccessToken();
-        if (!driveToken) throw new Error('No Drive access token');
+        if (!driveToken) {
+            throw new Error('No Drive access token');
+        }
         
         const response = await axios({
             method: 'GET',
@@ -126,7 +130,7 @@ async function getGitHubCredentials() {
         
     } catch (error) {
         console.error('[COMMIT] Failed to get GitHub credentials:', error.message);
-        throw new Error(`Failed to load GitHub credentials: ${error.message}`);
+        throw new Error('Failed to load GitHub credentials: ' + error.message);
     }
 }
 
@@ -139,20 +143,22 @@ async function getAllRepositories(token, username) {
         
         while (true) {
             const response = await axios.get(
-                `https://api.github.com/users/${username}/repos`,
+                'https://api.github.com/user/repos',
                 {
-                    headers: { 'Authorization': `token ${token}` },
+                    headers: { 'Authorization': 'token ' + token },
                     params: { page: page, per_page: 100, sort: 'updated' }
                 }
             );
             
-            if (response.data.length === 0) break;
+            if (response.data.length === 0) {
+                break;
+            }
             
             allRepos = allRepos.concat(response.data);
             page++;
         }
         
-        console.log(`[COMMIT] Found ${allRepos.length} repositories`);
+        console.log('[COMMIT] Found ' + allRepos.length + ' repositories');
         return allRepos;
         
     } catch (error) {
@@ -163,50 +169,51 @@ async function getAllRepositories(token, username) {
 
 async function searchFileInRepo(token, username, repoName, fileName) {
     try {
-        // Search for file using GitHub's search API
-        const searchUrl = `https://api.github.com/search/code?q=${encodeURIComponent(fileName)}+repo:${username}/${repoName}`;
+        const searchUrl = 'https://api.github.com/search/code?q=' + encodeURIComponent(fileName) + '+repo:' + username + '/' + repoName;
         
         const response = await axios.get(searchUrl, {
-            headers: { 'Authorization': `token ${token}` }
+            headers: { 'Authorization': 'token ' + token }
         });
         
         return response.data.items || [];
         
     } catch (error) {
-        console.error(`[COMMIT] Error searching in ${repoName}:`, error.message);
+        console.error('[COMMIT] Error searching in ' + repoName + ':', error.message);
         return [];
     }
 }
 
-async function getFileContent(token, username, repoName, filePath, branch = 'main') {
+async function getFileContent(token, username, repoName, filePath, branch) {
+    branch = branch || 'main';
     try {
-        const url = `https://api.github.com/repos/${username}/${repoName}/contents/${filePath}`;
+        const url = 'https://api.github.com/repos/' + username + '/' + repoName + '/contents/' + filePath;
         
         const response = await axios.get(url, {
-            headers: { 'Authorization': `token ${token}` },
+            headers: { 'Authorization': 'token ' + token },
             params: { ref: branch }
         });
         
         if (response.data && response.data.content) {
             const content = Buffer.from(response.data.content, 'base64').toString('utf8');
             const sha = response.data.sha;
-            return { content, sha };
+            return { content: content, sha: sha };
         }
         
         return null;
         
     } catch (error) {
-        console.error(`[COMMIT] Error getting file content:`, error.message);
+        console.error('[COMMIT] Error getting file content:', error.message);
         return null;
     }
 }
 
-async function updateFileContent(token, username, repoName, filePath, content, sha, commitMessage, branch = 'main') {
+async function updateFileContent(token, username, repoName, filePath, content, sha, commitMessage, branch) {
+    branch = branch || 'main';
     try {
         const base64Content = Buffer.from(content, 'utf8').toString('base64');
         
         const response = await axios.put(
-            `https://api.github.com/repos/${username}/${repoName}/contents/${filePath}`,
+            'https://api.github.com/repos/' + username + '/' + repoName + '/contents/' + filePath,
             {
                 message: commitMessage,
                 content: base64Content,
@@ -215,7 +222,7 @@ async function updateFileContent(token, username, repoName, filePath, content, s
             },
             {
                 headers: {
-                    'Authorization': `token ${token}`,
+                    'Authorization': 'token ' + token,
                     'Accept': 'application/vnd.github.v3+json'
                 }
             }
@@ -224,8 +231,8 @@ async function updateFileContent(token, username, repoName, filePath, content, s
         return response.data;
         
     } catch (error) {
-        console.error(`[COMMIT] Error updating file:`, error.message);
-        throw new Error(`Failed to update file: ${error.response?.data?.message || error.message}`);
+        console.error('[COMMIT] Error updating file:', error.message);
+        throw new Error('Failed to update file: ' + (error.response?.data?.message || error.message));
     }
 }
 
@@ -243,33 +250,35 @@ module.exports = {
         const { from, sender, reply, react } = context;
         
         if (args.length === 0) {
-            return reply(`📝 *Commit Command*\n\n` +
-                       `*Usage:*\n` +
-                       `• \`${config.prefix}commit <filename>\` - Search for file in all repos\n` +
-                       `• \`${config.prefix}commit config.js\` - Example\n\n` +
-                       `*What it does:*\n` +
-                       `1. Searches for the file in all your GitHub repositories\n` +
-                       `2. Shows repositories where the file exists\n` +
-                       `3. If multiple files with same name, lets you choose\n` +
-                       `4. You can then send new content (one or multiple messages)\n` +
-                       `5. Click "Done" to commit the changes\n\n` +
-                       `*Note:* Files are committed to the main/master branch`);
+            return reply('\uD83D\uDCDD *Commit Command*\n\n' +
+                       '*Usage:*\n' +
+                       '• `' + config.prefix + 'commit <filename>` - Search for file in all repos\n' +
+                       '• `' + config.prefix + 'commit config.js` - Example\n\n' +
+                       '*What it does:*\n' +
+                       '1. Searches for the file in all your GitHub repositories\n' +
+                       '2. Shows repositories where the file exists\n' +
+                       '3. If multiple files with same name, lets you choose\n' +
+                       '4. You can then send new content (one or multiple messages)\n' +
+                       '5. Click "Done" to commit the changes\n\n' +
+                       '*Note:* Files are committed to the main/master branch');
         }
         
         const fileName = args[0];
         
-        await react('🔍');
-        const processingMsg = await reply(`🔍 *Searching for "${fileName}" in all repositories...*\n\nPlease wait...`);
+        await react('\uD83D\uDD0D');
+        const processingMsg = await reply('\uD83D\uDD0D *Searching for "' + fileName + '" in all repositories...*\n\nPlease wait...');
         
         try {
-            const { token, username } = await getGitHubCredentials();
+            const credentials = await getGitHubCredentials();
+            const token = credentials.token;
+            const username = credentials.username;
             
             // Get all repositories
             const repos = await getAllRepositories(token, username);
             
             if (repos.length === 0) {
                 await sock.sendMessage(from, {
-                    text: `❌ No repositories found for user ${username}.`,
+                    text: '❌ No repositories found for user ' + username + '.',
                     edit: processingMsg.key
                 });
                 await react('❌');
@@ -285,18 +294,20 @@ module.exports = {
                     reposWithFile.push({
                         name: repo.name,
                         fullName: repo.full_name,
-                        files: results.map(r => ({
-                            path: r.path,
-                            url: r.url,
-                            sha: null // Will fetch later
-                        }))
+                        files: results.map(function(r) {
+                            return {
+                                path: r.path,
+                                url: r.url,
+                                sha: null
+                            };
+                        })
                     });
                 }
             }
             
             if (reposWithFile.length === 0) {
                 await sock.sendMessage(from, {
-                    text: `❌ No repositories found containing "${fileName}".\n\nMake sure the file exists in one of your repositories.`,
+                    text: '❌ No repositories found containing "' + fileName + '".\n\nMake sure the file exists in one of your repositories.',
                     edit: processingMsg.key
                 });
                 await react('❌');
@@ -320,22 +331,22 @@ module.exports = {
             
             // Show repositories as buttons
             const buttons = [];
-            for (let i = 0; i < Math.min(reposWithFile.length, 15); i++) {
-                const repo = reposWithFile[i];
+            for (var i = 0; i < Math.min(reposWithFile.length, 15); i++) {
+                var repo = reposWithFile[i];
                 buttons.push({
-                    id: `commit_repo_${sessionId}_${i}`,
+                    id: 'commit_repo_' + sessionId + '_' + i,
                     text: repo.name.length > 40 ? repo.name.substring(0, 37) + '...' : repo.name
                 });
             }
             buttons.push({ id: 'cancel', text: '❌ Cancel' });
             
             await sock.sendMessage(from, {
-                text: `✅ *Found ${fileName} in ${reposWithFile.length} repository(s)*\n\nSelect which repository to edit:`,
+                text: '✅ *Found ' + fileName + ' in ' + reposWithFile.length + ' repository(s)*\n\nSelect which repository to edit:',
                 edit: processingMsg.key
             });
             
             const sentMsg = await sendButtons(sock, from, {
-                text: `📁 *Select Repository*\n\nFile: \`${fileName}\`\n\nFound in ${reposWithFile.length} repository(s):`,
+                text: '📁 *Select Repository*\n\nFile: `' + fileName + '`\n\nFound in ' + reposWithFile.length + ' repository(s):',
                 footer: 'Commit Tool',
                 buttons: buttons,
                 aimode: FORCE_AI_MODE
@@ -347,7 +358,7 @@ module.exports = {
             
         } catch (error) {
             await sock.sendMessage(from, {
-                text: `❌ *Failed to search repositories*\n\nError: ${error.message}`,
+                text: '❌ *Failed to search repositories*\n\nError: ' + error.message,
                 edit: processingMsg.key
             });
             await react('❌');
@@ -365,16 +376,16 @@ module.exports = {
                 buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
                 buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
             } else if (msg.message?.listResponseMessage) {
-                const listReply = msg.message.listResponseMessage.singleSelectReply;
+                var listReply = msg.message.listResponseMessage.singleSelectReply;
                 if (listReply) {
                     buttonId = listReply.selectedRowId;
                     buttonText = listReply.title;
                 }
             } else if (msg.message?.interactiveResponseMessage) {
-                const interactive = msg.message.interactiveResponseMessage;
+                var interactive = msg.message.interactiveResponseMessage;
                 if (interactive.nativeFlowResponseMessage) {
                     try {
-                        const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
+                        var params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
                         buttonId = params.id;
                         buttonText = params.display_text;
                     } catch (e) {}
@@ -386,17 +397,17 @@ module.exports = {
             
             if (buttonId === 'cancel') {
                 sessionManager.clearSession(session.id);
-                await reply(`❌ Operation cancelled.`);
+                await reply('❌ Operation cancelled.');
                 return true;
             }
             
-            if (buttonId && buttonId.startsWith('commit_repo_')) {
-                const parts = buttonId.split('_');
-                const index = parseInt(parts[3]);
-                const repos = session.data.repos;
+            if (buttonId && buttonId.indexOf('commit_repo_') === 0) {
+                var parts = buttonId.split('_');
+                var index = parseInt(parts[3]);
+                var repos = session.data.repos;
                 
                 if (!isNaN(index) && index >= 0 && index < repos.length) {
-                    const selectedRepo = repos[index];
+                    var selectedRepo = repos[index];
                     
                     // Update session
                     sessionManager.updateSession(sender, from, {
@@ -408,24 +419,24 @@ module.exports = {
                     // Check if multiple files with same name exist in this repo
                     if (selectedRepo.files.length === 1) {
                         // Single file, proceed to get content
-                        const file = selectedRepo.files[0];
+                        var file = selectedRepo.files[0];
                         await handleFileSelected(sock, from, sender, reply, react, session, selectedRepo, file);
                     } else {
                         // Multiple files, show selection
-                        const sessionId = session.id.split(':').pop();
-                        const buttons = [];
+                        var sessionId = session.id.split(':').pop();
+                        var buttons = [];
                         
-                        for (let i = 0; i < selectedRepo.files.length; i++) {
-                            const file = selectedRepo.files[i];
+                        for (var i = 0; i < selectedRepo.files.length; i++) {
+                            var file = selectedRepo.files[i];
                             buttons.push({
-                                id: `commit_file_${sessionId}_${i}`,
+                                id: 'commit_file_' + sessionId + '_' + i,
                                 text: file.path.length > 50 ? file.path.substring(0, 47) + '...' : file.path
                             });
                         }
                         buttons.push({ id: 'cancel', text: '❌ Cancel' });
                         
-                        const sentMsg = await sendButtons(sock, from, {
-                            text: `📁 *Multiple files named "${session.data.fileName}" found in ${selectedRepo.name}*\n\nSelect which file to edit:`,
+                        var sentMsg = await sendButtons(sock, from, {
+                            text: '📁 *Multiple files named "' + session.data.fileName + '" found in ' + selectedRepo.name + '*\n\nSelect which file to edit:',
                             footer: 'Commit Tool',
                             buttons: buttons,
                             aimode: FORCE_AI_MODE
@@ -437,14 +448,14 @@ module.exports = {
                 return true;
             }
             
-            if (buttonId && buttonId.startsWith('commit_file_')) {
-                const parts = buttonId.split('_');
-                const index = parseInt(parts[3]);
-                const selectedRepo = session.data.selectedRepo;
-                const files = selectedRepo.files;
+            if (buttonId && buttonId.indexOf('commit_file_') === 0) {
+                var parts = buttonId.split('_');
+                var index = parseInt(parts[3]);
+                var selectedRepo = session.data.selectedRepo;
+                var files = selectedRepo.files;
                 
                 if (!isNaN(index) && index >= 0 && index < files.length) {
-                    const selectedFile = files[index];
+                    var selectedFile = files[index];
                     await handleFileSelected(sock, from, sender, reply, react, session, selectedRepo, selectedFile);
                 }
                 return true;
@@ -457,13 +468,13 @@ module.exports = {
             
             if (buttonId === 'commit_cancel') {
                 sessionManager.clearSession(session.id);
-                await reply(`❌ Operation cancelled.`);
+                await reply('❌ Operation cancelled.');
                 return true;
             }
         }
         
         // Handle text input (new file content)
-        let text = '';
+        var text = '';
         if (msg.message?.conversation) {
             text = msg.message.conversation;
         } else if (msg.message?.extendedTextMessage?.text) {
@@ -472,14 +483,14 @@ module.exports = {
         
         if (text && session.data.step === 'collecting_content') {
             // Collect content parts
-            const contentParts = session.data.contentParts || [];
+            var contentParts = session.data.contentParts || [];
             contentParts.push(text);
             sessionManager.updateSession(sender, from, {
                 contentParts: contentParts
             });
             
             // Send confirmation
-            await reply(`✅ Part ${contentParts.length} received. Total length: ${contentParts.join('').length} characters.\n\nSend more content or click "Done" to finish.`);
+            await reply('✅ Part ' + contentParts.length + ' received. Total length: ' + contentParts.join('').length + ' characters.\n\nSend more content or click "Done" to finish.');
             return true;
         }
         
@@ -489,17 +500,19 @@ module.exports = {
 
 async function handleFileSelected(sock, from, sender, reply, react, session, selectedRepo, selectedFile) {
     await react('📥');
-    const processingMsg = await reply(`📥 *Fetching file content...*\n\nFile: ${selectedFile.path}\nRepo: ${selectedRepo.name}\n\nPlease wait...`);
+    var processingMsg = await reply('📥 *Fetching file content...*\n\nFile: ' + selectedFile.path + '\nRepo: ' + selectedRepo.name + '\n\nPlease wait...');
     
     try {
-        const { token, username } = await getGitHubCredentials();
+        var credentials = await getGitHubCredentials();
+        var token = credentials.token;
+        var username = credentials.username;
         
         // Get file content
-        const fileData = await getFileContent(token, username, selectedRepo.name, selectedFile.path);
+        var fileData = await getFileContent(token, username, selectedRepo.name, selectedFile.path);
         
         if (!fileData) {
             await sock.sendMessage(from, {
-                text: `❌ Failed to fetch file content. Make sure the file exists.`,
+                text: '❌ Failed to fetch file content. Make sure the file exists.',
                 edit: processingMsg.key
             });
             await react('❌');
@@ -518,34 +531,34 @@ async function handleFileSelected(sock, from, sender, reply, react, session, sel
         });
         
         // Show current content preview
-        const contentPreview = fileData.content.length > 500 ? 
+        var contentPreview = fileData.content.length > 500 ? 
             fileData.content.substring(0, 500) + '\n\n... (truncated)' : 
             fileData.content;
         
-        const sessionId = session.id.split(':').pop();
+        var sessionId = session.id.split(':').pop();
         
-        const buttons = [
+        var buttons = [
             { id: 'commit_done', text: '✅ Done - Commit Changes' },
             { id: 'commit_cancel', text: '❌ Cancel' }
         ];
         
         await sock.sendMessage(from, {
-            text: `📄 *Current File Content*\n\n` +
-                  `📁 *Repo:* ${selectedRepo.name}\n` +
-                  `📂 *Path:* ${selectedFile.path}\n` +
-                  `📊 *Size:* ${fileData.content.length} characters\n\n` +
-                  `*Preview:*\n\`\`\`\n${contentPreview}\n\`\`\`\n\n` +
-                  `✏️ *Send the new content for this file.*\n\n` +
-                  `You can send multiple messages (they will be combined).\n` +
-                  `When done, click the "Done" button.`,
+            text: '📄 *Current File Content*\n\n' +
+                  '📁 *Repo:* ' + selectedRepo.name + '\n' +
+                  '📂 *Path:* ' + selectedFile.path + '\n' +
+                  '📊 *Size:* ' + fileData.content.length + ' characters\n\n' +
+                  '*Preview:*\n```\n' + contentPreview + '\n```\n\n' +
+                  '✏️ *Send the new content for this file.*\n\n' +
+                  'You can send multiple messages (they will be combined).\n' +
+                  'When done, click the "Done" button.',
             edit: processingMsg.key
         });
         
-        const sentMsg = await sendButtons(sock, from, {
-            text: `✏️ *Ready to receive new content*\n\n` +
-                  `File: \`${selectedFile.path}\`\n\n` +
-                  `Send the new content (can be multiple messages).\n` +
-                  `When finished, click "Done - Commit Changes".`,
+        var sentMsg = await sendButtons(sock, from, {
+            text: '✏️ *Ready to receive new content*\n\n' +
+                  'File: `' + selectedFile.path + '`\n\n' +
+                  'Send the new content (can be multiple messages).\n' +
+                  'When finished, click "Done - Commit Changes".',
             footer: 'Commit Tool',
             buttons: buttons,
             aimode: FORCE_AI_MODE
@@ -557,7 +570,7 @@ async function handleFileSelected(sock, from, sender, reply, react, session, sel
         
     } catch (error) {
         await sock.sendMessage(from, {
-            text: `❌ *Failed to fetch file*\n\nError: ${error.message}`,
+            text: '❌ *Failed to fetch file*\n\nError: ' + error.message,
             edit: processingMsg.key
         });
         await react('❌');
@@ -565,38 +578,40 @@ async function handleFileSelected(sock, from, sender, reply, react, session, sel
 }
 
 async function handleCommitDone(sock, from, sender, reply, react, session) {
-    const contentParts = session.data.contentParts || [];
-    const newContent = contentParts.join('');
+    var contentParts = session.data.contentParts || [];
+    var newContent = contentParts.join('');
     
     if (!newContent || newContent.trim().length === 0) {
-        await reply(`❌ No new content received. Please send the new content first.`);
+        await reply('❌ No new content received. Please send the new content first.');
         return;
     }
     
     await react('📤');
-    const processingMsg = await reply(`📤 *Committing changes...*\n\nPlease wait...`);
+    var processingMsg = await reply('📤 *Committing changes...*\n\nPlease wait...');
     
     try {
-        const { token, username } = await getGitHubCredentials();
-        const selectedRepo = session.data.selectedRepo;
-        const selectedFile = session.data.selectedFile;
-        const fileSha = session.data.fileSha;
+        var credentials = await getGitHubCredentials();
+        var token = credentials.token;
+        var username = credentials.username;
+        var selectedRepo = session.data.selectedRepo;
+        var selectedFile = session.data.selectedFile;
+        var fileSha = session.data.fileSha;
         
-        const commitMessage = `Update ${selectedFile.path}`;
+        var commitMessage = 'Update ' + selectedFile.path;
         
-        const result = await updateFileContent(
+        var result = await updateFileContent(
             token, username, selectedRepo.name, selectedFile.path,
             newContent, fileSha, commitMessage
         );
         
         await sock.sendMessage(from, {
-            text: `✅ *File Updated Successfully!*\n\n` +
-                  `📁 *Repo:* ${selectedRepo.name}\n` +
-                  `📂 *Path:* ${selectedFile.path}\n` +
-                  `📊 *New Size:* ${newContent.length} characters\n` +
-                  `💬 *Commit:* ${commitMessage}\n\n` +
-                  `🔗 *View on GitHub:*\n${result.content?.html_url || `https://github.com/${username}/${selectedRepo.name}/blob/main/${selectedFile.path}`}\n\n` +
-                  `> *Powered by ${config.botName}*`,
+            text: '✅ *File Updated Successfully!*\n\n' +
+                  '📁 *Repo:* ' + selectedRepo.name + '\n' +
+                  '📂 *Path:* ' + selectedFile.path + '\n' +
+                  '📊 *New Size:* ' + newContent.length + ' characters\n' +
+                  '💬 *Commit:* ' + commitMessage + '\n\n' +
+                  '🔗 *View on GitHub:*\n' + (result.content?.html_url || 'https://github.com/' + username + '/' + selectedRepo.name + '/blob/main/' + selectedFile.path) + '\n\n' +
+                  '> *Powered by ' + config.botName + '*',
             edit: processingMsg.key
         });
         
@@ -606,7 +621,7 @@ async function handleCommitDone(sock, from, sender, reply, react, session) {
         
     } catch (error) {
         await sock.sendMessage(from, {
-            text: `❌ *Commit failed*\n\nError: ${error.message}`,
+            text: '❌ *Commit failed*\n\nError: ' + error.message,
             edit: processingMsg.key
         });
         await react('❌');
