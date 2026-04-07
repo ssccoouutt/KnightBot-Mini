@@ -1,5 +1,5 @@
 /**
- * Clone Command - Clone between GitHub Repo and Google Drive Folder
+ * Clone Command - Clone between GitHub Repo, Google Drive Folder, or Direct URL (ZIP)
  */
 
 const axios = require('axios');
@@ -377,6 +377,81 @@ async function downloadFileFromDrive(fileId, filePath) {
     }
 }
 
+// ==================== DIRECT URL (ZIP) FUNCTIONS ====================
+
+async function downloadZipFromUrl(url, customName = null) {
+    try {
+        console.log(`[CLONE] Downloading ZIP from: ${url}`);
+        
+        // Get filename from URL or use custom name
+        let zipName = customName;
+        if (!zipName) {
+            const urlParts = url.split('/');
+            let filename = urlParts.pop() || 'download.zip';
+            if (filename.includes('?')) filename = filename.split('?')[0];
+            zipName = filename.replace('.zip', '');
+        }
+        
+        const tempDir = path.join(process.cwd(), 'temp');
+        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+        
+        const zipPath = path.join(tempDir, `${zipName}_${Date.now()}.zip`);
+        
+        const response = await axios({
+            method: 'GET',
+            url: url,
+            responseType: 'stream',
+            timeout: 300000, // 5 minutes timeout for large files
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity
+        });
+        
+        const writer = fs.createWriteStream(zipPath);
+        response.data.pipe(writer);
+        
+        await new Promise((resolve, reject) => {
+            writer.on('finish', resolve);
+            writer.on('error', reject);
+        });
+        
+        console.log(`[CLONE] ZIP downloaded: ${zipPath}`);
+        
+        // Extract ZIP
+        const extractDir = path.join(tempDir, `${zipName}_extracted_${Date.now()}`);
+        fs.mkdirSync(extractDir, { recursive: true });
+        
+        await new Promise((resolve, reject) => {
+            fs.createReadStream(zipPath)
+                .pipe(unzipper.Extract({ path: extractDir }))
+                .on('close', resolve)
+                .on('error', reject);
+        });
+        
+        console.log(`[CLONE] ZIP extracted to: ${extractDir}`);
+        
+        // Clean up zip file
+        fs.unlinkSync(zipPath);
+        
+        // Find the actual root folder (in case zip contains a single folder)
+        const items = fs.readdirSync(extractDir);
+        let rootFolder = extractDir;
+        
+        if (items.length === 1) {
+            const singleItem = path.join(extractDir, items[0]);
+            if (fs.statSync(singleItem).isDirectory()) {
+                rootFolder = singleItem;
+                console.log(`[CLONE] Using subfolder as root: ${items[0]}`);
+            }
+        }
+        
+        return { extractedFolder: rootFolder, folderName: zipName };
+        
+    } catch (error) {
+        console.error('[CLONE] Download ZIP failed:', error.message);
+        throw error;
+    }
+}
+
 // ==================== GITHUB REPO FUNCTIONS ====================
 
 async function downloadGitHubRepo(repoUrl) {
@@ -507,8 +582,8 @@ async function uploadFolderToGitHub(localPath, repoName, token, username, basePa
 module.exports = {
     name: 'clone',
     aliases: ['sync', 'mirror'],
-    description: 'Clone between GitHub repo and Google Drive folder',
-    usage: '.clone <github_repo_url> [drive_folder_name]\n.clone <drive_folder_link> [github_repo_name]',
+    description: 'Clone between GitHub repo, Google Drive folder, or direct ZIP URL',
+    usage: '.clone <github_repo_url> [drive_folder_name]\n.clone <drive_folder_link> [github_repo_name]\n.clone <direct_zip_url> [repo_name]',
     category: 'owner',
     ownerOnly: true,
 
@@ -521,9 +596,12 @@ module.exports = {
                        `\`${config.prefix}clone <github_repo_url> [folder_name]\`\n\n` +
                        `*Google Drive → GitHub:*\n` +
                        `\`${config.prefix}clone <drive_folder_link> [repo_name]\`\n\n` +
+                       `*Direct URL (ZIP) → GitHub:*\n` +
+                       `\`${config.prefix}clone <direct_zip_url> [repo_name]\`\n\n` +
                        `*Examples:*\n` +
                        `• \`${config.prefix}clone https://github.com/user/repo\`\n` +
-                       `• \`${config.prefix}clone https://drive.google.com/drive/folders/xxx my-repo\``);
+                       `• \`${config.prefix}clone https://drive.google.com/drive/folders/xxx my-repo\`\n` +
+                       `• \`${config.prefix}clone https://example.com/file.zip my-repo\``);
         }
         
         const link = args[0];
@@ -547,7 +625,7 @@ module.exports = {
             }
         }
         
-        // GitHub to Drive operation
+        // Check if it's GitHub to Drive operation
         if (link.includes('github.com')) {
             await react('🔄');
             const processingMsg = await reply(`🔄 *Processing clone request...*\n\nLink: ${link}\n\nPlease wait, this may take a while.`);
@@ -555,9 +633,26 @@ module.exports = {
             return;
         }
         
-        return reply(`❌ Invalid link. Please provide a GitHub repo URL or Google Drive folder link.`);
+        // Check if it's a direct download link (ZIP)
+        if (link.match(/\.(zip|ZIP)(\?|$)/) || link.includes('/download/') || link.includes('raw.githubusercontent.com') || link.includes('gitlab.com')) {
+            try {
+                const { token: githubToken, username: githubUsername } = await getGitHubCredentials();
+                await validateGitHubToken(githubToken, githubUsername);
+                
+                await react('🔄');
+                const processingMsg = await reply(`🔄 *Processing direct download...*\n\nURL: ${link}\n\nThis is a direct download link (ZIP file).\n\nPlease wait, this may take a while.`);
+                await handleDirectUrlToGitHub(sock, from, link, customName, processingMsg, reply, githubToken, githubUsername);
+                return;
+            } catch (error) {
+                return reply(`❌ *GitHub Authentication Failed*\n\n${error.message}\n\nPlease check your GitHub config file on Google Drive.`);
+            }
+        }
+        
+        return reply(`❌ Invalid link. Please provide:\n• GitHub repo URL\n• Google Drive folder link\n• Direct download link (ZIP file)`);
     }
 };
+
+// ==================== HANDLERS ====================
 
 async function handleGitHubToDrive(sock, from, repoUrl, folderName, processingMsg, reply) {
     await sock.sendMessage(from, {
@@ -696,6 +791,98 @@ async function handleDriveToGitHub(sock, from, driveLink, repoName, processingMs
         resultMessage += `• Remove sensitive data and upload manually\n`;
         resultMessage += `• Add them to .gitignore\n`;
         resultMessage += `• Use GitHub's secret scanning allowlist\n`;
+    }
+    
+    resultMessage += `\n> *Powered by ${config.botName}*`;
+    
+    await sock.sendMessage(from, {
+        text: resultMessage,
+        edit: processingMsg.key
+    });
+}
+
+// ==================== NEW: DIRECT URL TO GITHUB HANDLER ====================
+
+async function handleDirectUrlToGitHub(sock, from, url, repoName, processingMsg, reply, githubToken, githubUsername) {
+    await sock.sendMessage(from, {
+        text: `📥 *Step 1/4: Downloading ZIP from URL...*\n\nURL: ${url.substring(0, 80)}...\n\nThis may take a while depending on file size.`,
+        edit: processingMsg.key
+    });
+    
+    const { extractedFolder, folderName } = await downloadZipFromUrl(url, repoName);
+    const targetRepoName = repoName || folderName.replace(/[^a-zA-Z0-9-_]/g, '_');
+    
+    await sock.sendMessage(from, {
+        text: `📥 *Step 2/4: Extracted folder structure...*\n\nFolder: ${folderName}\n\nScanning files...`,
+        edit: processingMsg.key
+    });
+    
+    // Count files for progress
+    let totalFiles = 0;
+    const countFiles = (dir) => {
+        const items = fs.readdirSync(dir);
+        for (const item of items) {
+            const itemPath = path.join(dir, item);
+            if (fs.statSync(itemPath).isDirectory()) {
+                countFiles(itemPath);
+            } else {
+                totalFiles++;
+            }
+        }
+    };
+    countFiles(extractedFolder);
+    
+    await sock.sendMessage(from, {
+        text: `📤 *Step 3/4: Creating GitHub repository...*\n\nRepo: ${targetRepoName}\nFound ${totalFiles} file(s) to upload.`,
+        edit: processingMsg.key
+    });
+    
+    const repoCreated = await createGitHubRepo(targetRepoName, githubToken, githubUsername);
+    
+    if (!repoCreated) {
+        await sock.sendMessage(from, {
+            text: `⚠️ Repository creation issue. Attempting to upload anyway...`,
+            edit: processingMsg.key
+        });
+    }
+    
+    await sock.sendMessage(from, {
+        text: `📤 *Step 4/4: Uploading ${totalFiles} files to GitHub...*\n\nThis may take several minutes.`,
+        edit: processingMsg.key
+    });
+    
+    const { successCount, totalCount, failedFiles: uploadFailedFiles } = await uploadFolderToGitHub(extractedFolder, targetRepoName, githubToken, githubUsername);
+    
+    // Clean up extracted folder
+    fs.rmSync(extractedFolder, { recursive: true, force: true });
+    fs.rmSync(path.dirname(extractedFolder), { recursive: true, force: true });
+    
+    const repoLink = `https://github.com/${githubUsername}/${targetRepoName}`;
+    
+    // Build result message
+    let resultMessage = `✅ *Clone Completed!*\n\n` +
+              `📥 *Source:* Direct URL (ZIP)\n` +
+              `📤 *Destination:* GitHub Repo\n\n` +
+              `📁 *Repo:* ${targetRepoName}\n` +
+              `📁 *Folder Structure:* Preserved\n` +
+              `📊 *Files Uploaded:* ${successCount}/${totalCount}\n\n` +
+              `🔗 *GitHub Link:*\n${repoLink}\n\n`;
+    
+    // Show failed files if any
+    if (uploadFailedFiles && uploadFailedFiles.length > 0) {
+        resultMessage += `⚠️ *Failed to upload ${uploadFailedFiles.length} file(s):*\n`;
+        for (const failed of uploadFailedFiles.slice(0, 10)) { // Show first 10 only
+            let errorMsg = failed.error;
+            if (errorMsg.includes('Secret detected')) {
+                errorMsg = '⚠️ Contains sensitive info (API keys/tokens)';
+            }
+            resultMessage += `• \`${failed.file}\`\n  └ ${errorMsg}\n`;
+        }
+        if (uploadFailedFiles.length > 10) {
+            resultMessage += `\n... and ${uploadFailedFiles.length - 10} more files\n`;
+        }
+        resultMessage += `\n💡 *Note:* Failed files may contain sensitive information.\n`;
+        resultMessage += `You can upload them manually after removing sensitive data.\n`;
     }
     
     resultMessage += `\n> *Powered by ${config.botName}*`;
