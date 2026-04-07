@@ -414,7 +414,7 @@ function extractCodeFromUrl(url) {
     if (codeMatch) {
         return decodeURIComponent(codeMatch[1]);
     }
-    return url; // If no code parameter, return as is (might be just the code)
+    return url;
 }
 
 // ==================== MAIN COMMAND ====================
@@ -430,7 +430,6 @@ module.exports = {
     async execute(sock, msg, args, context) {
         const { from, sender, reply, react } = context;
         
-        // Create session for the main menu
         const session = sessionManager.createSession(sender, from, 'gmail', {
             step: 'main_menu'
         });
@@ -489,31 +488,26 @@ module.exports = {
             if (buttonId) {
                 console.log(`[GMAIL] Button clicked: ${buttonId}`);
                 
-                // Fetch Latest Email
                 if (buttonId.includes('gmail_fetch_')) {
                     await handleFetchEmails(sock, from, reply, react);
                     return true;
                 }
                 
-                // List Accounts
                 if (buttonId.includes('gmail_list_')) {
                     await handleListAccounts(sock, from, reply, react);
                     return true;
                 }
                 
-                // Add Account
                 if (buttonId.includes('gmail_add_')) {
                     await handleAddAccount(sock, from, sender, reply, react);
                     return true;
                 }
                 
-                // Remove Account - show selection
                 if (buttonId.includes('gmail_remove_') && !buttonId.includes('gmail_remove_account_')) {
                     await showRemoveAccountSelection(sock, from, reply, react);
                     return true;
                 }
                 
-                // Remove specific account
                 if (buttonId.includes('gmail_remove_account_')) {
                     const parts = buttonId.split('_');
                     const email = decodeURIComponent(parts.slice(4).join('_'));
@@ -521,13 +515,11 @@ module.exports = {
                     return true;
                 }
                 
-                // Refresh Tokens
                 if (buttonId.includes('gmail_refresh_')) {
                     await handleRefreshTokens(sock, from, reply, react);
                     return true;
                 }
                 
-                // Cancel
                 if (buttonId.includes('gmail_cancel_')) {
                     await reply(`❌ Operation cancelled.`);
                     return true;
@@ -535,7 +527,7 @@ module.exports = {
             }
         }
         
-        // Handle text input (authorization code or URL)
+        // Handle text input for auth code
         let text = '';
         if (msg.message?.conversation) {
             text = msg.message.conversation.trim();
@@ -544,9 +536,8 @@ module.exports = {
         }
         
         if (text && session.data && session.data.step === 'waiting_for_code') {
-            // Extract code from URL if it's a full URL
+            console.log(`[GMAIL] Received code input: ${text.substring(0, 50)}...`);
             const code = extractCodeFromUrl(text);
-            
             if (code && (code.startsWith('4/') || code.length > 30)) {
                 await handleCodeInput(sock, from, sender, reply, react, session, code);
             } else {
@@ -597,7 +588,7 @@ async function showRemoveAccountSelection(sock, from, reply, react) {
             edit: processingMsg.key
         });
         
-        await sendButtons(sock, from, {
+        const sentMsg = await sendButtons(sock, from, {
             text: `🗑️ *Remove Account*\n\nSelect the account you want to remove:`,
             footer: 'Gmail Tool',
             buttons: buttons,
@@ -773,8 +764,16 @@ async function handleAddAccount(sock, from, sender, reply, react) {
         
         const { oAuth2Client, authUrl } = await generateAuthUrl();
         
-        // Create session for auth
-        const session = sessionManager.createSession(sender, from, 'gmail_auth', {
+        // Clear any existing auth sessions for this user first
+        const existingSessions = sessionManager.getUserSessions(sender, from);
+        for (const sess of existingSessions) {
+            if (sess.command === 'gmail_auth') {
+                sessionManager.clearSession(sess.id);
+            }
+        }
+        
+        // Create new auth session
+        const authSession = sessionManager.createSession(sender, from, 'gmail_auth', {
             step: 'waiting_for_code',
             oAuth2Client: oAuth2Client
         });
@@ -784,26 +783,29 @@ async function handleAddAccount(sock, from, sender, reply, react) {
                            `2. After granting permission, Google will redirect you to a URL\n\n` +
                            `3. Copy the FULL URL and send it here\n\n` +
                            `*Example URL:*\n\`http://localhost/?code=4/0Aci98E8...\`\n\n` +
-                           `*Note:* The code expires in 10 minutes.`;
+                           `*Note:* The code expires in 10 minutes.\n\n` +
+                           `⚠️ *Send the URL in this chat* - I'm waiting for your response!`;
         
         await sock.sendMessage(from, {
             text: authMessage,
             edit: processingMsg.key
         });
         
-        const sessionId = session.id.split(':').pop();
+        const sessionId = authSession.id.split(':').pop();
         const buttons = [
             { id: `gmail_cancel_${sessionId}`, text: '❌ Cancel' }
         ];
         
         const sentMsg = await sendButtons(sock, from, {
-            text: `🔐 *Waiting for authorization URL*\n\nSend the full redirect URL you received from Google.`,
+            text: `🔐 *Waiting for authorization URL*\n\nSend the full redirect URL you received from Google.\n\nType \`cancel\` to abort.`,
             footer: 'Gmail Auth',
             buttons: buttons,
             aimode: FORCE_AI_MODE
         }, {});
         
         sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'gmail_auth');
+        
+        console.log(`[GMAIL] Waiting for code from user ${sender}`);
         
     } catch (error) {
         console.error('[GMAIL] Add account error:', error);
@@ -835,7 +837,6 @@ async function handleCodeInput(sock, from, sender, reply, react, session, code) 
         const profile = await gmail.users.getProfile({ userId: 'me' });
         const email = profile.data.emailAddress;
         
-        // Save token
         const tokenData = {
             refresh_token: tokens.refresh_token,
             client_id: credJson.installed.client_id,
@@ -849,7 +850,6 @@ async function handleCodeInput(sock, from, sender, reply, react, session, code) 
         const tokenPath = path.join(tempDir, tokenFileName);
         fs.writeFileSync(tokenPath, JSON.stringify(tokenData, null, 2));
         
-        // Upload to Google Drive
         const uploaded = await uploadTokenFile(tokenPath, tokenFileName);
         
         fs.unlinkSync(tokenPath);
