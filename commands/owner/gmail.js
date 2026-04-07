@@ -458,6 +458,70 @@ module.exports = {
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, react, isButtonClick } = context;
         
+        // ===== HANDLE GMAIL AUTH SESSION =====
+        if (session.command === 'gmail_auth') {
+            console.log(`[GMAIL_AUTH] Handling auth session for ${sender}`);
+            
+            // Handle button clicks for auth session
+            if (isButtonClick) {
+                let buttonId = null;
+                if (msg.message?.buttonsResponseMessage) {
+                    buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
+                } else if (msg.message?.interactiveResponseMessage) {
+                    const interactive = msg.message.interactiveResponseMessage;
+                    if (interactive.nativeFlowResponseMessage) {
+                        try {
+                            const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
+                            buttonId = params.id;
+                        } catch (e) {}
+                    }
+                }
+                
+                if (buttonId && buttonId.includes('gmail_cancel_')) {
+                    sessionManager.clearSession(session.id);
+                    await reply(`❌ Authentication cancelled.`);
+                    return true;
+                }
+            }
+            
+            // Handle text input for auth code
+            let text = '';
+            if (msg.message?.conversation) {
+                text = msg.message.conversation.trim();
+            } else if (msg.message?.extendedTextMessage?.text) {
+                text = msg.message.extendedTextMessage.text.trim();
+            }
+            
+            if (text) {
+                console.log(`[GMAIL_AUTH] Received text: ${text.substring(0, 50)}...`);
+                
+                if (text.toLowerCase() === 'cancel') {
+                    sessionManager.clearSession(session.id);
+                    await reply(`❌ Authentication cancelled.`);
+                    return true;
+                }
+                
+                const code = extractCodeFromUrl(text);
+                if (code && (code.startsWith('4/') || code.length > 30)) {
+                    await handleCodeInput(sock, from, sender, reply, react, session, code);
+                } else {
+                    await reply(`❌ Invalid code format.\n\nPlease send the FULL URL from Google.\n\nIt should look like:\n\`http://localhost/?code=4/0Aci98E8...\``);
+                }
+                return true;
+            }
+            
+            // If we're still waiting and no text, show reminder
+            if (session.data && session.data.step === 'waiting_for_code') {
+                await reply(`🔐 *Waiting for authorization code*\n\nPlease send the full redirect URL from Google.\n\nType \`cancel\` to abort.`);
+                return true;
+            }
+            
+            return true;
+        }
+        
+        // ===== HANDLE MAIN GMAIL SESSION =====
+        if (session.command !== 'gmail') return true;
+        
         if (isButtonClick) {
             let buttonId = null;
             let buttonText = null;
@@ -522,12 +586,13 @@ module.exports = {
                 
                 if (buttonId.includes('gmail_cancel_')) {
                     await reply(`❌ Operation cancelled.`);
+                    sessionManager.clearSession(session.id);
                     return true;
                 }
             }
         }
         
-        // Handle text input for auth code
+        // Handle text input for auth code (fallback - should be handled by gmail_auth session)
         let text = '';
         if (msg.message?.conversation) {
             text = msg.message.conversation.trim();
@@ -536,7 +601,7 @@ module.exports = {
         }
         
         if (text && session.data && session.data.step === 'waiting_for_code') {
-            console.log(`[GMAIL] Received code input: ${text.substring(0, 50)}...`);
+            console.log(`[GMAIL] Received code input (fallback): ${text.substring(0, 50)}...`);
             const code = extractCodeFromUrl(text);
             if (code && (code.startsWith('4/') || code.length > 30)) {
                 await handleCodeInput(sock, from, sender, reply, react, session, code);
