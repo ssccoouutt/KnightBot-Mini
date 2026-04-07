@@ -1,11 +1,12 @@
 /**
  * Gmail Command - Fetch latest emails from all authorized Gmail accounts
- * Tokens are stored in Google Drive folder
+ * Supports both pickle (Python) and JSON (Node.js) token formats
  */
 
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const { exec } = require('child_process');
 const { google } = require('googleapis');
 const config = require('../../config');
 const sessionManager = require('../../utils/sessionManager');
@@ -23,7 +24,7 @@ const FILE_URL = "https://www.googleapis.com/drive/v3/files";
 
 let cachedToken = null;
 let tokenExpiry = null;
-let gmailTokens = new Map();
+let credJson = null;
 
 // Gmail Scopes
 const SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'];
@@ -85,6 +86,46 @@ async function getAccessToken() {
     }
 }
 
+async function downloadCredentials() {
+    try {
+        const token = await getAccessToken();
+        if (!token) return null;
+        
+        // Look for cred.json in the folder
+        const response = await axios.get(`https://www.googleapis.com/drive/v3/files`, {
+            headers: { 'Authorization': `Bearer ${token}` },
+            params: {
+                q: `'${GMAIL_TOKENS_FOLDER_ID}' in parents and name='cred.json'`,
+                fields: 'files(id,name)'
+            }
+        });
+        
+        const files = response.data.files || [];
+        if (files.length === 0) {
+            console.log('[GMAIL] cred.json not found in folder');
+            return null;
+        }
+        
+        const credFileId = files[0].id;
+        
+        const credResponse = await axios({
+            method: 'GET',
+            url: `https://www.googleapis.com/drive/v3/files/${credFileId}?alt=media`,
+            headers: { 'Authorization': `Bearer ${token}` },
+            responseType: 'text',
+            timeout: 30000
+        });
+        
+        credJson = JSON.parse(credResponse.data);
+        console.log('[GMAIL] Credentials loaded successfully');
+        return credJson;
+        
+    } catch (error) {
+        console.error('[GMAIL] Failed to download credentials:', error.message);
+        return null;
+    }
+}
+
 async function listTokenFiles() {
     try {
         const token = await getAccessToken();
@@ -93,7 +134,7 @@ async function listTokenFiles() {
         const response = await axios.get(`https://www.googleapis.com/drive/v3/files`, {
             headers: { 'Authorization': `Bearer ${token}` },
             params: {
-                q: `'${GMAIL_TOKENS_FOLDER_ID}' in parents and (name contains '.pickle' or name contains '.token' or name contains '.json')`,
+                q: `'${GMAIL_TOKENS_FOLDER_ID}' in parents and (name contains '.json' or name contains '.pickle') and name != 'cred.json'`,
                 fields: 'files(id,name,mimeType)',
                 pageSize: 100
             }
@@ -150,10 +191,11 @@ async function uploadTokenFile(filePath, fileName) {
         
         const metadata = {
             name: fileName,
-            mimeType: 'application/octet-stream',
+            mimeType: 'application/json',
             parents: [GMAIL_TOKENS_FOLDER_ID]
         };
         
+        const FormData = require('form-data');
         const formData = new FormData();
         formData.append('metadata', JSON.stringify(metadata), { contentType: 'application/json' });
         formData.append('file', fileBuffer, { filename: fileName });
@@ -167,6 +209,7 @@ async function uploadTokenFile(filePath, fileName) {
             maxBodyLength: Infinity
         });
         
+        console.log(`[GMAIL] Token uploaded: ${fileName}`);
         return true;
         
     } catch (error) {
@@ -175,33 +218,102 @@ async function uploadTokenFile(filePath, fileName) {
     }
 }
 
-// ==================== GMAIL FUNCTIONS ====================
+async function deleteTokenFile(fileId) {
+    try {
+        const token = await getAccessToken();
+        if (!token) return false;
+        
+        await axios.delete(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        
+        console.log(`[GMAIL] Token file deleted: ${fileId}`);
+        return true;
+        
+    } catch (error) {
+        console.error('[GMAIL] Failed to delete token file:', error.message);
+        return false;
+    }
+}
 
+// Convert pickle token to JSON using Python
+async function convertPickleToJson(picklePath, email) {
+    return new Promise((resolve, reject) => {
+        const pythonScript = `
+import pickle
+import json
+import sys
+
+try:
+    with open('${picklePath}', 'rb') as f:
+        creds = pickle.load(f)
+    
+    token_data = {
+        'refresh_token': creds.refresh_token,
+        'client_id': creds.client_id,
+        'client_secret': creds.client_secret
+    }
+    
+    print(json.dumps(token_data))
+except Exception as e:
+    print(json.dumps({'error': str(e)}))
+`;
+        
+        const scriptPath = path.join(process.cwd(), 'temp', `convert_${Date.now()}.py`);
+        fs.writeFileSync(scriptPath, pythonScript);
+        
+        exec(`python3 ${scriptPath}`, { maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+            fs.unlinkSync(scriptPath);
+            
+            if (error) {
+                reject(new Error(`Python conversion failed: ${error.message}`));
+                return;
+            }
+            
+            try {
+                const result = JSON.parse(stdout);
+                if (result.error) {
+                    reject(new Error(result.error));
+                } else {
+                    resolve(result);
+                }
+            } catch (e) {
+                reject(new Error(`Failed to parse Python output: ${e.message}`));
+            }
+        });
+    });
+}
+
+// Authenticate using token (supports both JSON and pickle)
 async function authenticateWithToken(tokenPath, email) {
     try {
-        // For pickle files (Python format), we need to handle differently
-        // Since we're in Node.js, we'll use a different approach
-        // We'll store tokens as JSON files instead
+        const fileExt = path.extname(tokenPath);
+        let tokenData;
         
-        const tokenContent = fs.readFileSync(tokenPath, 'utf8');
-        let credentials;
+        if (fileExt === '.pickle') {
+            console.log(`[GMAIL] Converting pickle token for ${email}...`);
+            tokenData = await convertPickleToJson(tokenPath, email);
+        } else {
+            const content = fs.readFileSync(tokenPath, 'utf8');
+            tokenData = JSON.parse(content);
+        }
         
-        try {
-            credentials = JSON.parse(tokenContent);
-        } catch (e) {
-            // If not JSON, it might be a pickle file - we can't use it directly in Node.js
-            console.log(`[GMAIL] Token for ${email} is in pickle format, skipping`);
+        if (!tokenData.refresh_token) {
+            console.log(`[GMAIL] No refresh token for ${email}`);
             return null;
         }
         
-        const { client_secret, client_id, refresh_token } = credentials;
+        const oAuth2Client = new google.auth.OAuth2(
+            credJson.installed.client_id,
+            credJson.installed.client_secret,
+            credJson.installed.redirect_uris[0]
+        );
         
-        const oAuth2Client = new google.auth.OAuth2(client_id, client_secret);
         oAuth2Client.setCredentials({
-            refresh_token: refresh_token
+            refresh_token: tokenData.refresh_token
         });
         
-        // Refresh token if needed
+        // Refresh token to verify
         await oAuth2Client.getAccessToken();
         
         const gmail = google.gmail({ version: 'v1', auth: oAuth2Client });
@@ -210,7 +322,8 @@ async function authenticateWithToken(tokenPath, email) {
         const profile = await gmail.users.getProfile({ userId: 'me' });
         const userEmail = profile.data.emailAddress;
         
-        return { gmail, email: userEmail };
+        console.log(`[GMAIL] ✅ Authenticated: ${userEmail}`);
+        return { gmail, email: userEmail, oAuth2Client, tokenData };
         
     } catch (error) {
         console.error(`[GMAIL] Authentication failed for ${email}:`, error.message);
@@ -220,7 +333,6 @@ async function authenticateWithToken(tokenPath, email) {
 
 async function getLatestEmail(gmail, emailAddress) {
     try {
-        // Get the latest email
         const response = await gmail.users.messages.list({
             userId: 'me',
             maxResults: 1,
@@ -232,14 +344,12 @@ async function getLatestEmail(gmail, emailAddress) {
         
         const messageId = messages[0].id;
         
-        // Get full message
         const message = await gmail.users.messages.get({
             userId: 'me',
             id: messageId,
             format: 'full'
         });
         
-        // Extract headers
         const headers = message.data.payload.headers;
         let subject = 'No Subject';
         let from = 'Unknown Sender';
@@ -252,7 +362,6 @@ async function getLatestEmail(gmail, emailAddress) {
             if (header.name === 'Date') date = header.value;
         }
         
-        // Decode body
         let body = '';
         if (message.data.payload.parts) {
             for (const part of message.data.payload.parts) {
@@ -269,7 +378,6 @@ async function getLatestEmail(gmail, emailAddress) {
             body = message.data.snippet || 'No content available';
         }
         
-        // Clean HTML
         body = body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
         if (body.length > 500) body = body.substring(0, 500) + '...';
         
@@ -283,7 +391,7 @@ async function getLatestEmail(gmail, emailAddress) {
         };
         
     } catch (error) {
-        console.error(`[GMAIL] Error fetching email for ${emailAddress}:`, error.message);
+        console.error(`[GMAIL] Error fetching email:`, error.message);
         return null;
     }
 }
@@ -293,13 +401,20 @@ function formatDate(timestamp) {
     return date.toLocaleString();
 }
 
+// Extract email from filename
+function extractEmailFromFilename(filename) {
+    let email = filename.replace('.json', '').replace('.pickle', '').replace('token_', '');
+    email = email.replace(/_/g, '@');
+    return email;
+}
+
 // ==================== MAIN COMMAND ====================
 
 module.exports = {
     name: 'gmail',
     aliases: [],
     description: 'Fetch latest emails from all authorized Gmail accounts',
-    usage: '.gmail\n.gmail list\n.gmail refresh',
+    usage: '.gmail\n.gmail list\n.gmail convert\n.gmail remove <email>\n.gmail refresh',
     category: 'owner',
     ownerOnly: true,
 
@@ -310,6 +425,16 @@ module.exports = {
         
         if (subCommand === 'list') {
             await handleListAccounts(sock, from, reply, react);
+            return;
+        }
+        
+        if (subCommand === 'convert') {
+            await handleConvertTokens(sock, from, reply, react);
+            return;
+        }
+        
+        if (subCommand === 'remove') {
+            await handleRemoveAccount(sock, from, reply, react, args);
             return;
         }
         
@@ -328,12 +453,29 @@ async function handleFetchEmails(sock, from, reply, react) {
     const processingMsg = await reply(`📧 *Fetching latest emails...*\n\nPlease wait...`);
     
     try {
-        // Get all token files from Google Drive
+        await downloadCredentials();
+        
+        if (!credJson) {
+            await sock.sendMessage(from, {
+                text: `❌ *Credentials not found*\n\nPlease upload cred.json to the Google Drive folder.`,
+                edit: processingMsg.key
+            });
+            await react('❌');
+            return;
+        }
+        
         const tokenFiles = await listTokenFiles();
         
-        if (tokenFiles.length === 0) {
+        // Filter out creds.json and gmail_accounts
+        const validTokens = tokenFiles.filter(f => 
+            f.name !== 'creds.json' && 
+            f.name !== 'gmail_accounts.json' &&
+            !f.name.includes('gmail_accounts')
+        );
+        
+        if (validTokens.length === 0) {
             await sock.sendMessage(from, {
-                text: `❌ *No Gmail accounts configured*\n\nPlease add token files to the Google Drive folder:\n${GMAIL_TOKENS_FOLDER_ID}`,
+                text: `❌ *No Gmail accounts configured*\n\nUse \`.gmail convert\` to convert existing pickle tokens.`,
                 edit: processingMsg.key
             });
             await react('❌');
@@ -341,15 +483,14 @@ async function handleFetchEmails(sock, from, reply, react) {
         }
         
         await sock.sendMessage(from, {
-            text: `📥 *Found ${tokenFiles.length} account(s)*\n\nAuthenticating...`,
+            text: `📥 *Found ${validTokens.length} account(s)*\n\nAuthenticating...`,
             edit: processingMsg.key
         });
         
         const accounts = [];
         
-        for (const file of tokenFiles) {
-            // Extract email from filename
-            let email = file.name.replace('.json', '').replace('.token', '').replace('token_', '');
+        for (const file of validTokens) {
+            const email = extractEmailFromFilename(file.name);
             
             const tokenPath = await downloadTokenFile(file.id, file.name);
             
@@ -367,7 +508,7 @@ async function handleFetchEmails(sock, from, reply, react) {
         
         if (accounts.length === 0) {
             await sock.sendMessage(from, {
-                text: `❌ *No accounts could be authenticated*\n\nToken files may be invalid or expired.`,
+                text: `❌ *No accounts could be authenticated*\n\nTokens may be expired. Use \`.gmail convert\` to refresh.`,
                 edit: processingMsg.key
             });
             await react('❌');
@@ -379,7 +520,6 @@ async function handleFetchEmails(sock, from, reply, react) {
             edit: processingMsg.key
         });
         
-        // Fetch latest email from each account
         const emails = [];
         
         for (const account of accounts) {
@@ -391,7 +531,6 @@ async function handleFetchEmails(sock, from, reply, react) {
                 });
             }
             
-            // Clean up temp token file
             try {
                 if (account.tokenPath && fs.existsSync(account.tokenPath)) {
                     fs.unlinkSync(account.tokenPath);
@@ -408,12 +547,9 @@ async function handleFetchEmails(sock, from, reply, react) {
             return;
         }
         
-        // Sort by timestamp (newest first)
         emails.sort((a, b) => b.timestamp - a.timestamp);
-        
         const latest = emails[0];
         
-        // Format the email message
         const emailMessage = `📧 *LATEST EMAIL ACROSS ALL ACCOUNTS*\n\n` +
                             `👤 *Account:* ${latest.account}\n` +
                             `📌 *Subject:* ${latest.subject}\n` +
@@ -427,7 +563,6 @@ async function handleFetchEmails(sock, from, reply, react) {
             edit: processingMsg.key
         });
         
-        // If there are more emails, show summary
         if (emails.length > 1) {
             let summary = `📋 *Other recent emails:*\n\n`;
             for (let i = 1; i < Math.min(emails.length, 5); i++) {
@@ -450,16 +585,112 @@ async function handleFetchEmails(sock, from, reply, react) {
     }
 }
 
+async function handleConvertTokens(sock, from, reply, react) {
+    await react('🔄');
+    const processingMsg = await reply(`🔄 *Converting pickle tokens to JSON...*\n\nPlease wait...`);
+    
+    try {
+        await downloadCredentials();
+        
+        if (!credJson) {
+            await sock.sendMessage(from, {
+                text: `❌ *Credentials not found*\n\nPlease upload cred.json to the Google Drive folder.`,
+                edit: processingMsg.key
+            });
+            await react('❌');
+            return;
+        }
+        
+        const tokenFiles = await listTokenFiles();
+        const pickleFiles = tokenFiles.filter(f => f.name.endsWith('.pickle'));
+        
+        if (pickleFiles.length === 0) {
+            await sock.sendMessage(from, {
+                text: `📭 *No pickle files found*\n\nAll tokens are already in JSON format.`,
+                edit: processingMsg.key
+            });
+            await react('✅');
+            return;
+        }
+        
+        let converted = 0;
+        let failed = 0;
+        
+        for (const file of pickleFiles) {
+            const email = extractEmailFromFilename(file.name);
+            const tokenPath = await downloadTokenFile(file.id, file.name);
+            
+            if (tokenPath) {
+                try {
+                    const tokenData = await convertPickleToJson(tokenPath, email);
+                    
+                    if (tokenData && tokenData.refresh_token) {
+                        const jsonFileName = `token_${email.replace(/@/g, '_')}.json`;
+                        const jsonPath = path.join(path.dirname(tokenPath), jsonFileName);
+                        fs.writeFileSync(jsonPath, JSON.stringify(tokenData, null, 2));
+                        
+                        const uploaded = await uploadTokenFile(jsonPath, jsonFileName);
+                        
+                        if (uploaded) {
+                            await deleteTokenFile(file.id);
+                            converted++;
+                            console.log(`[GMAIL] Converted: ${email}`);
+                        } else {
+                            failed++;
+                        }
+                        
+                        fs.unlinkSync(jsonPath);
+                    } else {
+                        failed++;
+                    }
+                } catch (err) {
+                    console.error(`[GMAIL] Failed to convert ${email}:`, err.message);
+                    failed++;
+                }
+                
+                fs.unlinkSync(tokenPath);
+            } else {
+                failed++;
+            }
+        }
+        
+        await sock.sendMessage(from, {
+            text: `✅ *Token Conversion Complete*\n\n` +
+                  `🔄 Converted: ${converted}\n` +
+                  `❌ Failed: ${failed}\n` +
+                  `📊 Total: ${pickleFiles.length}\n\n` +
+                  `💡 Use \`.gmail\` to fetch emails.`,
+            edit: processingMsg.key
+        });
+        await react('✅');
+        
+    } catch (error) {
+        console.error('[GMAIL] Convert error:', error);
+        await sock.sendMessage(from, {
+            text: `❌ *Failed to convert tokens*\n\nError: ${error.message}`,
+            edit: processingMsg.key
+        });
+        await react('❌');
+    }
+}
+
 async function handleListAccounts(sock, from, reply, react) {
     await react('📋');
     const processingMsg = await reply(`📋 *Fetching account list...*\n\nPlease wait...`);
     
     try {
+        await downloadCredentials();
         const tokenFiles = await listTokenFiles();
         
-        if (tokenFiles.length === 0) {
+        const validTokens = tokenFiles.filter(f => 
+            f.name !== 'creds.json' && 
+            f.name !== 'gmail_accounts.json' &&
+            !f.name.includes('gmail_accounts')
+        );
+        
+        if (validTokens.length === 0) {
             await sock.sendMessage(from, {
-                text: `📭 *No Gmail accounts configured*\n\nAdd token files to:\n${GMAIL_TOKENS_FOLDER_ID}`,
+                text: `📭 *No Gmail accounts configured*\n\nUse \`.gmail convert\` to convert existing tokens.`,
                 edit: processingMsg.key
             });
             await react('❌');
@@ -467,16 +698,17 @@ async function handleListAccounts(sock, from, reply, react) {
         }
         
         let listMsg = `📧 *Gmail Accounts*\n\n`;
-        listMsg += `📊 *Total:* ${tokenFiles.length} account(s)\n\n`;
+        listMsg += `📊 *Total:* ${validTokens.length} account(s)\n\n`;
         
-        for (let i = 0; i < tokenFiles.length; i++) {
-            const file = tokenFiles[i];
-            let email = file.name.replace('.json', '').replace('.token', '').replace('token_', '');
+        for (let i = 0; i < validTokens.length; i++) {
+            const file = validTokens[i];
+            let email = extractEmailFromFilename(file.name);
             listMsg += `${i + 1}. ${email}\n`;
         }
         
         listMsg += `\n💡 Use \`.gmail\` to fetch latest emails\n`;
-        listMsg += `💡 Use \`.gmail refresh\` to refresh tokens`;
+        listMsg += `💡 Use \`.gmail convert\` to convert pickle tokens to JSON\n`;
+        listMsg += `💡 Use \`.gmail remove <email>\` to remove an account`;
         
         await sock.sendMessage(from, {
             text: listMsg,
@@ -494,14 +726,70 @@ async function handleListAccounts(sock, from, reply, react) {
     }
 }
 
+async function handleRemoveAccount(sock, from, reply, react, args) {
+    const emailToRemove = args[1];
+    
+    if (!emailToRemove) {
+        await reply(`❌ *Usage:* \`.gmail remove <email>\`\n\nExample: \`.gmail remove techzone3606@gmail.com\``);
+        return;
+    }
+    
+    await react('🗑️');
+    const processingMsg = await reply(`🗑️ *Removing account...*\n\n${emailToRemove}`);
+    
+    try {
+        const tokenFiles = await listTokenFiles();
+        let found = false;
+        const normalizedEmail = emailToRemove.toLowerCase().replace(/@/g, '_');
+        
+        for (const file of tokenFiles) {
+            const fileEmail = extractEmailFromFilename(file.name).toLowerCase();
+            if (fileEmail === emailToRemove.toLowerCase() || file.name.includes(normalizedEmail)) {
+                await deleteTokenFile(file.id);
+                found = true;
+                break;
+            }
+        }
+        
+        if (found) {
+            await sock.sendMessage(from, {
+                text: `✅ *Account Removed*\n\n📧 ${emailToRemove}\n\nUse \`.gmail list\` to see remaining accounts.`,
+                edit: processingMsg.key
+            });
+            await react('✅');
+        } else {
+            await sock.sendMessage(from, {
+                text: `❌ *Account not found*\n\nNo token found for: ${emailToRemove}\n\nUse \`.gmail list\` to see all accounts.`,
+                edit: processingMsg.key
+            });
+            await react('❌');
+        }
+        
+    } catch (error) {
+        console.error('[GMAIL] Remove account error:', error);
+        await sock.sendMessage(from, {
+            text: `❌ *Failed to remove account*\n\nError: ${error.message}`,
+            edit: processingMsg.key
+        });
+        await react('❌');
+    }
+}
+
 async function handleRefreshTokens(sock, from, reply, react) {
     await react('🔄');
     const processingMsg = await reply(`🔄 *Refreshing tokens...*\n\nPlease wait...`);
     
     try {
+        await downloadCredentials();
         const tokenFiles = await listTokenFiles();
         
-        if (tokenFiles.length === 0) {
+        const validTokens = tokenFiles.filter(f => 
+            f.name !== 'creds.json' && 
+            f.name !== 'gmail_accounts.json' &&
+            !f.name.includes('gmail_accounts')
+        );
+        
+        if (validTokens.length === 0) {
             await sock.sendMessage(from, {
                 text: `❌ *No Gmail accounts configured*`,
                 edit: processingMsg.key
@@ -513,11 +801,11 @@ async function handleRefreshTokens(sock, from, reply, react) {
         let refreshed = 0;
         let failed = 0;
         
-        for (const file of tokenFiles) {
+        for (const file of validTokens) {
+            const email = extractEmailFromFilename(file.name);
             const tokenPath = await downloadTokenFile(file.id, file.name);
             
             if (tokenPath) {
-                let email = file.name.replace('.json', '').replace('.token', '').replace('token_', '');
                 const auth = await authenticateWithToken(tokenPath, email);
                 
                 if (auth && auth.gmail) {
@@ -536,10 +824,11 @@ async function handleRefreshTokens(sock, from, reply, react) {
         
         await sock.sendMessage(from, {
             text: `✅ *Token Refresh Complete*\n\n` +
-                  `🔄 Refreshed: ${refreshed}\n` +
-                  `❌ Failed: ${failed}\n` +
-                  `📊 Total: ${tokenFiles.length}\n\n` +
-                  `💡 Use \`.gmail\` to fetch latest emails`,
+                  `🔄 Valid: ${refreshed}\n` +
+                  `❌ Invalid/Expired: ${failed}\n` +
+                  `📊 Total: ${validTokens.length}\n\n` +
+                  `💡 Use \`.gmail\` to fetch latest emails\n` +
+                  `💡 Use \`.gmail convert\` to convert pickle tokens`,
             edit: processingMsg.key
         });
         await react('✅');
