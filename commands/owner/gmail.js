@@ -1,6 +1,6 @@
 /**
  * Gmail Command - Fetch latest emails from all authorized Gmail accounts
- * Supports adding new accounts via OAuth and stores tokens in Google Drive
+ * Uses session-based button handling (same pattern as commit/audit)
  */
 
 const fs = require('fs');
@@ -399,51 +399,6 @@ function extractEmailFromFilename(filename) {
     return filename.replace('.json', '').replace('token_', '').replace(/_/g, '@');
 }
 
-// ==================== BUTTON HANDLER ====================
-
-async function handleGmailButton(sock, msg, buttonId, buttonText, from, sender, reply, react) {
-    console.log(`[GMAIL] Handling button: ${buttonId}`);
-    
-    if (buttonId.includes('gmail_fetch')) {
-        await handleFetchEmails(sock, from, reply, react);
-        return true;
-    }
-    
-    if (buttonId.includes('gmail_list')) {
-        await handleListAccounts(sock, from, reply, react);
-        return true;
-    }
-    
-    if (buttonId.includes('gmail_add')) {
-        await handleAddAccount(sock, from, sender, reply, react);
-        return true;
-    }
-    
-    if (buttonId.includes('gmail_remove_account_')) {
-        const parts = buttonId.split('_');
-        const email = decodeURIComponent(parts.slice(4).join('_'));
-        await handleRemoveAccount(sock, from, reply, react, email);
-        return true;
-    }
-    
-    if (buttonId.includes('gmail_remove')) {
-        await showRemoveAccountSelection(sock, from, reply, react);
-        return true;
-    }
-    
-    if (buttonId.includes('gmail_refresh')) {
-        await handleRefreshTokens(sock, from, reply, react);
-        return true;
-    }
-    
-    if (buttonId.includes('gmail_cancel')) {
-        await reply(`❌ Operation cancelled.`);
-        return true;
-    }
-    
-    return false;
-}
-
 // ==================== MAIN COMMAND ====================
 
 module.exports = {
@@ -457,7 +412,12 @@ module.exports = {
     async execute(sock, msg, args, context) {
         const { from, sender, reply, react } = context;
         
-        const sessionId = `${Date.now()}`;
+        // Create session for the main menu
+        const session = sessionManager.createSession(sender, from, 'gmail', {
+            step: 'main_menu'
+        });
+        
+        const sessionId = session.id.split(':').pop();
         
         const buttons = [
             { id: `gmail_fetch_${sessionId}`, text: '📥 Fetch Latest Email' },
@@ -474,6 +434,7 @@ module.exports = {
             aimode: FORCE_AI_MODE
         }, { quoted: msg });
         
+        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'gmail');
         await react('📧');
     },
     
@@ -508,8 +469,51 @@ module.exports = {
             }
             
             if (buttonId) {
-                const handled = await handleGmailButton(sock, msg, buttonId, buttonText, from, sender, reply, react);
-                if (handled) return true;
+                console.log(`[GMAIL] Button clicked: ${buttonId}`);
+                
+                // Fetch Latest Email
+                if (buttonId.includes('gmail_fetch_')) {
+                    await handleFetchEmails(sock, from, reply, react);
+                    return true;
+                }
+                
+                // List Accounts
+                if (buttonId.includes('gmail_list_')) {
+                    await handleListAccounts(sock, from, reply, react);
+                    return true;
+                }
+                
+                // Add Account
+                if (buttonId.includes('gmail_add_')) {
+                    await handleAddAccount(sock, from, sender, reply, react);
+                    return true;
+                }
+                
+                // Remove Account - show selection
+                if (buttonId.includes('gmail_remove_') && !buttonId.includes('gmail_remove_account_')) {
+                    await showRemoveAccountSelection(sock, from, reply, react);
+                    return true;
+                }
+                
+                // Remove specific account
+                if (buttonId.includes('gmail_remove_account_')) {
+                    const parts = buttonId.split('_');
+                    const email = decodeURIComponent(parts.slice(4).join('_'));
+                    await handleRemoveAccount(sock, from, reply, react, email);
+                    return true;
+                }
+                
+                // Refresh Tokens
+                if (buttonId.includes('gmail_refresh_')) {
+                    await handleRefreshTokens(sock, from, reply, react);
+                    return true;
+                }
+                
+                // Cancel
+                if (buttonId.includes('gmail_cancel_')) {
+                    await reply(`❌ Operation cancelled.`);
+                    return true;
+                }
             }
         }
         
@@ -553,7 +557,12 @@ async function showRemoveAccountSelection(sock, from, reply, react) {
             return;
         }
         
-        const sessionId = `${Date.now()}`;
+        // Create session for removal
+        const session = sessionManager.createSession(from, from, 'gmail_remove', {
+            step: 'selecting_account'
+        });
+        const sessionId = session.id.split(':').pop();
+        
         const buttons = [];
         
         for (let i = 0; i < tokenFiles.length; i++) {
@@ -572,12 +581,14 @@ async function showRemoveAccountSelection(sock, from, reply, react) {
             edit: processingMsg.key
         });
         
-        await sendButtons(sock, from, {
+        const sentMsg = await sendButtons(sock, from, {
             text: `🗑️ *Remove Account*\n\nSelect the account you want to remove:`,
             footer: 'Gmail Tool',
             buttons: buttons,
             aimode: FORCE_AI_MODE
         }, {});
+        
+        sessionManager.addPendingMessage(from, from, sentMsg.key.id, 'gmail');
         
     } catch (error) {
         console.error('[GMAIL] Error loading accounts for removal:', error);
@@ -1001,6 +1012,3 @@ async function handleRefreshTokens(sock, from, reply, react) {
         await react('❌');
     }
 }
-
-// Export button handler for use in handler.js
-module.exports.handleGmailButton = handleGmailButton;
