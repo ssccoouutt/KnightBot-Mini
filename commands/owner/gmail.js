@@ -19,7 +19,6 @@ const FORCE_AI_MODE = true;
 const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download";
 const GMAIL_TOKENS_FOLDER_ID = "1i0j8efZESXrQtmA9TyPnpEgm6G3NOb43";
 const UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
-const FILE_URL = "https://www.googleapis.com/drive/v3/files";
 
 let cachedToken = null;
 let tokenExpiry = null;
@@ -27,6 +26,9 @@ let credJson = null;
 
 // Gmail Scopes
 const SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'];
+
+// Store active auth sessions to prevent duplicates
+const activeAuthSessions = new Map();
 
 // ==================== TOKEN FUNCTIONS ====================
 
@@ -409,7 +411,6 @@ function extractEmailFromFilename(filename) {
 }
 
 function extractCodeFromUrl(url) {
-    // Extract code from URL like: http://localhost/?code=4/0Aci98E8...
     const codeMatch = url.match(/[?&]code=([^&]+)/);
     if (codeMatch) {
         return decodeURIComponent(codeMatch[1]);
@@ -429,6 +430,15 @@ module.exports = {
 
     async execute(sock, msg, args, context) {
         const { from, sender, reply, react } = context;
+        
+        // Clear any existing sessions for this user first
+        const existingSessions = sessionManager.getUserSessions(sender, from);
+        for (const sess of existingSessions) {
+            if (sess.command === 'gmail' || sess.command === 'gmail_auth') {
+                console.log(`[GMAIL] Cleaning up existing session: ${sess.id}`);
+                sessionManager.clearSession(sess.id);
+            }
+        }
         
         const session = sessionManager.createSession(sender, from, 'gmail', {
             step: 'main_menu'
@@ -458,9 +468,11 @@ module.exports = {
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, react, isButtonClick } = context;
         
+        console.log(`[GMAIL] handleSession called for command: ${session.command}, step: ${session.data?.step}`);
+        
         // ===== HANDLE GMAIL AUTH SESSION =====
         if (session.command === 'gmail_auth') {
-            console.log(`[GMAIL_AUTH] Handling auth session for ${sender}`);
+            console.log(`[GMAIL_AUTH] Processing auth session for ${sender}`);
             
             // Handle button clicks for auth session
             if (isButtonClick) {
@@ -478,8 +490,28 @@ module.exports = {
                 }
                 
                 if (buttonId && buttonId.includes('gmail_cancel_')) {
+                    console.log(`[GMAIL_AUTH] Cancel button clicked`);
                     sessionManager.clearSession(session.id);
+                    activeAuthSessions.delete(sender);
                     await reply(`❌ Authentication cancelled.`);
+                    
+                    // Return to main menu
+                    const mainSession = sessionManager.createSession(sender, from, 'gmail', { step: 'main_menu' });
+                    const sessionId = mainSession.id.split(':').pop();
+                    const buttons = [
+                        { id: `gmail_fetch_${sessionId}`, text: '📥 Fetch Latest Email' },
+                        { id: `gmail_list_${sessionId}`, text: '📋 List Accounts' },
+                        { id: `gmail_add_${sessionId}`, text: '➕ Add Account' },
+                        { id: `gmail_remove_${sessionId}`, text: '🗑️ Remove Account' },
+                        { id: `gmail_refresh_${sessionId}`, text: '🔄 Refresh Tokens' }
+                    ];
+                    const sentMsg = await sendButtons(sock, from, {
+                        text: `📧 *Gmail Manager*\n\nChoose an option:`,
+                        footer: 'Gmail Tool',
+                        buttons: buttons,
+                        aimode: FORCE_AI_MODE
+                    }, {});
+                    sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'gmail');
                     return true;
                 }
             }
@@ -497,6 +529,7 @@ module.exports = {
                 
                 if (text.toLowerCase() === 'cancel') {
                     sessionManager.clearSession(session.id);
+                    activeAuthSessions.delete(sender);
                     await reply(`❌ Authentication cancelled.`);
                     return true;
                 }
@@ -563,6 +596,8 @@ module.exports = {
                 }
                 
                 if (buttonId.includes('gmail_add_')) {
+                    // Clear the current session before creating auth session
+                    sessionManager.clearSession(session.id);
                     await handleAddAccount(sock, from, sender, reply, react);
                     return true;
                 }
@@ -590,25 +625,6 @@ module.exports = {
                     return true;
                 }
             }
-        }
-        
-        // Handle text input for auth code (fallback - should be handled by gmail_auth session)
-        let text = '';
-        if (msg.message?.conversation) {
-            text = msg.message.conversation.trim();
-        } else if (msg.message?.extendedTextMessage?.text) {
-            text = msg.message.extendedTextMessage.text.trim();
-        }
-        
-        if (text && session.data && session.data.step === 'waiting_for_code') {
-            console.log(`[GMAIL] Received code input (fallback): ${text.substring(0, 50)}...`);
-            const code = extractCodeFromUrl(text);
-            if (code && (code.startsWith('4/') || code.length > 30)) {
-                await handleCodeInput(sock, from, sender, reply, react, session, code);
-            } else {
-                await reply(`❌ Invalid code format.\n\nPlease send the full URL or the authorization code from Google.\n\nThe URL should look like:\n\`http://localhost/?code=4/0Aci98E8...\``);
-            }
-            return true;
         }
         
         return true;
@@ -829,12 +845,20 @@ async function handleAddAccount(sock, from, sender, reply, react) {
         
         const { oAuth2Client, authUrl } = await generateAuthUrl();
         
-        // Clear any existing auth sessions for this user first
+        // Clear any existing auth sessions for this user
         const existingSessions = sessionManager.getUserSessions(sender, from);
         for (const sess of existingSessions) {
             if (sess.command === 'gmail_auth') {
+                console.log(`[GMAIL] Cleaning up existing auth session: ${sess.id}`);
                 sessionManager.clearSession(sess.id);
             }
+        }
+        
+        // Also clear from our local map
+        if (activeAuthSessions.has(sender)) {
+            const oldSessionId = activeAuthSessions.get(sender);
+            sessionManager.clearSession(oldSessionId);
+            activeAuthSessions.delete(sender);
         }
         
         // Create new auth session
@@ -842,6 +866,9 @@ async function handleAddAccount(sock, from, sender, reply, react) {
             step: 'waiting_for_code',
             oAuth2Client: oAuth2Client
         });
+        
+        // Store in local map
+        activeAuthSessions.set(sender, authSession.id);
         
         const authMessage = `🔐 *Add Gmail Account*\n\n` +
                            `1. Click the link below to authorize:\n${authUrl}\n\n` +
@@ -888,6 +915,7 @@ async function handleCodeInput(sock, from, sender, reply, react, session, code) 
     if (!oAuth2Client) {
         await reply(`❌ *Session expired*\n\nPlease run \`.gmail add\` again.`);
         sessionManager.clearSession(session.id);
+        activeAuthSessions.delete(sender);
         return;
     }
     
@@ -936,7 +964,9 @@ async function handleCodeInput(sock, from, sender, reply, react, session, code) 
             await react('❌');
         }
         
+        // Clean up auth session
         sessionManager.clearSession(session.id);
+        activeAuthSessions.delete(sender);
         
     } catch (error) {
         console.error('[GMAIL] Code exchange error:', error);
@@ -946,6 +976,7 @@ async function handleCodeInput(sock, from, sender, reply, react, session, code) 
         });
         await react('❌');
         sessionManager.clearSession(session.id);
+        activeAuthSessions.delete(sender);
     }
 }
 
