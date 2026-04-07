@@ -1,6 +1,5 @@
 /**
  * Gmail Command - Fetch latest emails from all authorized Gmail accounts
- * Uses session-based button handling (same pattern as commit/audit)
  */
 
 const fs = require('fs');
@@ -10,9 +9,8 @@ const { google } = require('googleapis');
 const config = require('../../config');
 const sessionManager = require('../../utils/sessionManager');
 const giftedBtns = require('gifted-btns');
-const { sendButtons, sendInteractiveMessage } = giftedBtns;
+const { sendButtons } = giftedBtns;
 
-// Force AI mode ON for gifted buttons
 const FORCE_AI_MODE = true;
 
 // Google Drive Configuration
@@ -24,11 +22,10 @@ let cachedToken = null;
 let tokenExpiry = null;
 let credJson = null;
 
-// Gmail Scopes
 const SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'];
 
-// Store active auth sessions to prevent duplicates
-const activeAuthSessions = new Map();
+// Store auth data temporarily
+const tempAuthStore = new Map();
 
 // ==================== TOKEN FUNCTIONS ====================
 
@@ -102,7 +99,7 @@ async function downloadCredentials() {
         
         const files = response.data.files || [];
         if (files.length === 0) {
-            console.log('[GMAIL] cred.json not found in folder');
+            console.log('[GMAIL] cred.json not found');
             return null;
         }
         
@@ -117,7 +114,7 @@ async function downloadCredentials() {
         });
         
         credJson = JSON.parse(credResponse.data);
-        console.log('[GMAIL] Credentials loaded successfully');
+        console.log('[GMAIL] Credentials loaded');
         return credJson;
         
     } catch (error) {
@@ -144,8 +141,7 @@ async function listTokenFiles() {
         return files.filter(file => 
             file.name.startsWith('token_') && 
             file.name !== 'cred.json' && 
-            file.name !== 'credentials.json' &&
-            file.name !== 'gmail_accounts.json'
+            file.name !== 'credentials.json'
         );
         
     } catch (error) {
@@ -242,8 +238,6 @@ async function deleteTokenFile(fileId) {
     }
 }
 
-// ==================== GMAIL AUTH FUNCTIONS ====================
-
 async function generateAuthUrl() {
     if (!credJson) {
         await downloadCredentials();
@@ -262,8 +256,7 @@ async function generateAuthUrl() {
     const authUrl = oAuth2Client.generateAuthUrl({
         access_type: 'offline',
         scope: SCOPES,
-        prompt: 'consent',
-        include_granted_scopes: true
+        prompt: 'consent'
     });
     
     return { oAuth2Client, authUrl };
@@ -279,10 +272,7 @@ async function authenticateWithToken(tokenPath, email) {
         const content = fs.readFileSync(tokenPath, 'utf8');
         const tokenData = JSON.parse(content);
         
-        if (!tokenData.refresh_token) {
-            console.log(`[GMAIL] No refresh token for ${email}`);
-            return null;
-        }
+        if (!tokenData.refresh_token) return null;
         
         const oAuth2Client = new google.auth.OAuth2(
             credJson.installed.client_id,
@@ -290,27 +280,21 @@ async function authenticateWithToken(tokenPath, email) {
             credJson.installed.redirect_uris[0]
         );
         
-        oAuth2Client.setCredentials({
-            refresh_token: tokenData.refresh_token
-        });
-        
+        oAuth2Client.setCredentials({ refresh_token: tokenData.refresh_token });
         await oAuth2Client.getAccessToken();
         
         const gmail = google.gmail({ version: 'v1', auth: oAuth2Client });
-        
         const profile = await gmail.users.getProfile({ userId: 'me' });
-        const userEmail = profile.data.emailAddress;
         
-        console.log(`[GMAIL] ✅ Authenticated: ${userEmail}`);
-        return { gmail, email: userEmail, oAuth2Client };
+        return { gmail, email: profile.data.emailAddress };
         
     } catch (error) {
-        console.error(`[GMAIL] Authentication failed for ${email}:`, error.message);
+        console.error(`[GMAIL] Auth failed for ${email}:`, error.message);
         return null;
     }
 }
 
-async function getLatestEmail(gmail, emailAddress) {
+async function getLatestEmail(gmail) {
     try {
         const response = await gmail.users.messages.list({
             userId: 'me',
@@ -321,19 +305,14 @@ async function getLatestEmail(gmail, emailAddress) {
         const messages = response.data.messages || [];
         if (messages.length === 0) return null;
         
-        const messageId = messages[0].id;
-        
         const message = await gmail.users.messages.get({
             userId: 'me',
-            id: messageId,
+            id: messages[0].id,
             format: 'full'
         });
         
         const headers = message.data.payload.headers;
-        let subject = 'No Subject';
-        let from = 'Unknown Sender';
-        let date = 'Unknown Date';
-        let dateTimestamp = parseInt(message.data.internalDate);
+        let subject = 'No Subject', from = 'Unknown', date = 'Unknown';
         
         for (const header of headers) {
             if (header.name === 'Subject') subject = header.value;
@@ -349,76 +328,30 @@ async function getLatestEmail(gmail, emailAddress) {
                     break;
                 }
             }
-        } else if (message.data.payload.body && message.data.payload.body.data) {
+        } else if (message.data.payload.body?.data) {
             body = Buffer.from(message.data.payload.body.data, 'base64').toString('utf-8');
         }
         
-        if (!body || body.length < 10) {
-            body = message.data.snippet || 'No content available';
-        }
+        body = (body || message.data.snippet || 'No content').substring(0, 2000);
         
-        body = body.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-        
-        return {
-            id: messageId,
-            subject,
-            from,
-            date,
-            timestamp: dateTimestamp,
-            body: body
-        };
+        return { subject, from, date, timestamp: parseInt(message.data.internalDate), body };
         
     } catch (error) {
-        console.error(`[GMAIL] Error fetching email:`, error.message);
+        console.error('[GMAIL] Error fetching email:', error.message);
         return null;
     }
 }
 
-function formatDate(timestamp) {
-    const date = new Date(timestamp);
-    return date.toLocaleString();
-}
-
-function splitLongMessage(text, maxLength = 4000) {
-    if (text.length <= maxLength) return [text];
-    
-    const parts = [];
-    let remaining = text;
-    
-    while (remaining.length > 0) {
-        let part = remaining.substring(0, maxLength);
-        const lastNewline = part.lastIndexOf('\n');
-        const lastSpace = part.lastIndexOf(' ');
-        const breakPoint = Math.max(lastNewline, lastSpace);
-        
-        if (breakPoint > maxLength / 2) {
-            part = remaining.substring(0, breakPoint);
-            remaining = remaining.substring(breakPoint + 1);
-        } else {
-            remaining = remaining.substring(maxLength);
-        }
-        
-        parts.push(part);
-    }
-    
-    return parts;
-}
-
 function extractEmailFromFilename(filename) {
-    let email = filename.replace(/^token_/, '').replace('.json', '');
-    email = email.replace(/_/g, '@');
-    return email;
+    return filename.replace(/^token_/, '').replace('.json', '').replace(/_/g, '@');
 }
 
 function extractCodeFromUrl(url) {
     const codeMatch = url.match(/[?&]code=([^&]+)/);
-    if (codeMatch) {
-        return decodeURIComponent(codeMatch[1]);
-    }
-    return url;
+    return codeMatch ? decodeURIComponent(codeMatch[1]) : url;
 }
 
-// ==================== MAIN COMMAND ====================
+// ==================== MAIN COMMAND (SAME PATTERN AS DRIVE.JS) ====================
 
 module.exports = {
     name: 'gmail',
@@ -431,27 +364,21 @@ module.exports = {
     async execute(sock, msg, args, context) {
         const { from, sender, reply, react } = context;
         
-        // Clear any existing sessions for this user first
-        const existingSessions = sessionManager.getUserSessions(sender, from);
-        for (const sess of existingSessions) {
-            if (sess.command === 'gmail' || sess.command === 'gmail_auth') {
-                console.log(`[GMAIL] Cleaning up existing session: ${sess.id}`);
-                sessionManager.clearSession(sess.id);
-            }
-        }
-        
-        const session = sessionManager.createSession(sender, from, 'gmail', {
-            step: 'main_menu'
+        // Create session (like drive.js)
+        const session = sessionManager.createSession(sender, from, this.name, {
+            type: 'menu' // Start with menu
         });
+        
+        await react('📧');
         
         const sessionId = session.id.split(':').pop();
         
         const buttons = [
-            { id: `gmail_fetch_${sessionId}`, text: '📥 Fetch Latest Email' },
+            { id: `gmail_fetch_${sessionId}`, text: '📥 Fetch Email' },
             { id: `gmail_list_${sessionId}`, text: '📋 List Accounts' },
             { id: `gmail_add_${sessionId}`, text: '➕ Add Account' },
             { id: `gmail_remove_${sessionId}`, text: '🗑️ Remove Account' },
-            { id: `gmail_refresh_${sessionId}`, text: '🔄 Refresh Tokens' }
+            { id: `gmail_cancel_${sessionId}`, text: '❌ Cancel' }
         ];
         
         const sentMsg = await sendButtons(sock, from, {
@@ -461,62 +388,87 @@ module.exports = {
             aimode: FORCE_AI_MODE
         }, { quoted: msg });
         
-        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'gmail');
-        await react('📧');
+        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
+        console.log(`✅ Gmail session created: ${session.id}`);
     },
     
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, react, isButtonClick } = context;
         
-        console.log(`[GMAIL] handleSession called for command: ${session.command}, step: ${session.data?.step}`);
-        
-        // ===== HANDLE GMAIL AUTH SESSION =====
-        if (session.command === 'gmail_auth') {
-            console.log(`[GMAIL_AUTH] Processing auth session for ${sender}`);
+        // Handle button clicks (like drive.js)
+        if (isButtonClick) {
+            let buttonId = null;
             
-            // Handle button clicks for auth session
-            if (isButtonClick) {
-                let buttonId = null;
-                if (msg.message?.buttonsResponseMessage) {
-                    buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
-                } else if (msg.message?.interactiveResponseMessage) {
-                    const interactive = msg.message.interactiveResponseMessage;
-                    if (interactive.nativeFlowResponseMessage) {
-                        try {
-                            const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
-                            buttonId = params.id;
-                        } catch (e) {}
-                    }
-                }
-                
-                if (buttonId && buttonId.includes('gmail_cancel_')) {
-                    console.log(`[GMAIL_AUTH] Cancel button clicked`);
-                    sessionManager.clearSession(session.id);
-                    activeAuthSessions.delete(sender);
-                    await reply(`❌ Authentication cancelled.`);
-                    
-                    // Return to main menu
-                    const mainSession = sessionManager.createSession(sender, from, 'gmail', { step: 'main_menu' });
-                    const sessionId = mainSession.id.split(':').pop();
-                    const buttons = [
-                        { id: `gmail_fetch_${sessionId}`, text: '📥 Fetch Latest Email' },
-                        { id: `gmail_list_${sessionId}`, text: '📋 List Accounts' },
-                        { id: `gmail_add_${sessionId}`, text: '➕ Add Account' },
-                        { id: `gmail_remove_${sessionId}`, text: '🗑️ Remove Account' },
-                        { id: `gmail_refresh_${sessionId}`, text: '🔄 Refresh Tokens' }
-                    ];
-                    const sentMsg = await sendButtons(sock, from, {
-                        text: `📧 *Gmail Manager*\n\nChoose an option:`,
-                        footer: 'Gmail Tool',
-                        buttons: buttons,
-                        aimode: FORCE_AI_MODE
-                    }, {});
-                    sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'gmail');
-                    return true;
-                }
+            if (msg.message?.buttonsResponseMessage) {
+                buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
+            } else if (msg.message?.templateButtonReplyMessage) {
+                buttonId = msg.message.templateButtonReplyMessage.selectedId;
             }
             
-            // Handle text input for auth code
+            if (!buttonId) return true;
+            
+            console.log(`[GMAIL] Button clicked: ${buttonId}`);
+            
+            if (buttonId.includes('gmail_fetch_')) {
+                await handleFetchEmails(sock, from, reply, react);
+                return true;
+            }
+            
+            if (buttonId.includes('gmail_list_')) {
+                await handleListAccounts(sock, from, reply, react);
+                return true;
+            }
+            
+            if (buttonId.includes('gmail_add_')) {
+                // Set session type to 'auth' - just like drive.js sets type to 'url'
+                sessionManager.updateSession(sender, from, { type: 'auth' });
+                
+                // Store temp data for this session
+                tempAuthStore.set(sender, { step: 'waiting' });
+                
+                // Generate and send auth URL
+                try {
+                    await downloadCredentials();
+                    const { oAuth2Client, authUrl } = await generateAuthUrl();
+                    
+                    // Store OAuth client for later
+                    tempAuthStore.set(sender, { oAuth2Client, step: 'waiting_for_code' });
+                    
+                    const sentMsg = await reply(`🔐 *Add Gmail Account*\n\n1. Click this link:\n${authUrl}\n\n2. After authorizing, Google will redirect you to a URL\n\n3. **Copy the FULL URL** and send it here\n\nExample: \`http://localhost/?code=4/0Aci98E8...\``);
+                    
+                    // Add pending message for this response
+                    sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'gmail');
+                    
+                } catch (error) {
+                    await reply(`❌ Failed: ${error.message}`);
+                    sessionManager.clearSession(session.id);
+                }
+                return true;
+            }
+            
+            if (buttonId.includes('gmail_remove_') && !buttonId.includes('gmail_remove_account_')) {
+                await showRemoveAccountSelection(sock, from, reply, react);
+                return true;
+            }
+            
+            if (buttonId.includes('gmail_remove_account_')) {
+                const parts = buttonId.split('_');
+                const email = decodeURIComponent(parts.slice(4).join('_'));
+                await handleRemoveAccount(sock, from, reply, react, email);
+                return true;
+            }
+            
+            if (buttonId.includes('gmail_cancel_')) {
+                sessionManager.clearSession(session.id);
+                tempAuthStore.delete(sender);
+                await reply('❌ Cancelled.');
+                return true;
+            }
+        }
+        
+        // Handle text input - THIS IS THE KEY PART (like drive.js handles URL input)
+        if (session.data.type === 'auth') {
+            // Get the text message
             let text = '';
             if (msg.message?.conversation) {
                 text = msg.message.conversation.trim();
@@ -524,107 +476,82 @@ module.exports = {
                 text = msg.message.extendedTextMessage.text.trim();
             }
             
-            if (text) {
-                console.log(`[GMAIL_AUTH] Received text: ${text.substring(0, 50)}...`);
-                
-                if (text.toLowerCase() === 'cancel') {
-                    sessionManager.clearSession(session.id);
-                    activeAuthSessions.delete(sender);
-                    await reply(`❌ Authentication cancelled.`);
-                    return true;
-                }
-                
-                const code = extractCodeFromUrl(text);
-                if (code && (code.startsWith('4/') || code.length > 30)) {
-                    await handleCodeInput(sock, from, sender, reply, react, session, code);
-                } else {
-                    await reply(`❌ Invalid code format.\n\nPlease send the FULL URL from Google.\n\nIt should look like:\n\`http://localhost/?code=4/0Aci98E8...\``);
-                }
+            if (!text) return true;
+            
+            console.log(`[GMAIL] Received auth input: ${text.substring(0, 50)}...`);
+            
+            // Cancel check
+            if (text.toLowerCase() === 'cancel') {
+                sessionManager.clearSession(session.id);
+                tempAuthStore.delete(sender);
+                await reply('❌ Authentication cancelled.');
                 return true;
             }
             
-            // If we're still waiting and no text, show reminder
-            if (session.data && session.data.step === 'waiting_for_code') {
-                await reply(`🔐 *Waiting for authorization code*\n\nPlease send the full redirect URL from Google.\n\nType \`cancel\` to abort.`);
+            // Get stored OAuth client
+            const authData = tempAuthStore.get(sender);
+            if (!authData || !authData.oAuth2Client) {
+                await reply('❌ Session expired. Please run .gmail add again.');
+                sessionManager.clearSession(session.id);
+                tempAuthStore.delete(sender);
                 return true;
+            }
+            
+            // Extract code from URL
+            const code = extractCodeFromUrl(text);
+            
+            if (!code || code.length < 20) {
+                await reply('❌ Invalid code. Please send the FULL redirect URL from Google.\n\nIt should look like: http://localhost/?code=4/0Aci98E8...');
+                return true;
+            }
+            
+            await reply('🔄 Exchanging code for tokens...');
+            
+            try {
+                // Exchange code for tokens
+                const tokens = await getTokensFromCode(authData.oAuth2Client, code);
+                
+                // Get user email
+                authData.oAuth2Client.setCredentials(tokens);
+                const gmail = google.gmail({ version: 'v1', auth: authData.oAuth2Client });
+                const profile = await gmail.users.getProfile({ userId: 'me' });
+                const email = profile.data.emailAddress;
+                
+                // Save token
+                const tokenData = {
+                    refresh_token: tokens.refresh_token,
+                    client_id: credJson.installed.client_id,
+                    client_secret: credJson.installed.client_secret
+                };
+                
+                const tempDir = path.join(process.cwd(), 'temp');
+                if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+                
+                const tokenFileName = `token_${email.replace(/@/g, '_')}.json`;
+                const tokenPath = path.join(tempDir, tokenFileName);
+                fs.writeFileSync(tokenPath, JSON.stringify(tokenData, null, 2));
+                
+                const uploaded = await uploadTokenFile(tokenPath, tokenFileName);
+                fs.unlinkSync(tokenPath);
+                
+                if (uploaded) {
+                    await reply(`✅ *Account Added!*\n\n📧 ${email}\n\nUse .gmail to fetch emails.`);
+                } else {
+                    await reply(`❌ Failed to save token to Google Drive.`);
+                }
+                
+                // Clean up
+                sessionManager.clearSession(session.id);
+                tempAuthStore.delete(sender);
+                
+            } catch (error) {
+                console.error('[GMAIL] Auth error:', error);
+                await reply(`❌ Authentication failed: ${error.message}`);
+                sessionManager.clearSession(session.id);
+                tempAuthStore.delete(sender);
             }
             
             return true;
-        }
-        
-        // ===== HANDLE MAIN GMAIL SESSION =====
-        if (session.command !== 'gmail') return true;
-        
-        if (isButtonClick) {
-            let buttonId = null;
-            let buttonText = null;
-            
-            if (msg.message?.buttonsResponseMessage) {
-                buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
-                buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
-            } else if (msg.message?.listResponseMessage) {
-                const listReply = msg.message.listResponseMessage.singleSelectReply;
-                if (listReply) {
-                    buttonId = listReply.selectedRowId;
-                    buttonText = listReply.title;
-                }
-            } else if (msg.message?.interactiveResponseMessage) {
-                const interactive = msg.message.interactiveResponseMessage;
-                if (interactive.nativeFlowResponseMessage) {
-                    try {
-                        const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
-                        buttonId = params.id;
-                        buttonText = params.display_text;
-                    } catch (e) {}
-                }
-            } else if (msg.message?.templateButtonReplyMessage) {
-                buttonId = msg.message.templateButtonReplyMessage.selectedId;
-                buttonText = msg.message.templateButtonReplyMessage.selectedDisplayText;
-            }
-            
-            if (buttonId) {
-                console.log(`[GMAIL] Button clicked: ${buttonId}`);
-                
-                if (buttonId.includes('gmail_fetch_')) {
-                    await handleFetchEmails(sock, from, reply, react);
-                    return true;
-                }
-                
-                if (buttonId.includes('gmail_list_')) {
-                    await handleListAccounts(sock, from, reply, react);
-                    return true;
-                }
-                
-                if (buttonId.includes('gmail_add_')) {
-                    // Clear the current session before creating auth session
-                    sessionManager.clearSession(session.id);
-                    await handleAddAccount(sock, from, sender, reply, react);
-                    return true;
-                }
-                
-                if (buttonId.includes('gmail_remove_') && !buttonId.includes('gmail_remove_account_')) {
-                    await showRemoveAccountSelection(sock, from, reply, react);
-                    return true;
-                }
-                
-                if (buttonId.includes('gmail_remove_account_')) {
-                    const parts = buttonId.split('_');
-                    const email = decodeURIComponent(parts.slice(4).join('_'));
-                    await handleRemoveAccount(sock, from, reply, react, email);
-                    return true;
-                }
-                
-                if (buttonId.includes('gmail_refresh_')) {
-                    await handleRefreshTokens(sock, from, reply, react);
-                    return true;
-                }
-                
-                if (buttonId.includes('gmail_cancel_')) {
-                    await reply(`❌ Operation cancelled.`);
-                    sessionManager.clearSession(session.id);
-                    return true;
-                }
-            }
         }
         
         return true;
@@ -635,26 +562,21 @@ module.exports = {
 
 async function showRemoveAccountSelection(sock, from, reply, react) {
     await react('🗑️');
-    const processingMsg = await reply(`🗑️ *Loading accounts...*\n\nPlease wait...`);
+    await reply(`🗑️ Loading accounts...`);
     
     try {
         await downloadCredentials();
         const tokenFiles = await listTokenFiles();
         
         if (tokenFiles.length === 0) {
-            await sock.sendMessage(from, {
-                text: `📭 *No accounts to remove*\n\nUse \`.gmail add\` to add an account first.`,
-                edit: processingMsg.key
-            });
-            await react('❌');
+            await reply(`📭 No accounts to remove.`);
             return;
         }
         
         const sessionId = `${Date.now()}`;
         const buttons = [];
         
-        for (let i = 0; i < tokenFiles.length; i++) {
-            const file = tokenFiles[i];
+        for (const file of tokenFiles) {
             const email = extractEmailFromFilename(file.name);
             buttons.push({
                 id: `gmail_remove_account_${sessionId}_${encodeURIComponent(email)}`,
@@ -664,59 +586,37 @@ async function showRemoveAccountSelection(sock, from, reply, react) {
         
         buttons.push({ id: `gmail_cancel_${sessionId}`, text: '❌ Cancel' });
         
-        await sock.sendMessage(from, {
-            text: `✅ *Found ${tokenFiles.length} account(s)*\n\nSelect which account to remove:`,
-            edit: processingMsg.key
-        });
-        
-        const sentMsg = await sendButtons(sock, from, {
-            text: `🗑️ *Remove Account*\n\nSelect the account you want to remove:`,
+        await sendButtons(sock, from, {
+            text: `🗑️ Select account to remove:`,
             footer: 'Gmail Tool',
             buttons: buttons,
             aimode: FORCE_AI_MODE
         }, {});
         
     } catch (error) {
-        console.error('[GMAIL] Error loading accounts for removal:', error);
-        await sock.sendMessage(from, {
-            text: `❌ *Failed to load accounts*\n\nError: ${error.message}`,
-            edit: processingMsg.key
-        });
-        await react('❌');
+        console.error('[GMAIL] Error:', error);
+        await reply(`❌ Failed: ${error.message}`);
     }
 }
 
 async function handleFetchEmails(sock, from, reply, react) {
     await react('📧');
-    const processingMsg = await reply(`📧 *Fetching latest emails...*\n\nPlease wait...`);
+    const processingMsg = await reply(`📧 Fetching emails...`);
     
     try {
         await downloadCredentials();
         
         if (!credJson) {
-            await sock.sendMessage(from, {
-                text: `❌ *Credentials not found*\n\nPlease upload cred.json to the Google Drive folder.`,
-                edit: processingMsg.key
-            });
-            await react('❌');
+            await reply(`❌ Credentials not found.`);
             return;
         }
         
         const tokenFiles = await listTokenFiles();
         
         if (tokenFiles.length === 0) {
-            await sock.sendMessage(from, {
-                text: `❌ *No Gmail accounts configured*\n\nUse \`.gmail add\` to add an account.`,
-                edit: processingMsg.key
-            });
-            await react('❌');
+            await reply(`❌ No Gmail accounts configured. Use .gmail add`);
             return;
         }
-        
-        await sock.sendMessage(from, {
-            text: `📥 *Found ${tokenFiles.length} account(s)*\n\nAuthenticating...`,
-            edit: processingMsg.key
-        });
         
         const accounts = [];
         
@@ -727,315 +627,88 @@ async function handleFetchEmails(sock, from, reply, react) {
             if (tokenPath) {
                 const auth = await authenticateWithToken(tokenPath, email);
                 if (auth && auth.gmail) {
-                    accounts.push({
-                        email: auth.email,
-                        gmail: auth.gmail,
-                        tokenPath: tokenPath
-                    });
+                    accounts.push(auth);
                 }
+                try { fs.unlinkSync(tokenPath); } catch (e) {}
             }
         }
         
         if (accounts.length === 0) {
-            await sock.sendMessage(from, {
-                text: `❌ *No accounts could be authenticated*\n\nTokens may be expired. Use \`.gmail add\` to re-add.`,
-                edit: processingMsg.key
-            });
-            await react('❌');
+            await reply(`❌ No accounts could be authenticated.`);
             return;
         }
         
-        await sock.sendMessage(from, {
-            text: `✅ *Authenticated ${accounts.length} account(s)*\n\nFetching latest emails...`,
-            edit: processingMsg.key
-        });
-        
         const emails = [];
-        
         for (const account of accounts) {
-            const emailData = await getLatestEmail(account.gmail, account.email);
+            const emailData = await getLatestEmail(account.gmail);
             if (emailData) {
-                emails.push({
-                    account: account.email,
-                    ...emailData
-                });
+                emails.push({ account: account.email, ...emailData });
             }
-            
-            try {
-                if (account.tokenPath && fs.existsSync(account.tokenPath)) {
-                    fs.unlinkSync(account.tokenPath);
-                }
-            } catch (e) {}
         }
         
         if (emails.length === 0) {
-            await sock.sendMessage(from, {
-                text: `📭 *No emails found* in any account.`,
-                edit: processingMsg.key
-            });
-            await react('📭');
+            await reply(`📭 No emails found.`);
             return;
         }
         
         emails.sort((a, b) => b.timestamp - a.timestamp);
         const latest = emails[0];
         
-        const emailMessage = `📧 *LATEST EMAIL ACROSS ALL ACCOUNTS*\n\n` +
-                            `👤 *Account:* ${latest.account}\n` +
-                            `📌 *Subject:* ${latest.subject}\n` +
-                            `📨 *From:* ${latest.from}\n` +
-                            `📅 *Date:* ${formatDate(latest.timestamp)}\n\n` +
-                            `📄 *Content:*\n${latest.body}\n\n` +
-                            `📊 *Found ${emails.length} email(s) from ${accounts.length} account(s)*`;
+        const message = `📧 *Latest Email*\n\n` +
+                       `👤 *Account:* ${latest.account}\n` +
+                       `📌 *Subject:* ${latest.subject}\n` +
+                       `📨 *From:* ${latest.from}\n` +
+                       `📅 *Date:* ${new Date(latest.timestamp).toLocaleString()}\n\n` +
+                       `📄 *Content:*\n${latest.body.substring(0, 1000)}`;
         
-        if (emailMessage.length > 4000) {
-            const parts = splitLongMessage(emailMessage, 4000);
-            await sock.sendMessage(from, {
-                text: parts[0],
-                edit: processingMsg.key
-            });
-            for (let i = 1; i < parts.length; i++) {
-                await sock.sendMessage(from, { text: parts[i] });
-            }
-        } else {
-            await sock.sendMessage(from, {
-                text: emailMessage,
-                edit: processingMsg.key
-            });
-        }
-        
-        if (emails.length > 1) {
-            let summary = `📋 *Other recent emails:*\n\n`;
-            for (let i = 1; i < Math.min(emails.length, 5); i++) {
-                summary += `${i}. *${emails[i].account}*\n`;
-                summary += `   📌 ${emails[i].subject.substring(0, 50)}\n`;
-                summary += `   📅 ${formatDate(emails[i].timestamp)}\n\n`;
-            }
-            await reply(summary);
-        }
-        
+        await sock.sendMessage(from, { text: message, edit: processingMsg.key });
         await react('✅');
         
     } catch (error) {
         console.error('[GMAIL] Error:', error);
-        await sock.sendMessage(from, {
-            text: `❌ *Failed to fetch emails*\n\nError: ${error.message}`,
-            edit: processingMsg.key
-        });
+        await sock.sendMessage(from, { text: `❌ Failed: ${error.message}`, edit: processingMsg.key });
         await react('❌');
-    }
-}
-
-async function handleAddAccount(sock, from, sender, reply, react) {
-    await react('🔐');
-    
-    const processingMsg = await reply(`🔐 *Starting Gmail authentication...*\n\nPlease wait...`);
-    
-    try {
-        await downloadCredentials();
-        
-        if (!credJson) {
-            await sock.sendMessage(from, {
-                text: `❌ *Credentials not found*\n\nPlease upload cred.json to the Google Drive folder first.`,
-                edit: processingMsg.key
-            });
-            await react('❌');
-            return;
-        }
-        
-        const { oAuth2Client, authUrl } = await generateAuthUrl();
-        
-        // Clear any existing auth sessions for this user
-        const existingSessions = sessionManager.getUserSessions(sender, from);
-        for (const sess of existingSessions) {
-            if (sess.command === 'gmail_auth') {
-                console.log(`[GMAIL] Cleaning up existing auth session: ${sess.id}`);
-                sessionManager.clearSession(sess.id);
-            }
-        }
-        
-        // Also clear from our local map
-        if (activeAuthSessions.has(sender)) {
-            const oldSessionId = activeAuthSessions.get(sender);
-            sessionManager.clearSession(oldSessionId);
-            activeAuthSessions.delete(sender);
-        }
-        
-        // Create new auth session
-        const authSession = sessionManager.createSession(sender, from, 'gmail_auth', {
-            step: 'waiting_for_code',
-            oAuth2Client: oAuth2Client
-        });
-        
-        // Store in local map
-        activeAuthSessions.set(sender, authSession.id);
-        
-        const authMessage = `🔐 *Add Gmail Account*\n\n` +
-                           `1. Click the link below to authorize:\n${authUrl}\n\n` +
-                           `2. After granting permission, Google will redirect you to a URL\n\n` +
-                           `3. Copy the FULL URL and send it here\n\n` +
-                           `*Example URL:*\n\`http://localhost/?code=4/0Aci98E8...\`\n\n` +
-                           `*Note:* The code expires in 10 minutes.\n\n` +
-                           `⚠️ *Send the URL in this chat* - I'm waiting for your response!`;
-        
-        await sock.sendMessage(from, {
-            text: authMessage,
-            edit: processingMsg.key
-        });
-        
-        const sessionId = authSession.id.split(':').pop();
-        const buttons = [
-            { id: `gmail_cancel_${sessionId}`, text: '❌ Cancel' }
-        ];
-        
-        const sentMsg = await sendButtons(sock, from, {
-            text: `🔐 *Waiting for authorization URL*\n\nSend the full redirect URL you received from Google.\n\nType \`cancel\` to abort.`,
-            footer: 'Gmail Auth',
-            buttons: buttons,
-            aimode: FORCE_AI_MODE
-        }, {});
-        
-        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'gmail_auth');
-        
-        console.log(`[GMAIL] Waiting for code from user ${sender}`);
-        
-    } catch (error) {
-        console.error('[GMAIL] Add account error:', error);
-        await sock.sendMessage(from, {
-            text: `❌ *Failed to start authentication*\n\nError: ${error.message}`,
-            edit: processingMsg.key
-        });
-        await react('❌');
-    }
-}
-
-async function handleCodeInput(sock, from, sender, reply, react, session, code) {
-    const oAuth2Client = session.data.oAuth2Client;
-    
-    if (!oAuth2Client) {
-        await reply(`❌ *Session expired*\n\nPlease run \`.gmail add\` again.`);
-        sessionManager.clearSession(session.id);
-        activeAuthSessions.delete(sender);
-        return;
-    }
-    
-    await react('🔄');
-    const processingMsg = await reply(`🔄 *Exchanging code for tokens...*\n\nPlease wait...`);
-    
-    try {
-        const tokens = await getTokensFromCode(oAuth2Client, code);
-        
-        oAuth2Client.setCredentials(tokens);
-        const gmail = google.gmail({ version: 'v1', auth: oAuth2Client });
-        const profile = await gmail.users.getProfile({ userId: 'me' });
-        const email = profile.data.emailAddress;
-        
-        const tokenData = {
-            refresh_token: tokens.refresh_token,
-            client_id: credJson.installed.client_id,
-            client_secret: credJson.installed.client_secret
-        };
-        
-        const tempDir = path.join(process.cwd(), 'temp');
-        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-        
-        const tokenFileName = `token_${email.replace(/@/g, '_')}.json`;
-        const tokenPath = path.join(tempDir, tokenFileName);
-        fs.writeFileSync(tokenPath, JSON.stringify(tokenData, null, 2));
-        
-        const uploaded = await uploadTokenFile(tokenPath, tokenFileName);
-        
-        fs.unlinkSync(tokenPath);
-        
-        if (uploaded) {
-            await sock.sendMessage(from, {
-                text: `✅ *Account Added Successfully!*\n\n` +
-                      `📧 *Email:* ${email}\n` +
-                      `💾 *Token saved to Google Drive*\n\n` +
-                      `Use \`.gmail\` to fetch emails.`,
-                edit: processingMsg.key
-            });
-            await react('✅');
-        } else {
-            await sock.sendMessage(from, {
-                text: `❌ *Failed to save token to Google Drive*\n\nPlease check folder permissions.`,
-                edit: processingMsg.key
-            });
-            await react('❌');
-        }
-        
-        // Clean up auth session
-        sessionManager.clearSession(session.id);
-        activeAuthSessions.delete(sender);
-        
-    } catch (error) {
-        console.error('[GMAIL] Code exchange error:', error);
-        await sock.sendMessage(from, {
-            text: `❌ *Failed to authenticate*\n\nError: ${error.message}\n\nPlease try \`.gmail add\` again.`,
-            edit: processingMsg.key
-        });
-        await react('❌');
-        sessionManager.clearSession(session.id);
-        activeAuthSessions.delete(sender);
     }
 }
 
 async function handleListAccounts(sock, from, reply, react) {
     await react('📋');
-    const processingMsg = await reply(`📋 *Fetching account list...*\n\nPlease wait...`);
     
     try {
         await downloadCredentials();
         const tokenFiles = await listTokenFiles();
         
         if (tokenFiles.length === 0) {
-            await sock.sendMessage(from, {
-                text: `📭 *No Gmail accounts configured*\n\nUse \`.gmail add\` to add an account.`,
-                edit: processingMsg.key
-            });
-            await react('❌');
+            await reply(`📭 No Gmail accounts configured.`);
             return;
         }
         
-        let listMsg = `📧 *Gmail Accounts*\n\n`;
-        listMsg += `📊 *Total:* ${tokenFiles.length} account(s)\n\n`;
-        
+        let listMsg = `📧 *Gmail Accounts*\n\n📊 Total: ${tokenFiles.length}\n\n`;
         for (let i = 0; i < tokenFiles.length; i++) {
-            const file = tokenFiles[i];
-            const email = extractEmailFromFilename(file.name);
+            const email = extractEmailFromFilename(tokenFiles[i].name);
             listMsg += `${i + 1}. ${email}\n`;
         }
         
-        listMsg += `\n💡 Use \`.gmail\` to return to main menu`;
-        
-        await sock.sendMessage(from, {
-            text: listMsg,
-            edit: processingMsg.key
-        });
+        await reply(listMsg);
         await react('✅');
         
     } catch (error) {
-        console.error('[GMAIL] Error listing accounts:', error);
-        await sock.sendMessage(from, {
-            text: `❌ *Failed to list accounts*\n\nError: ${error.message}`,
-            edit: processingMsg.key
-        });
+        console.error('[GMAIL] Error:', error);
+        await reply(`❌ Failed: ${error.message}`);
         await react('❌');
     }
 }
 
 async function handleRemoveAccount(sock, from, reply, react, emailToRemove) {
     await react('🗑️');
-    const processingMsg = await reply(`🗑️ *Removing account...*\n\n${emailToRemove}`);
     
     try {
         const tokenFiles = await listTokenFiles();
         let found = false;
-        const normalizedEmail = emailToRemove.toLowerCase().replace(/@/g, '_');
         
         for (const file of tokenFiles) {
-            const fileEmail = extractEmailFromFilename(file.name).toLowerCase();
-            if (fileEmail === emailToRemove.toLowerCase() || file.name.includes(normalizedEmail)) {
+            const fileEmail = extractEmailFromFilename(file.name);
+            if (fileEmail.toLowerCase() === emailToRemove.toLowerCase()) {
                 await deleteTokenFile(file.id);
                 found = true;
                 break;
@@ -1043,86 +716,13 @@ async function handleRemoveAccount(sock, from, reply, react, emailToRemove) {
         }
         
         if (found) {
-            await sock.sendMessage(from, {
-                text: `✅ *Account Removed*\n\n📧 ${emailToRemove}\n\nUse \`.gmail\` to return to main menu.`,
-                edit: processingMsg.key
-            });
-            await react('✅');
+            await reply(`✅ Account removed: ${emailToRemove}`);
         } else {
-            await sock.sendMessage(from, {
-                text: `❌ *Account not found*\n\nNo token found for: ${emailToRemove}`,
-                edit: processingMsg.key
-            });
-            await react('❌');
+            await reply(`❌ Account not found: ${emailToRemove}`);
         }
         
     } catch (error) {
-        console.error('[GMAIL] Remove account error:', error);
-        await sock.sendMessage(from, {
-            text: `❌ *Failed to remove account*\n\nError: ${error.message}`,
-            edit: processingMsg.key
-        });
-        await react('❌');
-    }
-}
-
-async function handleRefreshTokens(sock, from, reply, react) {
-    await react('🔄');
-    const processingMsg = await reply(`🔄 *Refreshing tokens...*\n\nPlease wait...`);
-    
-    try {
-        await downloadCredentials();
-        const tokenFiles = await listTokenFiles();
-        
-        if (tokenFiles.length === 0) {
-            await sock.sendMessage(from, {
-                text: `❌ *No Gmail accounts configured*`,
-                edit: processingMsg.key
-            });
-            await react('❌');
-            return;
-        }
-        
-        let refreshed = 0;
-        let failed = 0;
-        
-        for (const file of tokenFiles) {
-            const email = extractEmailFromFilename(file.name);
-            const tokenPath = await downloadTokenFile(file.id, file.name);
-            
-            if (tokenPath) {
-                const auth = await authenticateWithToken(tokenPath, email);
-                
-                if (auth && auth.gmail) {
-                    refreshed++;
-                } else {
-                    failed++;
-                }
-                
-                try {
-                    if (fs.existsSync(tokenPath)) fs.unlinkSync(tokenPath);
-                } catch (e) {}
-            } else {
-                failed++;
-            }
-        }
-        
-        await sock.sendMessage(from, {
-            text: `✅ *Token Refresh Complete*\n\n` +
-                  `🔄 Valid: ${refreshed}\n` +
-                  `❌ Invalid/Expired: ${failed}\n` +
-                  `📊 Total: ${tokenFiles.length}\n\n` +
-                  `💡 Use \`.gmail\` to return to main menu`,
-            edit: processingMsg.key
-        });
-        await react('✅');
-        
-    } catch (error) {
-        console.error('[GMAIL] Error refreshing tokens:', error);
-        await sock.sendMessage(from, {
-            text: `❌ *Failed to refresh tokens*\n\nError: ${error.message}`,
-            edit: processingMsg.key
-        });
-        await react('❌');
+        console.error('[GMAIL] Error:', error);
+        await reply(`❌ Failed: ${error.message}`);
     }
 }
