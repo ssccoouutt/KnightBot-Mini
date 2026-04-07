@@ -139,7 +139,6 @@ async function listTokenFiles() {
         });
         
         const files = response.data.files || [];
-        // Only include files that start with 'token_' and exclude cred.json
         return files.filter(file => 
             file.name.startsWith('token_') && 
             file.name !== 'cred.json' && 
@@ -261,15 +260,30 @@ async function generateAuthUrl() {
     const authUrl = oAuth2Client.generateAuthUrl({
         access_type: 'offline',
         scope: SCOPES,
-        prompt: 'consent'
+        prompt: 'consent',
+        redirect_uri: 'http://localhost'
     });
     
     return { oAuth2Client, authUrl };
 }
 
+function extractCodeFromUrl(url) {
+    // Extract code from URL like: http://localhost/?code=4/0Aci98E8bXH5D0Xno2OEmFYce_Lc9NFH7B-dDTuZ4QWQ6NmSZZ4_GSkwB8nmChVbcRFCQFg
+    const match = url.match(/[?&]code=([^&]+)/);
+    if (match) {
+        return decodeURIComponent(match[1]);
+    }
+    return url; // If just the code is sent directly
+}
+
 async function getTokensFromCode(oAuth2Client, code) {
-    const { tokens } = await oAuth2Client.getToken(code);
-    return tokens;
+    try {
+        const { tokens } = await oAuth2Client.getToken(code);
+        return tokens;
+    } catch (error) {
+        console.error('[GMAIL] Token exchange error:', error.message);
+        throw new Error(`Failed to exchange code: ${error.message}`);
+    }
 }
 
 async function authenticateWithToken(tokenPath, email) {
@@ -403,7 +417,6 @@ function splitLongMessage(text, maxLength = 4000) {
 }
 
 function extractEmailFromFilename(filename) {
-    // Remove 'token_' prefix and .json suffix, then replace _ with @
     let email = filename.replace(/^token_/, '').replace('.json', '');
     email = email.replace(/_/g, '@');
     return email;
@@ -422,7 +435,6 @@ module.exports = {
     async execute(sock, msg, args, context) {
         const { from, sender, reply, react } = context;
         
-        // Create session for the main menu
         const session = sessionManager.createSession(sender, from, 'gmail', {
             step: 'main_menu'
         });
@@ -481,31 +493,26 @@ module.exports = {
             if (buttonId) {
                 console.log(`[GMAIL] Button clicked: ${buttonId}`);
                 
-                // Fetch Latest Email
                 if (buttonId.includes('gmail_fetch_')) {
                     await handleFetchEmails(sock, from, reply, react);
                     return true;
                 }
                 
-                // List Accounts
                 if (buttonId.includes('gmail_list_')) {
                     await handleListAccounts(sock, from, reply, react);
                     return true;
                 }
                 
-                // Add Account
                 if (buttonId.includes('gmail_add_')) {
                     await handleAddAccount(sock, from, sender, reply, react);
                     return true;
                 }
                 
-                // Remove Account - show selection
                 if (buttonId.includes('gmail_remove_') && !buttonId.includes('gmail_remove_account_')) {
                     await showRemoveAccountSelection(sock, from, reply, react);
                     return true;
                 }
                 
-                // Remove specific account
                 if (buttonId.includes('gmail_remove_account_')) {
                     const parts = buttonId.split('_');
                     const email = decodeURIComponent(parts.slice(4).join('_'));
@@ -513,13 +520,11 @@ module.exports = {
                     return true;
                 }
                 
-                // Refresh Tokens
                 if (buttonId.includes('gmail_refresh_')) {
                     await handleRefreshTokens(sock, from, reply, react);
                     return true;
                 }
                 
-                // Cancel
                 if (buttonId.includes('gmail_cancel_')) {
                     await reply(`❌ Operation cancelled.`);
                     return true;
@@ -536,10 +541,12 @@ module.exports = {
         }
         
         if (text && session.data && session.data.step === 'waiting_for_code') {
-            if (text.startsWith('4/') || text.length > 50) {
-                await handleCodeInput(sock, from, sender, reply, react, session, text);
+            // Extract code from URL if it's a full URL
+            const code = extractCodeFromUrl(text);
+            if (code && (code.startsWith('4/') || code.length > 50)) {
+                await handleCodeInput(sock, from, sender, reply, react, session, code);
             } else {
-                await reply(`❌ Invalid code format.\n\nPlease send the full authorization code from Google.`);
+                await reply(`❌ Invalid code format.\n\nPlease send the full URL or authorization code from Google.`);
             }
             return true;
         }
@@ -567,7 +574,6 @@ async function showRemoveAccountSelection(sock, from, reply, react) {
             return;
         }
         
-        // Create session for removal
         const session = sessionManager.createSession(from, from, 'gmail_remove', {
             step: 'selecting_account'
         });
@@ -769,15 +775,16 @@ async function handleAddAccount(sock, from, sender, reply, react) {
         
         const { oAuth2Client, authUrl } = await generateAuthUrl();
         
-        const session = sessionManager.createSession(sender, from, 'gmail_auth', {
+        // Create session for waiting for code
+        const authSession = sessionManager.createSession(sender, from, 'gmail_auth', {
             step: 'waiting_for_code',
             oAuth2Client: oAuth2Client
         });
         
         const authMessage = `🔐 *Add Gmail Account*\n\n` +
                            `1. Click the link below to authorize:\n${authUrl}\n\n` +
-                           `2. After granting permission, Google will give you a code\n\n` +
-                           `3. Copy the code and send it here\n\n` +
+                           `2. After granting permission, you'll be redirected to a page\n\n` +
+                           `3. Copy the FULL URL from the address bar and send it here\n\n` +
                            `*Note:* The code expires in 10 minutes.`;
         
         await sock.sendMessage(from, {
@@ -785,13 +792,13 @@ async function handleAddAccount(sock, from, sender, reply, react) {
             edit: processingMsg.key
         });
         
-        const sessionId = session.id.split(':').pop();
+        const sessionId = authSession.id.split(':').pop();
         const buttons = [
             { id: `gmail_cancel_${sessionId}`, text: '❌ Cancel' }
         ];
         
         const sentMsg = await sendButtons(sock, from, {
-            text: `🔐 *Waiting for authorization code*\n\nSend the code you received from Google.`,
+            text: `🔐 *Waiting for authorization URL*\n\nSend the full URL from your browser after authorization.`,
             footer: 'Gmail Auth',
             buttons: buttons,
             aimode: FORCE_AI_MODE
@@ -824,11 +831,13 @@ async function handleCodeInput(sock, from, sender, reply, react, session, code) 
     try {
         const tokens = await getTokensFromCode(oAuth2Client, code);
         
+        // Get user email
         oAuth2Client.setCredentials(tokens);
         const gmail = google.gmail({ version: 'v1', auth: oAuth2Client });
         const profile = await gmail.users.getProfile({ userId: 'me' });
         const email = profile.data.emailAddress;
         
+        // Save token
         const tokenData = {
             refresh_token: tokens.refresh_token,
             client_id: credJson.installed.client_id,
@@ -842,8 +851,10 @@ async function handleCodeInput(sock, from, sender, reply, react, session, code) 
         const tokenPath = path.join(tempDir, tokenFileName);
         fs.writeFileSync(tokenPath, JSON.stringify(tokenData, null, 2));
         
+        // Upload to Google Drive
         const uploaded = await uploadTokenFile(tokenPath, tokenFileName);
         
+        // Clean up
         fs.unlinkSync(tokenPath);
         
         if (uploaded) {
