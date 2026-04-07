@@ -1,10 +1,11 @@
 /**
- * Commit Command - Search and replace file content across GitHub repositories
+ * Commit Command - Edit existing files or create new files in GitHub repositories
  */
 
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const unzipper = require('unzipper');
 const config = require('../../config');
 const sessionManager = require('../../utils/sessionManager');
 const giftedBtns = require('gifted-btns');
@@ -132,59 +133,58 @@ async function getGitHubCredentials() {
 
 // ==================== GITHUB API FUNCTIONS ====================
 
-async function getAllRepositories(token, username) {
+async function getRepositoryContent(token, username, repoName, path = '') {
     try {
-        let allRepos = [];
-        let page = 1;
-        
-        while (true) {
-            const response = await axios.get(
-                `https://api.github.com/users/${username}/repos`,
-                {
-                    headers: { 'Authorization': `token ${token}` },
-                    params: { page: page, per_page: 100, sort: 'updated' }
-                }
-            );
-            
-            if (response.data.length === 0) break;
-            
-            allRepos = allRepos.concat(response.data);
-            page++;
-        }
-        
-        console.log(`[COMMIT] Found ${allRepos.length} repositories`);
-        return allRepos;
-        
-    } catch (error) {
-        console.error('[COMMIT] Failed to get repositories:', error.message);
-        throw new Error('Failed to fetch repositories');
-    }
-}
-
-async function searchFileInRepo(token, username, repoName, fileName) {
-    try {
-        // Search for file using GitHub's search API
-        const searchUrl = `https://api.github.com/search/code?q=${encodeURIComponent(fileName)}+repo:${username}/${repoName}`;
-        
-        const response = await axios.get(searchUrl, {
+        const url = `https://api.github.com/repos/${username}/${repoName}/contents/${path}`;
+        const response = await axios.get(url, {
             headers: { 'Authorization': `token ${token}` }
         });
-        
-        return response.data.items || [];
-        
+        return response.data;
     } catch (error) {
-        console.error(`[COMMIT] Error searching in ${repoName}:`, error.message);
-        return [];
+        if (error.response?.status === 404) {
+            return null;
+        }
+        console.error(`[COMMIT] Error getting content:`, error.message);
+        return null;
     }
 }
 
-async function getFileContent(token, username, repoName, filePath, branch = 'main') {
+async function getAllFilesInRepo(token, username, repoName, path = '', files = []) {
+    try {
+        const contents = await getRepositoryContent(token, username, repoName, path);
+        
+        if (!contents) return files;
+        
+        for (const item of contents) {
+            if (item.type === 'file') {
+                files.push({
+                    name: item.name,
+                    path: item.path,
+                    sha: item.sha,
+                    url: item.download_url
+                });
+            } else if (item.type === 'dir') {
+                await getAllFilesInRepo(token, username, repoName, item.path, files);
+            }
+        }
+        
+        return files;
+    } catch (error) {
+        console.error(`[COMMIT] Error listing files:`, error.message);
+        return files;
+    }
+}
+
+async function findFilesByNameInRepo(token, username, repoName, fileName) {
+    const allFiles = await getAllFilesInRepo(token, username, repoName);
+    return allFiles.filter(file => file.name === fileName);
+}
+
+async function getFileContent(token, username, repoName, filePath) {
     try {
         const url = `https://api.github.com/repos/${username}/${repoName}/contents/${filePath}`;
-        
         const response = await axios.get(url, {
-            headers: { 'Authorization': `token ${token}` },
-            params: { ref: branch }
+            headers: { 'Authorization': `token ${token}` }
         });
         
         if (response.data && response.data.content) {
@@ -194,14 +194,13 @@ async function getFileContent(token, username, repoName, filePath, branch = 'mai
         }
         
         return null;
-        
     } catch (error) {
         console.error(`[COMMIT] Error getting file content:`, error.message);
         return null;
     }
 }
 
-async function updateFileContent(token, username, repoName, filePath, content, sha, commitMessage, branch = 'main') {
+async function updateFileContent(token, username, repoName, filePath, content, sha, commitMessage) {
     try {
         const base64Content = Buffer.from(content, 'utf8').toString('base64');
         
@@ -210,8 +209,7 @@ async function updateFileContent(token, username, repoName, filePath, content, s
             {
                 message: commitMessage,
                 content: base64Content,
-                sha: sha,
-                branch: branch
+                sha: sha
             },
             {
                 headers: {
@@ -229,13 +227,39 @@ async function updateFileContent(token, username, repoName, filePath, content, s
     }
 }
 
+async function createNewFile(token, username, repoName, filePath, content, commitMessage) {
+    try {
+        const base64Content = Buffer.from(content, 'utf8').toString('base64');
+        
+        const response = await axios.put(
+            `https://api.github.com/repos/${username}/${repoName}/contents/${filePath}`,
+            {
+                message: commitMessage,
+                content: base64Content
+            },
+            {
+                headers: {
+                    'Authorization': `token ${token}`,
+                    'Accept': 'application/vnd.github.v3+json'
+                }
+            }
+        );
+        
+        return response.data;
+        
+    } catch (error) {
+        console.error(`[COMMIT] Error creating file:`, error.message);
+        throw new Error(`Failed to create file: ${error.response?.data?.message || error.message}`);
+    }
+}
+
 // ==================== MAIN COMMAND ====================
 
 module.exports = {
     name: 'commit',
-    aliases: ['updatefile', 'replacefile', 'editfile'],
-    description: 'Search and replace file content across GitHub repositories',
-    usage: '.commit <filename>',
+    aliases: ['updatefile', 'replacefile', 'editfile', 'createfile'],
+    description: 'Edit existing files or create new files in GitHub repositories',
+    usage: '.commit <repo_name>\n.commit KnightBot-Mini',
     category: 'owner',
     ownerOnly: true,
 
@@ -245,97 +269,71 @@ module.exports = {
         if (args.length === 0) {
             return reply(`📝 *Commit Command*\n\n` +
                        `*Usage:*\n` +
-                       `• \`${config.prefix}commit <filename>\` - Search for file in all repos\n` +
-                       `• \`${config.prefix}commit config.js\` - Example\n\n` +
-                       `*What it does:*\n` +
-                       `1. Searches for the file in all your GitHub repositories\n` +
-                       `2. Shows repositories where the file exists\n` +
-                       `3. If multiple files with same name, lets you choose\n` +
-                       `4. You can then send new content (one or multiple messages)\n` +
-                       `5. Click "Done" to commit the changes\n\n` +
-                       `*Note:* Files are committed to the main/master branch`);
+                       `• \`${config.prefix}commit <repo_name>\` - Work with a repository\n\n` +
+                       `*Examples:*\n` +
+                       `• \`${config.prefix}commit KnightBot-Mini\`\n\n` +
+                       `*What you can do:*\n` +
+                       `1. Edit an existing file (replace all content)\n` +
+                       `2. Create a new file in any folder\n` +
+                       `3. Push changes directly to GitHub\n\n` +
+                       `*Note:* You need to have write access to the repository`);
         }
         
-        const fileName = args[0];
+        const repoName = args[0];
         
-        await react('🔍');
-        const processingMsg = await reply(`🔍 *Searching for "${fileName}" in all repositories...*\n\nPlease wait...`);
+        await react('📥');
+        const processingMsg = await reply(`🔄 *Connecting to repository...*\n\nRepo: ${repoName}\n\nPlease wait...`);
         
         try {
             const { token, username } = await getGitHubCredentials();
             
-            // Get all repositories
-            const repos = await getAllRepositories(token, username);
-            
-            if (repos.length === 0) {
-                await sock.sendMessage(from, {
-                    text: `❌ No repositories found for user ${username}.`,
-                    edit: processingMsg.key
+            // Verify repository exists and is accessible
+            try {
+                await axios.get(`https://api.github.com/repos/${username}/${repoName}`, {
+                    headers: { 'Authorization': `token ${token}` }
                 });
-                await react('❌');
-                return;
-            }
-            
-            // Search for file in each repository
-            const reposWithFile = [];
-            
-            for (const repo of repos) {
-                const results = await searchFileInRepo(token, username, repo.name, fileName);
-                if (results.length > 0) {
-                    reposWithFile.push({
-                        name: repo.name,
-                        fullName: repo.full_name,
-                        files: results.map(r => ({
-                            path: r.path,
-                            url: r.url,
-                            sha: null // Will fetch later
-                        }))
+            } catch (error) {
+                if (error.response?.status === 404) {
+                    await sock.sendMessage(from, {
+                        text: `❌ Repository "${repoName}" not found for user ${username}.\n\nMake sure the repository name is correct and you have access.`,
+                        edit: processingMsg.key
                     });
+                    await react('❌');
+                    return;
                 }
-            }
-            
-            if (reposWithFile.length === 0) {
-                await sock.sendMessage(from, {
-                    text: `❌ No repositories found containing "${fileName}".\n\nMake sure the file exists in one of your repositories.`,
-                    edit: processingMsg.key
-                });
-                await react('❌');
-                return;
+                throw error;
             }
             
             // Create session
             const session = sessionManager.createSession(sender, from, 'commit', {
-                step: 'selecting_repo',
-                fileName: fileName,
-                repos: reposWithFile,
-                selectedRepo: null,
+                step: 'selecting_action',
+                repoName: repoName,
+                username: username,
+                token: token,
                 selectedFile: null,
                 fileContent: null,
                 fileSha: null,
                 newContent: '',
-                contentParts: []
+                contentParts: [],
+                isNewFile: false,
+                newFilePath: null
             });
             
             const sessionId = session.id.split(':').pop();
             
-            // Show repositories as buttons
-            const buttons = [];
-            for (let i = 0; i < Math.min(reposWithFile.length, 15); i++) {
-                const repo = reposWithFile[i];
-                buttons.push({
-                    id: `commit_repo_${sessionId}_${i}`,
-                    text: repo.name.length > 40 ? repo.name.substring(0, 37) + '...' : repo.name
-                });
-            }
-            buttons.push({ id: 'cancel', text: '❌ Cancel' });
+            const buttons = [
+                { id: `commit_edit_${sessionId}`, text: '✏️ Edit Existing File' },
+                { id: `commit_create_${sessionId}`, text: '📄 Create New File' },
+                { id: 'cancel', text: '❌ Cancel' }
+            ];
             
             await sock.sendMessage(from, {
-                text: `✅ *Found ${fileName} in ${reposWithFile.length} repository(s)*\n\nSelect which repository to edit:`,
+                text: `✅ *Connected to repository*\n\n📁 *Repo:* ${repoName}\n👤 *Owner:* ${username}\n\nWhat would you like to do?`,
                 edit: processingMsg.key
             });
             
             const sentMsg = await sendButtons(sock, from, {
-                text: `📁 *Select Repository*\n\nFile: \`${fileName}\`\n\nFound in ${reposWithFile.length} repository(s):`,
+                text: `📁 *Repository: ${repoName}*\n\nChoose an action:`,
                 footer: 'Commit Tool',
                 buttons: buttons,
                 aimode: FORCE_AI_MODE
@@ -347,7 +345,7 @@ module.exports = {
             
         } catch (error) {
             await sock.sendMessage(from, {
-                text: `❌ *Failed to search repositories*\n\nError: ${error.message}`,
+                text: `❌ *Failed to connect to repository*\n\nError: ${error.message}`,
                 edit: processingMsg.key
             });
             await react('❌');
@@ -390,62 +388,26 @@ module.exports = {
                 return true;
             }
             
-            if (buttonId && buttonId.startsWith('commit_repo_')) {
-                const parts = buttonId.split('_');
-                const index = parseInt(parts[3]);
-                const repos = session.data.repos;
-                
-                if (!isNaN(index) && index >= 0 && index < repos.length) {
-                    const selectedRepo = repos[index];
-                    
-                    // Update session
-                    sessionManager.updateSession(sender, from, {
-                        step: 'selecting_file',
-                        selectedRepo: selectedRepo,
-                        selectedFile: null
-                    });
-                    
-                    // Check if multiple files with same name exist in this repo
-                    if (selectedRepo.files.length === 1) {
-                        // Single file, proceed to get content
-                        const file = selectedRepo.files[0];
-                        await handleFileSelected(sock, from, sender, reply, react, session, selectedRepo, file);
-                    } else {
-                        // Multiple files, show selection
-                        const sessionId = session.id.split(':').pop();
-                        const buttons = [];
-                        
-                        for (let i = 0; i < selectedRepo.files.length; i++) {
-                            const file = selectedRepo.files[i];
-                            buttons.push({
-                                id: `commit_file_${sessionId}_${i}`,
-                                text: file.path.length > 50 ? file.path.substring(0, 47) + '...' : file.path
-                            });
-                        }
-                        buttons.push({ id: 'cancel', text: '❌ Cancel' });
-                        
-                        const sentMsg = await sendButtons(sock, from, {
-                            text: `📁 *Multiple files named "${session.data.fileName}" found in ${selectedRepo.name}*\n\nSelect which file to edit:`,
-                            footer: 'Commit Tool',
-                            buttons: buttons,
-                            aimode: FORCE_AI_MODE
-                        }, {});
-                        
-                        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'commit');
-                    }
-                }
+            if (buttonId && buttonId.startsWith('commit_edit_')) {
+                sessionManager.updateSession(sender, from, { step: 'searching_file', isNewFile: false });
+                await reply(`✏️ *Edit Existing File*\n\nSend me the exact filename you want to edit (e.g., config.js, handler.js, commands/owner/forward.js)\n\nType \`cancel\` to go back.`);
+                return true;
+            }
+            
+            if (buttonId && buttonId.startsWith('commit_create_')) {
+                sessionManager.updateSession(sender, from, { step: 'getting_filepath', isNewFile: true });
+                await reply(`📄 *Create New File*\n\nSend me the full path for the new file (e.g., commands/owner/newcommand.js, utils/helper.js)\n\nYou can create folders by including them in the path.\n\nType \`cancel\` to go back.`);
                 return true;
             }
             
             if (buttonId && buttonId.startsWith('commit_file_')) {
                 const parts = buttonId.split('_');
                 const index = parseInt(parts[3]);
-                const selectedRepo = session.data.selectedRepo;
-                const files = selectedRepo.files;
+                const files = session.data.filesList;
                 
                 if (!isNaN(index) && index >= 0 && index < files.length) {
                     const selectedFile = files[index];
-                    await handleFileSelected(sock, from, sender, reply, react, session, selectedRepo, selectedFile);
+                    await handleFileSelected(sock, from, sender, reply, react, session, selectedFile);
                 }
                 return true;
             }
@@ -462,24 +424,87 @@ module.exports = {
             }
         }
         
-        // Handle text input (new file content)
+        // Handle text input
         let text = '';
         if (msg.message?.conversation) {
-            text = msg.message.conversation;
+            text = msg.message.conversation.trim();
         } else if (msg.message?.extendedTextMessage?.text) {
-            text = msg.message.extendedTextMessage.text;
+            text = msg.message.extendedTextMessage.text.trim();
         }
         
-        if (text && session.data.step === 'collecting_content') {
-            // Collect content parts
+        if (!text) return true;
+        
+        if (text.toLowerCase() === 'cancel') {
+            // Go back to previous step
+            const currentStep = session.data.step;
+            if (currentStep === 'searching_file' || currentStep === 'getting_filepath') {
+                sessionManager.updateSession(sender, from, { step: 'selecting_action' });
+                const sessionId = session.id.split(':').pop();
+                const buttons = [
+                    { id: `commit_edit_${sessionId}`, text: '✏️ Edit Existing File' },
+                    { id: `commit_create_${sessionId}`, text: '📄 Create New File' },
+                    { id: 'cancel', text: '❌ Cancel' }
+                ];
+                const sentMsg = await sendButtons(sock, from, {
+                    text: `📁 *Repository: ${session.data.repoName}*\n\nChoose an action:`,
+                    footer: 'Commit Tool',
+                    buttons: buttons,
+                    aimode: FORCE_AI_MODE
+                }, {});
+                sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'commit');
+                return true;
+            } else if (currentStep === 'collecting_content') {
+                sessionManager.clearSession(session.id);
+                await reply(`❌ Operation cancelled.`);
+                return true;
+            }
+            await reply(`❌ Cancelled.`);
+            return true;
+        }
+        
+        // Handle file search for editing
+        if (session.data.step === 'searching_file') {
+            await handleFileSearch(sock, from, sender, reply, react, session, text);
+            return true;
+        }
+        
+        // Handle new file path input
+        if (session.data.step === 'getting_filepath') {
+            sessionManager.updateSession(sender, from, {
+                step: 'collecting_content',
+                newFilePath: text,
+                contentParts: [],
+                newContent: null
+            });
+            
+            const sessionId = session.id.split(':').pop();
+            const buttons = [
+                { id: 'commit_done', text: '✅ Done - Create File' },
+                { id: 'commit_cancel', text: '❌ Cancel' }
+            ];
+            
+            await reply(`✏️ *Creating new file: ${text}*\n\nSend the content for this file (can be multiple messages).\nWhen done, click the "Done - Create File" button.`);
+            
+            const sentMsg = await sendButtons(sock, from, {
+                text: `📄 *Creating New File*\n\nPath: \`${text}\`\n\nSend the content (multiple messages allowed).\nClick "Done - Create File" when finished.`,
+                footer: 'Commit Tool',
+                buttons: buttons,
+                aimode: FORCE_AI_MODE
+            }, {});
+            
+            sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'commit');
+            return true;
+        }
+        
+        // Handle content collection
+        if (session.data.step === 'collecting_content') {
             const contentParts = session.data.contentParts || [];
             contentParts.push(text);
             sessionManager.updateSession(sender, from, {
                 contentParts: contentParts
             });
             
-            // Send confirmation
-            await reply(`✅ Part ${contentParts.length} received. Total length: ${contentParts.join('').length} characters.\n\nSend more content or click "Done" to finish.`);
+            await reply(`✅ Part ${contentParts.length} received. Total length: ${contentParts.join('').length} characters.\n\nSend more content or click the "Done" button to finish.`);
             return true;
         }
         
@@ -487,15 +512,85 @@ module.exports = {
     }
 };
 
-async function handleFileSelected(sock, from, sender, reply, react, session, selectedRepo, selectedFile) {
-    await react('📥');
-    const processingMsg = await reply(`📥 *Fetching file content...*\n\nFile: ${selectedFile.path}\nRepo: ${selectedRepo.name}\n\nPlease wait...`);
+async function handleFileSearch(sock, from, sender, reply, react, session, fileName) {
+    await react('🔍');
+    const processingMsg = await reply(`🔍 *Searching for "${fileName}" in ${session.data.repoName}...*\n\nPlease wait...`);
     
     try {
         const { token, username } = await getGitHubCredentials();
+        const repoName = session.data.repoName;
+        
+        // Search for files with matching name
+        const files = await findFilesByNameInRepo(token, username, repoName, fileName);
+        
+        if (files.length === 0) {
+            await sock.sendMessage(from, {
+                text: `❌ No file named "${fileName}" found in ${repoName}.\n\nMake sure the filename is exact (including extension).\n\nTry again or type \`cancel\` to go back.`,
+                edit: processingMsg.key
+            });
+            await react('❌');
+            return;
+        }
+        
+        // Store files list in session
+        sessionManager.updateSession(sender, from, {
+            filesList: files,
+            step: 'selecting_file'
+        });
+        
+        if (files.length === 1) {
+            // Single file found, proceed directly
+            await handleFileSelected(sock, from, sender, reply, react, session, files[0]);
+        } else {
+            // Multiple files, show selection
+            const sessionId = session.id.split(':').pop();
+            const buttons = [];
+            
+            for (let i = 0; i < Math.min(files.length, 15); i++) {
+                const file = files[i];
+                buttons.push({
+                    id: `commit_file_${sessionId}_${i}`,
+                    text: file.path.length > 50 ? file.path.substring(0, 47) + '...' : file.path
+                });
+            }
+            buttons.push({ id: 'cancel', text: '❌ Cancel' });
+            
+            await sock.sendMessage(from, {
+                text: `📁 *Multiple files named "${fileName}" found*\n\nSelect which file to edit:`,
+                edit: processingMsg.key
+            });
+            
+            const sentMsg = await sendButtons(sock, from, {
+                text: `📁 *Select File to Edit*\n\nFound ${files.length} file(s) named "${fileName}":`,
+                footer: 'Commit Tool',
+                buttons: buttons,
+                aimode: FORCE_AI_MODE
+            }, {});
+            
+            sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'commit');
+        }
+        
+        await react('✅');
+        
+    } catch (error) {
+        await sock.sendMessage(from, {
+            text: `❌ *Search failed*\n\nError: ${error.message}`,
+            edit: processingMsg.key
+        });
+        await react('❌');
+    }
+}
+
+async function handleFileSelected(sock, from, sender, reply, react, session, selectedFile) {
+    await react('📥');
+    const processingMsg = await reply(`📥 *Fetching file content...*\n\nFile: ${selectedFile.path}\n\nPlease wait...`);
+    
+    try {
+        const { token, username } = await getGitHubCredentials();
+        const repoName = session.data.repoName;
         
         // Get file content
-        const fileData = await getFileContent(token, username, selectedRepo.name, selectedFile.path);
+        const fileData = await getFileContent(token, username, repoName, selectedFile.path);
         
         if (!fileData) {
             await sock.sendMessage(from, {
@@ -510,11 +605,11 @@ async function handleFileSelected(sock, from, sender, reply, react, session, sel
         sessionManager.updateSession(sender, from, {
             step: 'collecting_content',
             selectedFile: selectedFile,
-            selectedRepo: selectedRepo,
             fileContent: fileData.content,
             fileSha: fileData.sha,
             contentParts: [],
-            newContent: null
+            newContent: null,
+            isNewFile: false
         });
         
         // Show current content preview
@@ -531,7 +626,7 @@ async function handleFileSelected(sock, from, sender, reply, react, session, sel
         
         await sock.sendMessage(from, {
             text: `📄 *Current File Content*\n\n` +
-                  `📁 *Repo:* ${selectedRepo.name}\n` +
+                  `📁 *Repo:* ${repoName}\n` +
                   `📂 *Path:* ${selectedFile.path}\n` +
                   `📊 *Size:* ${fileData.content.length} characters\n\n` +
                   `*Preview:*\n\`\`\`\n${contentPreview}\n\`\`\`\n\n` +
@@ -542,10 +637,7 @@ async function handleFileSelected(sock, from, sender, reply, react, session, sel
         });
         
         const sentMsg = await sendButtons(sock, from, {
-            text: `✏️ *Ready to receive new content*\n\n` +
-                  `File: \`${selectedFile.path}\`\n\n` +
-                  `Send the new content (can be multiple messages).\n` +
-                  `When finished, click "Done - Commit Changes".`,
+            text: `✏️ *Editing File*\n\nPath: \`${selectedFile.path}\`\n\nSend the new content (multiple messages allowed).\nClick "Done - Commit Changes" when finished.`,
             footer: 'Commit Tool',
             buttons: buttons,
             aimode: FORCE_AI_MODE
@@ -569,7 +661,7 @@ async function handleCommitDone(sock, from, sender, reply, react, session) {
     const newContent = contentParts.join('');
     
     if (!newContent || newContent.trim().length === 0) {
-        await reply(`❌ No new content received. Please send the new content first.`);
+        await reply(`❌ No content received. Please send the content first.`);
         return;
     }
     
@@ -578,27 +670,44 @@ async function handleCommitDone(sock, from, sender, reply, react, session) {
     
     try {
         const { token, username } = await getGitHubCredentials();
-        const selectedRepo = session.data.selectedRepo;
-        const selectedFile = session.data.selectedFile;
-        const fileSha = session.data.fileSha;
+        const repoName = session.data.repoName;
+        const isNewFile = session.data.isNewFile;
         
-        const commitMessage = `Update ${selectedFile.path}`;
+        let result;
+        let commitMessage;
         
-        const result = await updateFileContent(
-            token, username, selectedRepo.name, selectedFile.path,
-            newContent, fileSha, commitMessage
-        );
-        
-        await sock.sendMessage(from, {
-            text: `✅ *File Updated Successfully!*\n\n` +
-                  `📁 *Repo:* ${selectedRepo.name}\n` +
-                  `📂 *Path:* ${selectedFile.path}\n` +
-                  `📊 *New Size:* ${newContent.length} characters\n` +
-                  `💬 *Commit:* ${commitMessage}\n\n` +
-                  `🔗 *View on GitHub:*\n${result.content?.html_url || `https://github.com/${username}/${selectedRepo.name}/blob/main/${selectedFile.path}`}\n\n` +
-                  `> *Powered by ${config.botName}*`,
-            edit: processingMsg.key
-        });
+        if (isNewFile) {
+            const filePath = session.data.newFilePath;
+            commitMessage = `Create ${filePath}`;
+            result = await createNewFile(token, username, repoName, filePath, newContent, commitMessage);
+            
+            await sock.sendMessage(from, {
+                text: `✅ *File Created Successfully!*\n\n` +
+                      `📁 *Repo:* ${repoName}\n` +
+                      `📂 *Path:* ${filePath}\n` +
+                      `📊 *Size:* ${newContent.length} characters\n` +
+                      `💬 *Commit:* ${commitMessage}\n\n` +
+                      `🔗 *View on GitHub:*\n${result.content?.html_url || `https://github.com/${username}/${repoName}/blob/main/${filePath}`}\n\n` +
+                      `> *Powered by ${config.botName}*`,
+                edit: processingMsg.key
+            });
+        } else {
+            const selectedFile = session.data.selectedFile;
+            const fileSha = session.data.fileSha;
+            commitMessage = `Update ${selectedFile.path}`;
+            result = await updateFileContent(token, username, repoName, selectedFile.path, newContent, fileSha, commitMessage);
+            
+            await sock.sendMessage(from, {
+                text: `✅ *File Updated Successfully!*\n\n` +
+                      `📁 *Repo:* ${repoName}\n` +
+                      `📂 *Path:* ${selectedFile.path}\n` +
+                      `📊 *New Size:* ${newContent.length} characters\n` +
+                      `💬 *Commit:* ${commitMessage}\n\n` +
+                      `🔗 *View on GitHub:*\n${result.content?.html_url || `https://github.com/${username}/${repoName}/blob/main/${selectedFile.path}`}\n\n` +
+                      `> *Powered by ${config.botName}*`,
+                edit: processingMsg.key
+            });
+        }
         
         // Clear session
         sessionManager.clearSession(session.id);
