@@ -61,10 +61,8 @@ module.exports = {
         
         await react('🎨');
         
-        // Send processing message
-        const processingMsg = await reply(`🎨 *Generating AI image...*\n\n` +
-                                         `📝 *Prompt:* ${prompt}\n` +
-                                         `⏳ Please wait...`);
+        // Send processing message (this will stay, not get deleted)
+        await reply(`🎨 *Generating AI image...*\n\n📝 *Prompt:* ${prompt}\n⏳ Please wait...`);
         
         try {
             // Encode prompt for URL
@@ -108,9 +106,6 @@ module.exports = {
             
             await react('✅');
             
-            // Delete processing message
-            await sock.sendMessage(from, { delete: processingMsg.key });
-            
         } catch (error) {
             console.error('[MAGICS] Error:', error.message);
             
@@ -128,10 +123,7 @@ module.exports = {
                 errorMessage += `${error.message}\n\nPlease try again with a different prompt.`;
             }
             
-            await sock.sendMessage(from, {
-                text: errorMessage,
-                edit: processingMsg.key
-            });
+            await reply(errorMessage);
             await react('❌');
         }
     }
