@@ -93,7 +93,7 @@ async function downloadCredentials() {
         const response = await axios.get(`https://www.googleapis.com/drive/v3/files`, {
             headers: { 'Authorization': `Bearer ${token}` },
             params: {
-                q: `'${GMAIL_TOKENS_FOLDER_ID}' in parents and name='cred.json'`,
+                q: `'${GMAIL_TOKENS_FOLDER_ID}' in parents and (name='cred.json' or name='credentials.json')`,
                 fields: 'files(id,name)'
             }
         });
@@ -132,13 +132,20 @@ async function listTokenFiles() {
         const response = await axios.get(`https://www.googleapis.com/drive/v3/files`, {
             headers: { 'Authorization': `Bearer ${token}` },
             params: {
-                q: `'${GMAIL_TOKENS_FOLDER_ID}' in parents and (name contains '.json') and name != 'cred.json' and name != 'gmail_accounts.json'`,
+                q: `'${GMAIL_TOKENS_FOLDER_ID}' in parents and name contains '.json'`,
                 fields: 'files(id,name,mimeType)',
                 pageSize: 100
             }
         });
         
-        return response.data.files || [];
+        const files = response.data.files || [];
+        // Only include files that start with 'token_' and exclude cred.json
+        return files.filter(file => 
+            file.name.startsWith('token_') && 
+            file.name !== 'cred.json' && 
+            file.name !== 'credentials.json' &&
+            file.name !== 'gmail_accounts.json'
+        );
         
     } catch (error) {
         console.error('[GMAIL] Failed to list token files:', error.message);
@@ -396,7 +403,10 @@ function splitLongMessage(text, maxLength = 4000) {
 }
 
 function extractEmailFromFilename(filename) {
-    return filename.replace('.json', '').replace('token_', '').replace(/_/g, '@');
+    // Remove 'token_' prefix and .json suffix, then replace _ with @
+    let email = filename.replace(/^token_/, '').replace('.json', '');
+    email = email.replace(/_/g, '@');
+    return email;
 }
 
 // ==================== MAIN COMMAND ====================
