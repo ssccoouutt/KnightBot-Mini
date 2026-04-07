@@ -119,7 +119,8 @@ async function downloadCookies() {
 
 async function getAvailableQualities(url) {
     return new Promise((resolve, reject) => {
-        const cmd = `yt-dlp --cookies "${cookiesPath}" --no-warnings --dump-json "${url}"`;
+        const cookieArg = (cookiesPath && fs.existsSync(cookiesPath)) ? `--cookies "${cookiesPath}"` : '';
+        const cmd = `yt-dlp ${cookieArg} --no-warnings --dump-json "${url}"`;
         
         exec(cmd, { maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
             if (error) {
@@ -197,11 +198,11 @@ async function getAvailableQualities(url) {
     });
 }
 
-async function downloadMedia(url, qualityInfo, onProgress) {
+async function downloadMedia(url, qualityInfo) {
+    const tempDir = path.join(process.cwd(), 'temp', `dlp_${Date.now()}`);
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+    
     return new Promise((resolve, reject) => {
-        const tempDir = path.join(process.cwd(), 'temp', `dlp_${Date.now()}`);
-        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-        
         let outputTemplate;
         let formatSpec;
         
@@ -213,7 +214,8 @@ async function downloadMedia(url, qualityInfo, onProgress) {
             formatSpec = qualityInfo.formatId;
         }
         
-        let cmd = `yt-dlp --cookies "${cookiesPath}" -f "${formatSpec}" -o "${outputTemplate}" "${url}"`;
+        const cookieArg = (cookiesPath && fs.existsSync(cookiesPath)) ? `--cookies "${cookiesPath}"` : '';
+        let cmd = `yt-dlp ${cookieArg} -f "${formatSpec}" -o "${outputTemplate}" "${url}"`;
         
         if (qualityInfo.name === 'mp3') {
             cmd += ' --extract-audio --audio-format mp3 --audio-quality 0';
@@ -221,38 +223,40 @@ async function downloadMedia(url, qualityInfo, onProgress) {
             cmd += ' --merge-output-format mp4';
         }
         
-        console.log('[DLP] Executing:', cmd);
+        console.log('[DLP] Executing download command...');
         
-        const process = exec(cmd, { maxBuffer: 50 * 1024 * 1024 }, (error, stdout, stderr) => {
+        exec(cmd, { maxBuffer: 50 * 1024 * 1024 }, (error, stdout, stderr) => {
             if (error) {
-                console.error('[DLP] Download error:', error);
+                console.error('[DLP] Download error:', error.message);
+                // Clean up temp dir on error
+                try {
+                    if (fs.existsSync(tempDir)) {
+                        fs.rmSync(tempDir, { recursive: true, force: true });
+                    }
+                } catch (e) {}
                 reject(new Error(`Download failed: ${error.message}`));
                 return;
             }
             
             // Find the downloaded file
-            const files = fs.readdirSync(tempDir);
-            if (files.length === 0) {
-                reject(new Error('No file downloaded'));
-                return;
-            }
-            
-            const downloadedFile = path.join(tempDir, files[0]);
-            const stats = fs.statSync(downloadedFile);
-            
-            resolve({
-                path: downloadedFile,
-                filename: files[0],
-                size: stats.size,
-                tempDir: tempDir
-            });
-        });
-        
-        // Track progress
-        process.stderr.on('data', (data) => {
-            const progressMatch = data.toString().match(/(\d+\.\d+)% of (~?[\d.]+[\w]+)/);
-            if (progressMatch && onProgress) {
-                onProgress(progressMatch[1], progressMatch[2]);
+            try {
+                const files = fs.readdirSync(tempDir);
+                if (files.length === 0) {
+                    reject(new Error('No file downloaded'));
+                    return;
+                }
+                
+                const downloadedFile = path.join(tempDir, files[0]);
+                const stats = fs.statSync(downloadedFile);
+                
+                resolve({
+                    path: downloadedFile,
+                    filename: files[0],
+                    size: stats.size,
+                    tempDir: tempDir
+                });
+            } catch (err) {
+                reject(new Error(`Failed to locate downloaded file: ${err.message}`));
             }
         });
     });
@@ -284,8 +288,8 @@ function formatDuration(seconds) {
 
 module.exports = {
     name: 'dlp',
-    aliases: ['download', 'video', 'ytdlp', 'dl'],
-    description: 'Download videos/audio from any supported website (YouTube, Instagram, Twitter, Facebook, TikTok, etc.)',
+    aliases: [],
+    description: 'Download videos/audio from any supported website',
     usage: '.dlp <url>',
     category: 'media',
     ownerOnly: false,
@@ -298,25 +302,16 @@ module.exports = {
                        `*Usage:*\n` +
                        `• \`${config.prefix}dlp <url>\` - Download from any site\n\n` +
                        `*Supported Sites:*\n` +
-                       `• YouTube (videos, shorts, playlists)\n` +
-                       `• Instagram (reels, posts, stories)\n` +
-                       `• Twitter/X (videos)\n` +
-                       `• Facebook (videos, reels)\n` +
-                       `• TikTok\n` +
-                       `• Reddit\n` +
-                       `• Twitch\n` +
-                       `• Vimeo\n` +
-                       `• Dailymotion\n` +
+                       `• YouTube, Instagram, Twitter, Facebook, TikTok\n` +
+                       `• Reddit, Twitch, Vimeo, Dailymotion\n` +
                        `• And 1000+ more sites\n\n` +
                        `*Examples:*\n` +
                        `• \`${config.prefix}dlp https://youtu.be/xxxxx\`\n` +
-                       `• \`${config.prefix}dlp https://www.instagram.com/reel/xxxxx\`\n` +
-                       `• \`${config.prefix}dlp https://twitter.com/xxx/status/xxxxx\``);
+                       `• \`${config.prefix}dlp https://www.instagram.com/reel/xxxxx\``);
         }
         
         const url = args[0];
         
-        // Validate URL
         if (!url.startsWith('http://') && !url.startsWith('https://')) {
             return reply(`❌ Please provide a valid URL starting with http:// or https://`);
         }
@@ -325,24 +320,21 @@ module.exports = {
         const processingMsg = await reply(`🔍 *Analyzing URL...*\n\n${url}\n\nPlease wait...`);
         
         try {
-            // Download cookies if not exists
             if (!cookiesPath || !fs.existsSync(cookiesPath)) {
                 await downloadCookies();
             }
             
-            // Get available qualities
             const videoInfo = await getAvailableQualities(url);
             
             if (!videoInfo.qualities || videoInfo.qualities.length === 0) {
                 await sock.sendMessage(from, {
-                    text: `❌ No downloadable formats found for this URL.\n\nMake sure the video is accessible.`,
+                    text: `❌ No downloadable formats found for this URL.`,
                     edit: processingMsg.key
                 });
                 await react('❌');
                 return;
             }
             
-            // Create session
             const session = sessionManager.createSession(sender, from, 'dlp', {
                 url: url,
                 videoInfo: videoInfo,
@@ -351,22 +343,17 @@ module.exports = {
             
             const sessionId = session.id.split(':').pop();
             
-            // Show thumbnail if available
             if (videoInfo.thumbnail) {
                 try {
                     await sock.sendMessage(from, {
                         image: { url: videoInfo.thumbnail },
                         caption: `🎬 *${videoInfo.title || 'Video'}*\n\n` +
                                  `⏱️ Duration: ${formatDuration(videoInfo.duration)}\n` +
-                                 `👤 Uploader: ${videoInfo.uploader || 'Unknown'}\n\n` +
-                                 `📥 Select quality below:`
+                                 `👤 Uploader: ${videoInfo.uploader || 'Unknown'}`
                     }, { quoted: msg });
-                } catch (thumbErr) {
-                    // Continue without thumbnail
-                }
+                } catch (thumbErr) {}
             }
             
-            // Build quality buttons
             const buttons = [];
             for (let i = 0; i < videoInfo.qualities.length; i++) {
                 const q = videoInfo.qualities[i];
@@ -375,7 +362,7 @@ module.exports = {
                     buttonText += ` (${formatFileSize(q.filesize)})`;
                 }
                 buttons.push({
-                    id: `dlp_quality_${sessionId}_${i}`,
+                    id: `dlp_qual_${sessionId}_${i}`,
                     text: buttonText.length > 30 ? buttonText.substring(0, 27) + '...' : buttonText
                 });
             }
@@ -405,7 +392,7 @@ module.exports = {
         } catch (error) {
             console.error('[DLP] Error:', error);
             await sock.sendMessage(from, {
-                text: `❌ *Failed to process URL*\n\nError: ${error.message}\n\nPossible reasons:\n• URL is invalid\n• Video is private/age-restricted\n• Site may be blocked\n• Try using cookies file`,
+                text: `❌ *Failed to process URL*\n\nError: ${error.message}`,
                 edit: processingMsg.key
             });
             await react('❌');
@@ -448,7 +435,7 @@ module.exports = {
                 return true;
             }
             
-            if (buttonId && buttonId.startsWith('dlp_quality_')) {
+            if (buttonId && buttonId.startsWith('dlp_qual_')) {
                 const parts = buttonId.split('_');
                 const index = parseInt(parts[3]);
                 const qualities = session.data.videoInfo.qualities;
@@ -456,7 +443,6 @@ module.exports = {
                 if (!isNaN(index) && index >= 0 && index < qualities.length) {
                     const selectedQuality = qualities[index];
                     
-                    // Update session
                     sessionManager.updateSession(sender, from, {
                         step: 'downloading',
                         selectedQuality: selectedQuality
@@ -466,15 +452,7 @@ module.exports = {
                     const processingMsg = await reply(`📥 *Downloading ${selectedQuality.name}...*\n\nPlease wait, this may take a few moments...`);
                     
                     try {
-                        let lastProgress = '';
-                        const result = await downloadMedia(session.data.url, selectedQuality, (percent, size) => {
-                            const progressMsg = `📥 Downloading: ${percent}% of ${size}`;
-                            if (progressMsg !== lastProgress) {
-                                lastProgress = progressMsg;
-                                // Optional: update progress (can be spammy, so commented)
-                                // sock.sendMessage(from, { text: progressMsg, edit: processingMsg.key }).catch(() => {});
-                            }
-                        });
+                        const result = await downloadMedia(session.data.url, selectedQuality);
                         
                         const fileSize = formatFileSize(result.size);
                         const caption = `✅ *Download Complete!*\n\n` +
@@ -483,7 +461,6 @@ module.exports = {
                                       `📊 *Size:* ${fileSize}\n\n` +
                                       `> *Downloaded by ${config.botName}*`;
                         
-                        // Send the file
                         const isVideo = selectedQuality.name !== 'mp3';
                         const mimetype = isVideo ? 'video/mp4' : 'audio/mpeg';
                         
@@ -495,11 +472,13 @@ module.exports = {
                         }, { quoted: msg });
                         
                         // Clean up temp files
-                        fs.unlinkSync(result.path);
-                        fs.rmdirSync(result.tempDir);
+                        try {
+                            fs.unlinkSync(result.path);
+                            fs.rmdirSync(result.tempDir);
+                        } catch (cleanErr) {}
                         
                         await sock.sendMessage(from, {
-                            text: `✅ *Download Complete!*\n\nFile saved successfully.`,
+                            text: `✅ *Download Complete!*`,
                             edit: processingMsg.key
                         });
                         
@@ -522,30 +501,3 @@ module.exports = {
         return true;
     }
 };
-
-// Clean up cookies on exit
-process.on('exit', () => {
-    if (cookiesPath && fs.existsSync(cookiesPath)) {
-        try {
-            fs.unlinkSync(cookiesPath);
-        } catch (e) {}
-    }
-});
-
-process.on('SIGINT', () => {
-    if (cookiesPath && fs.existsSync(cookiesPath)) {
-        try {
-            fs.unlinkSync(cookiesPath);
-        } catch (e) {}
-    }
-    process.exit();
-});
-
-process.on('SIGTERM', () => {
-    if (cookiesPath && fs.existsSync(cookiesPath)) {
-        try {
-            fs.unlinkSync(cookiesPath);
-        } catch (e) {}
-    }
-    process.exit();
-});
