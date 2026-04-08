@@ -108,8 +108,8 @@ module.exports = {
             const response = await axios({
                 method: 'GET',
                 url: apiUrl,
-                timeout: 120000, // 120 second timeout for logo generation
-                maxContentLength: 50 * 1024 * 1024 // 50MB max for response
+                timeout: 120000,
+                maxContentLength: 50 * 1024 * 1024
             });
             
             // Check if response is successful
@@ -132,14 +132,14 @@ module.exports = {
                 edit: processingMsg.key
             });
             
-            // Download and send each image
-            let successCount = 0;
+            // Download all images
             const tempDir = path.join(process.cwd(), 'temp');
             if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
             
+            const downloadedImages = [];
+            
             for (let i = 0; i < images.length; i++) {
                 const imageUrl = images[i];
-                const imageNumber = i + 1;
                 
                 try {
                     // Download image
@@ -152,54 +152,60 @@ module.exports = {
                     });
                     
                     // Save to temp file
-                    const imagePath = path.join(tempDir, `logo_${Date.now()}_${sender.replace(/[^a-zA-Z0-9]/g, '_')}_${i}.png`);
+                    const imagePath = path.join(tempDir, `logo_${Date.now()}_${sender.replace(/[^a-zA-Z0-9]/g, '_')}_${i}.jpg`);
                     fs.writeFileSync(imagePath, imageResponse.data);
                     
-                    // Get file size
-                    const stats = fs.statSync(imagePath);
-                    const fileSizeKB = (stats.size / 1024).toFixed(1);
-                    
-                    // Prepare caption for first image only (to avoid spam)
-                    const caption = i === 0 ? 
-                        `🎨 *AI Generated Logos*\n\n` +
-                        `📝 *Prompt:* ${prompt}\n` +
-                        `🎯 *Generated:* ${images.length} variations\n` +
-                        `📊 *Quality:* HD\n\n` +
-                        `> *Powered by ${config.botName} AI*` : 
-                        undefined;
-                    
-                    // Send image
-                    await sock.sendMessage(from, {
-                        image: fs.readFileSync(imagePath),
-                        caption: caption,
-                        mimetype: 'image/jpeg'
-                    }, { quoted: i === 0 ? msg : null });
-                    
-                    // Clean up temp file
-                    fs.unlinkSync(imagePath);
-                    successCount++;
-                    
-                    // Small delay between sends to avoid rate limiting
-                    if (i < images.length - 1) {
-                        await new Promise(resolve => setTimeout(resolve, 1000));
-                    }
+                    downloadedImages.push({
+                        path: imagePath,
+                        data: imageResponse.data
+                    });
                     
                 } catch (downloadError) {
-                    console.error(`[LOGO] Failed to download image ${imageNumber}:`, downloadError.message);
-                    await reply(`⚠️ Failed to download logo variation ${imageNumber}.`);
+                    console.error(`[LOGO] Failed to download image ${i + 1}:`, downloadError.message);
+                }
+            }
+            
+            if (downloadedImages.length === 0) {
+                throw new Error('Failed to download any logos. Please try again.');
+            }
+            
+            // Send caption as separate message first
+            const caption = `🎨 *AI Generated Logos*\n\n` +
+                           `📝 *Prompt:* ${prompt}\n` +
+                           `🎯 *Generated:* ${downloadedImages.length}/${images.length} logos\n` +
+                           `📊 *Quality:* HD\n\n` +
+                           `> *Powered by ${config.botName} AI*`;
+            
+            await sock.sendMessage(from, { text: caption }, { quoted: msg });
+            
+            // Send all images in a single message (as an array)
+            const imageMessages = downloadedImages.map(img => ({
+                image: img.data,
+                mimetype: 'image/jpeg'
+            }));
+            
+            // Send as album (multiple images in one message)
+            await sock.sendMessage(from, { 
+                images: imageMessages,
+                caption: '' // No caption since we already sent it separately
+            });
+            
+            // Clean up temp files
+            for (const img of downloadedImages) {
+                if (fs.existsSync(img.path)) {
+                    fs.unlinkSync(img.path);
                 }
             }
             
             // Save to history
-            saveToHistory(sender, prompt, images.length);
+            saveToHistory(sender, prompt, downloadedImages.length);
             
             // Update processing message to show completion
             await sock.sendMessage(from, {
                 text: `✅ *Logo Generation Complete!*\n\n` +
                       `📝 *Prompt:* ${prompt}\n` +
-                      `🎨 *Generated:* ${successCount}/${images.length} logos\n\n` +
-                      `💡 Use \`.logo --history\` to see your past generations\n` +
-                      `> *Powered by ${config.botName}*`,
+                      `🎨 *Generated:* ${downloadedImages.length} logos\n\n` +
+                      `💡 Use \`.logo --history\` to see your past generations`,
                 edit: processingMsg.key
             });
             
@@ -225,10 +231,6 @@ module.exports = {
                 errorMessage += `🔧 Server error.\n` +
                                `• The API server is having issues\n` +
                                `• Please try again later`;
-            } else if (error.message.includes('timeout')) {
-                errorMessage += `⏰ Request timed out.\n` +
-                               `• Logo generation can take up to 60 seconds\n` +
-                               `• Try a shorter prompt`;
             } else {
                 errorMessage += `${error.message}\n\n` +
                                `💡 *Tips for better results:*\n` +
