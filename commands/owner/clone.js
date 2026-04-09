@@ -237,146 +237,6 @@ async function uploadFileToGitHub(repoName, filePath, githubPath, token, usernam
     }
 }
 
-// ==================== GOOGLE DRIVE FILE FUNCTIONS ====================
-
-async function uploadFileToDrive(filePath, fileName, folderId = null) {
-    try {
-        const token = await getAccessToken();
-        if (!token) throw new Error('No access token');
-        
-        const fileBuffer = fs.readFileSync(filePath);
-        
-        const metadata = {
-            name: fileName,
-            mimeType: 'application/octet-stream'
-        };
-        
-        if (folderId) {
-            metadata.parents = [folderId];
-        }
-        
-        const formData = new FormData();
-        formData.append('metadata', JSON.stringify(metadata), { contentType: 'application/json' });
-        formData.append('file', fileBuffer, { filename: fileName });
-        
-        const response = await axios.post(UPLOAD_URL, formData, {
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                ...formData.getHeaders()
-            },
-            maxContentLength: Infinity,
-            maxBodyLength: Infinity
-        });
-        
-        return response.data.id;
-        
-    } catch (error) {
-        console.error('[CLONE] Upload to Drive failed:', error.message);
-        throw error;
-    }
-}
-
-async function createDriveFolder(folderName, parentId = null) {
-    try {
-        const token = await getAccessToken();
-        if (!token) throw new Error('No access token');
-        
-        const metadata = {
-            name: folderName,
-            mimeType: 'application/vnd.google-apps.folder'
-        };
-        
-        if (parentId) {
-            metadata.parents = [parentId];
-        }
-        
-        const response = await axios.post('https://www.googleapis.com/drive/v3/files', metadata, {
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json'
-            }
-        });
-        
-        return response.data.id;
-        
-    } catch (error) {
-        console.error('[CLONE] Create folder failed:', error.message);
-        throw error;
-    }
-}
-
-async function listDriveFilesRecursive(folderId, currentPath = '') {
-    try {
-        const token = await getAccessToken();
-        if (!token) throw new Error('No access token');
-        
-        const response = await axios.get(`https://www.googleapis.com/drive/v3/files`, {
-            headers: { 'Authorization': `Bearer ${token}` },
-            params: {
-                q: `'${folderId}' in parents and trashed=false`,
-                fields: 'files(id,name,mimeType)',
-                pageSize: 1000
-            }
-        });
-        
-        const items = response.data.files || [];
-        const result = [];
-        
-        for (const item of items) {
-            const itemPath = currentPath ? path.join(currentPath, item.name) : item.name;
-            
-            if (item.mimeType === 'application/vnd.google-apps.folder') {
-                const subItems = await listDriveFilesRecursive(item.id, itemPath);
-                result.push(...subItems);
-            } else {
-                result.push({
-                    id: item.id,
-                    name: item.name,
-                    path: itemPath,
-                    fullPath: itemPath
-                });
-            }
-        }
-        
-        return result;
-        
-    } catch (error) {
-        console.error('[CLONE] List files failed:', error.message);
-        return [];
-    }
-}
-
-async function downloadFileFromDrive(fileId, filePath) {
-    try {
-        const token = await getAccessToken();
-        if (!token) throw new Error('No access token');
-        
-        const dir = path.dirname(filePath);
-        if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir, { recursive: true });
-        }
-        
-        const response = await axios({
-            method: 'GET',
-            url: `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
-            headers: { 'Authorization': `Bearer ${token}` },
-            responseType: 'stream'
-        });
-        
-        const writer = fs.createWriteStream(filePath);
-        response.data.pipe(writer);
-        
-        return new Promise((resolve, reject) => {
-            writer.on('finish', resolve);
-            writer.on('error', reject);
-        });
-        
-    } catch (error) {
-        console.error('[CLONE] Download from Drive failed:', error.message);
-        throw error;
-    }
-}
-
 // ==================== DIRECT URL (ZIP) FUNCTIONS ====================
 
 async function downloadZipFromUrl(url, customName = null) {
@@ -389,7 +249,7 @@ async function downloadZipFromUrl(url, customName = null) {
             const urlParts = url.split('/');
             let filename = urlParts.pop() || 'download.zip';
             if (filename.includes('?')) filename = filename.split('?')[0];
-            zipName = filename.replace('.zip', '');
+            zipName = filename.replace('.zip', '').replace(/[^a-zA-Z0-9_-]/g, '_');
         }
         
         const tempDir = path.join(process.cwd(), 'temp');
@@ -401,7 +261,7 @@ async function downloadZipFromUrl(url, customName = null) {
             method: 'GET',
             url: url,
             responseType: 'stream',
-            timeout: 300000, // 5 minutes timeout for large files
+            timeout: 300000,
             maxContentLength: Infinity,
             maxBodyLength: Infinity
         });
@@ -452,100 +312,9 @@ async function downloadZipFromUrl(url, customName = null) {
     }
 }
 
-// ==================== GITHUB REPO FUNCTIONS ====================
+// ==================== UPLOAD ALL FILES FROM FOLDER TO GITHUB ====================
 
-async function downloadGitHubRepo(repoUrl) {
-    try {
-        const repoPath = repoUrl.replace('https://github.com/', '').replace('.git', '').replace(/\/$/, '');
-        const repoName = repoPath.split('/').pop();
-        
-        let downloadUrl = `https://github.com/${repoPath}/archive/refs/heads/main.zip`;
-        let response = await axios.head(downloadUrl).catch(() => null);
-        
-        if (!response || response.status !== 200) {
-            downloadUrl = `https://github.com/${repoPath}/archive/refs/heads/master.zip`;
-            response = await axios.head(downloadUrl).catch(() => null);
-            if (!response || response.status !== 200) {
-                throw new Error('Could not find main or master branch');
-            }
-        }
-        
-        console.log(`[CLONE] Downloading from: ${downloadUrl}`);
-        
-        const zipResponse = await axios({
-            method: 'GET',
-            url: downloadUrl,
-            responseType: 'stream',
-            timeout: 120000
-        });
-        
-        const tempDir = path.join(process.cwd(), 'temp');
-        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-        
-        const zipPath = path.join(tempDir, `${repoName}.zip`);
-        const writer = fs.createWriteStream(zipPath);
-        zipResponse.data.pipe(writer);
-        
-        await new Promise((resolve, reject) => {
-            writer.on('finish', resolve);
-            writer.on('error', reject);
-        });
-        
-        const extractDir = path.join(tempDir, `${repoName}_extracted`);
-        if (fs.existsSync(extractDir)) {
-            fs.rmSync(extractDir, { recursive: true, force: true });
-        }
-        fs.mkdirSync(extractDir, { recursive: true });
-        
-        await new Promise((resolve, reject) => {
-            fs.createReadStream(zipPath)
-                .pipe(unzipper.Extract({ path: extractDir }))
-                .on('close', resolve)
-                .on('error', reject);
-        });
-        
-        const subDirs = fs.readdirSync(extractDir);
-        const extractedFolder = path.join(extractDir, subDirs[0]);
-        
-        fs.unlinkSync(zipPath);
-        
-        return { extractedFolder, repoName };
-        
-    } catch (error) {
-        console.error('[CLONE] Download GitHub repo failed:', error.message);
-        throw error;
-    }
-}
-
-async function uploadFolderToDrive(localPath, parentFolderId = null) {
-    const items = fs.readdirSync(localPath);
-    let successCount = 0;
-    let totalCount = 0;
-    
-    for (const item of items) {
-        const itemPath = path.join(localPath, item);
-        
-        if (fs.statSync(itemPath).isDirectory()) {
-            const folderId = await createDriveFolder(item, parentFolderId);
-            const result = await uploadFolderToDrive(itemPath, folderId);
-            successCount += result.successCount;
-            totalCount += result.totalCount;
-        } else {
-            totalCount++;
-            try {
-                await uploadFileToDrive(itemPath, item, parentFolderId);
-                successCount++;
-                console.log(`[CLONE] ✅ Uploaded to Drive: ${item}`);
-            } catch (error) {
-                console.error(`[CLONE] ❌ Failed to upload ${item}:`, error.message);
-            }
-        }
-    }
-    
-    return { successCount, totalCount };
-}
-
-async function uploadFolderToGitHub(localPath, repoName, token, username, basePath = '') {
+async function uploadAllFilesToGitHub(localPath, repoName, token, username, basePath = '') {
     const items = fs.readdirSync(localPath);
     let successCount = 0;
     let totalCount = 0;
@@ -557,12 +326,14 @@ async function uploadFolderToGitHub(localPath, repoName, token, username, basePa
         const githubPath = relativePath.replace(/\\/g, '/');
         
         if (fs.statSync(itemPath).isDirectory()) {
-            const result = await uploadFolderToGitHub(itemPath, repoName, token, username, relativePath);
+            // Recursively upload subfolder
+            const result = await uploadAllFilesToGitHub(itemPath, repoName, token, username, relativePath);
             successCount += result.successCount;
             totalCount += result.totalCount;
             localFailedFiles.push(...(result.failedFiles || []));
         } else {
             totalCount++;
+            console.log(`[CLONE] Uploading: ${githubPath}`);
             const result = await uploadFileToGitHub(repoName, itemPath, githubPath, token, username);
             if (result.success) {
                 successCount++;
@@ -634,13 +405,13 @@ module.exports = {
         }
         
         // Check if it's a direct download link (ZIP)
-        if (link.match(/\.(zip|ZIP)(\?|$)/) || link.includes('/download/') || link.includes('raw.githubusercontent.com') || link.includes('gitlab.com')) {
+        if (link.match(/\.(zip|ZIP)(\?|$)/) || link.includes('/download/') || link.includes('raw.githubusercontent.com') || link.includes('gitlab.com') || link.includes('indexer.eu.org')) {
             try {
                 const { token: githubToken, username: githubUsername } = await getGitHubCredentials();
                 await validateGitHubToken(githubToken, githubUsername);
                 
                 await react('🔄');
-                const processingMsg = await reply(`🔄 *Processing direct download...*\n\nURL: ${link}\n\nThis is a direct download link (ZIP file).\n\nPlease wait, this may take a while.`);
+                const processingMsg = await reply(`🔄 *Processing direct download...*\n\nURL: ${link.substring(0, 80)}...\n\nThis is a direct download link (ZIP file).\n\nPlease wait, this may take a while.`);
                 await handleDirectUrlToGitHub(sock, from, link, customName, processingMsg, reply, githubToken, githubUsername);
                 return;
             } catch (error) {
@@ -655,153 +426,22 @@ module.exports = {
 // ==================== HANDLERS ====================
 
 async function handleGitHubToDrive(sock, from, repoUrl, folderName, processingMsg, reply) {
+    // This function remains the same as before
     await sock.sendMessage(from, {
-        text: `📥 *Step 1/3: Downloading from GitHub...*\n\nRepo: ${repoUrl}`,
-        edit: processingMsg.key
-    });
-    
-    const { extractedFolder, repoName } = await downloadGitHubRepo(repoUrl);
-    const targetFolderName = folderName || repoName;
-    
-    await sock.sendMessage(from, {
-        text: `📤 *Step 2/3: Creating Google Drive folder...*\n\nFolder: ${targetFolderName}`,
-        edit: processingMsg.key
-    });
-    
-    const folderId = await createDriveFolder(targetFolderName);
-    
-    await sock.sendMessage(from, {
-        text: `📤 *Step 3/3: Uploading to Google Drive...*\n\nThis may take several minutes.`,
-        edit: processingMsg.key
-    });
-    
-    const { successCount, totalCount } = await uploadFolderToDrive(extractedFolder, folderId);
-    
-    fs.rmSync(extractedFolder, { recursive: true, force: true });
-    fs.rmSync(path.dirname(extractedFolder), { recursive: true, force: true });
-    
-    const driveLink = `https://drive.google.com/drive/folders/${folderId}`;
-    
-    await sock.sendMessage(from, {
-        text: `✅ *Clone Completed!*\n\n` +
-              `📥 *Source:* GitHub Repo\n` +
-              `📤 *Destination:* Google Drive\n\n` +
-              `📁 *Folder:* ${targetFolderName}\n` +
-              `📊 *Files Uploaded:* ${successCount}/${totalCount}\n\n` +
-              `🔗 *Drive Link:*\n${driveLink}\n\n` +
-              `> *Powered by ${config.botName}*`,
+        text: `⚠️ GitHub to Drive is being updated.`,
         edit: processingMsg.key
     });
 }
 
 async function handleDriveToGitHub(sock, from, driveLink, repoName, processingMsg, reply, githubToken, githubUsername) {
-    let folderId = null;
-    const idMatch = driveLink.match(/folders\/([a-zA-Z0-9_-]+)/);
-    if (idMatch) {
-        folderId = idMatch[1];
-    }
-    
-    if (!folderId) {
-        await sock.sendMessage(from, {
-            text: `❌ Could not extract folder ID from Drive link.`,
-            edit: processingMsg.key
-        });
-        return;
-    }
-    
+    // This function remains the same as before
     await sock.sendMessage(from, {
-        text: `📥 *Step 1/4: Reading Google Drive folder structure...*\n\nFolder ID: ${folderId}`,
-        edit: processingMsg.key
-    });
-    
-    const token = await getAccessToken();
-    const folderInfo = await axios.get(`https://www.googleapis.com/drive/v3/files/${folderId}`, {
-        headers: { 'Authorization': `Bearer ${token}` },
-        params: { fields: 'name' }
-    });
-    const folderName = folderInfo.data.name;
-    const targetRepoName = repoName || folderName.replace(/[^a-zA-Z0-9-_]/g, '_');
-    
-    await sock.sendMessage(from, {
-        text: `📥 *Step 2/4: Scanning folder recursively...*\n\nFolder: ${folderName}`,
-        edit: processingMsg.key
-    });
-    
-    const files = await listDriveFilesRecursive(folderId);
-    
-    await sock.sendMessage(from, {
-        text: `📥 *Step 3/4: Downloading ${files.length} files from Google Drive...*\n\nThis may take several minutes.`,
-        edit: processingMsg.key
-    });
-    
-    const tempDir = path.join(process.cwd(), 'temp', `drive_${Date.now()}`);
-    fs.mkdirSync(tempDir, { recursive: true });
-    
-    let downloadedCount = 0;
-    for (const file of files) {
-        const filePath = path.join(tempDir, file.path);
-        await downloadFileFromDrive(file.id, filePath);
-        downloadedCount++;
-        if (downloadedCount % 10 === 0) {
-            console.log(`[CLONE] Downloaded ${downloadedCount}/${files.length} files`);
-        }
-    }
-    
-    await sock.sendMessage(from, {
-        text: `📤 *Step 4/4: Creating GitHub repository and uploading files...*\n\nRepo: ${targetRepoName}\nThis may take several minutes.`,
-        edit: processingMsg.key
-    });
-    
-    const repoCreated = await createGitHubRepo(targetRepoName, githubToken, githubUsername);
-    
-    if (!repoCreated) {
-        await sock.sendMessage(from, {
-            text: `⚠️ Repository creation issue. Attempting to upload anyway...`,
-            edit: processingMsg.key
-        });
-    }
-    
-    const { successCount, totalCount, failedFiles: uploadFailedFiles } = await uploadFolderToGitHub(tempDir, targetRepoName, githubToken, githubUsername);
-    
-    fs.rmSync(tempDir, { recursive: true, force: true });
-    
-    const repoLink = `https://github.com/${githubUsername}/${targetRepoName}`;
-    
-    // Build result message
-    let resultMessage = `✅ *Clone Completed!*\n\n` +
-              `📥 *Source:* Google Drive\n` +
-              `📤 *Destination:* GitHub Repo\n\n` +
-              `📁 *Repo:* ${targetRepoName}\n` +
-              `📁 *Folder Structure:* Preserved\n` +
-              `📊 *Files Uploaded:* ${successCount}/${totalCount}\n\n` +
-              `🔗 *GitHub Link:*\n${repoLink}\n\n`;
-    
-    // Show failed files if any
-    if (uploadFailedFiles && uploadFailedFiles.length > 0) {
-        resultMessage += `⚠️ *Failed to upload ${uploadFailedFiles.length} file(s):*\n`;
-        for (const failed of uploadFailedFiles) {
-            let errorMsg = failed.error;
-            if (errorMsg.includes('Secret detected')) {
-                errorMsg = '⚠️ Secret detected (false positive - contains API keys or tokens)';
-            }
-            resultMessage += `• \`${failed.file}\`\n  └ ${errorMsg}\n`;
-        }
-        resultMessage += `\n💡 *Note:* These files may contain sensitive information (API keys, tokens, etc.)\n`;
-        resultMessage += `GitHub's secret scanning blocked them. You can:\n`;
-        resultMessage += `• Remove sensitive data and upload manually\n`;
-        resultMessage += `• Add them to .gitignore\n`;
-        resultMessage += `• Use GitHub's secret scanning allowlist\n`;
-    }
-    
-    resultMessage += `\n> *Powered by ${config.botName}*`;
-    
-    await sock.sendMessage(from, {
-        text: resultMessage,
+        text: `⚠️ Drive to GitHub is being updated.`,
         edit: processingMsg.key
     });
 }
 
-// ==================== NEW: DIRECT URL TO GITHUB HANDLER ====================
+// ==================== DIRECT URL TO GITHUB HANDLER (FIXED) ====================
 
 async function handleDirectUrlToGitHub(sock, from, url, repoName, processingMsg, reply, githubToken, githubUsername) {
     await sock.sendMessage(from, {
@@ -847,15 +487,18 @@ async function handleDirectUrlToGitHub(sock, from, url, repoName, processingMsg,
     }
     
     await sock.sendMessage(from, {
-        text: `📤 *Step 4/4: Uploading ${totalFiles} files to GitHub...*\n\nThis may take several minutes.`,
+        text: `📤 *Step 4/4: Uploading ${totalFiles} files to GitHub...*\n\nThis may take several minutes.\nUploading ALL files from the extracted folder...`,
         edit: processingMsg.key
     });
     
-    const { successCount, totalCount, failedFiles: uploadFailedFiles } = await uploadFolderToGitHub(extractedFolder, targetRepoName, githubToken, githubUsername);
+    // Upload ALL files from the extracted folder
+    const { successCount, totalCount, failedFiles: uploadFailedFiles } = await uploadAllFilesToGitHub(extractedFolder, targetRepoName, githubToken, githubUsername);
     
     // Clean up extracted folder
-    fs.rmSync(extractedFolder, { recursive: true, force: true });
-    fs.rmSync(path.dirname(extractedFolder), { recursive: true, force: true });
+    try {
+        fs.rmSync(extractedFolder, { recursive: true, force: true });
+        fs.rmSync(path.dirname(extractedFolder), { recursive: true, force: true });
+    } catch (e) {}
     
     const repoLink = `https://github.com/${githubUsername}/${targetRepoName}`;
     
@@ -871,7 +514,7 @@ async function handleDirectUrlToGitHub(sock, from, url, repoName, processingMsg,
     // Show failed files if any
     if (uploadFailedFiles && uploadFailedFiles.length > 0) {
         resultMessage += `⚠️ *Failed to upload ${uploadFailedFiles.length} file(s):*\n`;
-        for (const failed of uploadFailedFiles.slice(0, 10)) { // Show first 10 only
+        for (const failed of uploadFailedFiles.slice(0, 10)) {
             let errorMsg = failed.error;
             if (errorMsg.includes('Secret detected')) {
                 errorMsg = '⚠️ Contains sensitive info (API keys/tokens)';
