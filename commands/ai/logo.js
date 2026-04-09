@@ -168,16 +168,7 @@ module.exports = {
                 throw new Error('Failed to download any logos. Please try again.');
             }
             
-            // Send caption as separate message first
-            const caption = `🎨 *AI Generated Logos*\n\n` +
-                           `📝 *Prompt:* ${prompt}\n` +
-                           `🎯 *Generated:* ${downloadedImages.length}/${images.length} logos\n` +
-                           `📊 *Quality:* HD\n\n` +
-                           `> *Powered by ${config.botName} AI*`;
-            
-            await sock.sendMessage(from, { text: caption }, { quoted: msg });
-            
-            // Send each image individually (without captions to avoid spam)
+            // Send each image individually first (without captions)
             for (let i = 0; i < downloadedImages.length; i++) {
                 const img = downloadedImages[i];
                 
@@ -192,6 +183,15 @@ module.exports = {
                     await new Promise(resolve => setTimeout(resolve, 500));
                 }
             }
+            
+            // Send caption as separate message AFTER all images
+            const caption = `🎨 *AI Generated Logos*\n\n` +
+                           `📝 *Prompt:* ${prompt}\n` +
+                           `🎯 *Generated:* ${downloadedImages.length}/${images.length} logos\n` +
+                           `📊 *Quality:* HD\n\n` +
+                           `> *Powered by ${config.botName} AI*`;
+            
+            await sock.sendMessage(from, { text: caption });
             
             // Clean up temp files
             for (const img of downloadedImages) {
