@@ -118,7 +118,6 @@ module.exports = {
             }
             
             const images = response.data.images;
-            const generatedPrompt = response.data.prompt;
             
             if (!images || images.length === 0) {
                 throw new Error('No images were generated. Please try a different prompt.');
@@ -178,17 +177,21 @@ module.exports = {
             
             await sock.sendMessage(from, { text: caption }, { quoted: msg });
             
-            // Send all images in a single message (as an array)
-            const imageMessages = downloadedImages.map(img => ({
-                image: img.data,
-                mimetype: 'image/jpeg'
-            }));
-            
-            // Send as album (multiple images in one message)
-            await sock.sendMessage(from, { 
-                images: imageMessages,
-                caption: '' // No caption since we already sent it separately
-            });
+            // Send each image individually (without captions to avoid spam)
+            for (let i = 0; i < downloadedImages.length; i++) {
+                const img = downloadedImages[i];
+                
+                await sock.sendMessage(from, {
+                    image: img.data,
+                    mimetype: 'image/jpeg',
+                    caption: '' // Empty caption for individual images
+                });
+                
+                // Small delay between sends to avoid rate limiting
+                if (i < downloadedImages.length - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+            }
             
             // Clean up temp files
             for (const img of downloadedImages) {
