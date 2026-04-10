@@ -13,8 +13,6 @@ const config = require('../../config');
 // Constants
 const BASE = "https://api.mail.tm";
 const MEGA_REG_URL = "https://mega.nz/register";
-const MAX_RETRIES = 3;
-const RETRY_DELAY = 10000; // 10 seconds
 
 // Store active sessions
 const activeSessions = new Map();
@@ -157,8 +155,44 @@ async function takeScreenshot(driver) {
     }
 }
 
-// Perform complete MEGA registration (including confirmation) using Selenium WebDriver
-async function performMegaRegistration(email, password, confirmationLink, updateStatus) {
+// Wait for confirmation email (like original Python script)
+async function waitForConfirmationEmail(tempMail, maxWaitSeconds = 120) {
+    const startTime = Date.now();
+    let lastMessageCount = 0;
+    
+    while ((Date.now() - startTime) / 1000 < maxWaitSeconds) {
+        try {
+            const messages = await tempMail.fetchMessages();
+            
+            if (messages && messages.length > 0) {
+                // Check all messages (not just the first one)
+                for (const msg of messages) {
+                    const msgContent = await tempMail.getMessageContent(msg.id);
+                    if (msgContent) {
+                        const emailText = String(msgContent.text || '') + String(msgContent.html || '');
+                        const link = extractConfirmationLink(emailText);
+                        if (link) {
+                            console.log('[MEGA] Confirmation link found!');
+                            return link;
+                        }
+                    }
+                }
+            }
+            
+            // Wait 3 seconds before checking again (like original)
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            
+        } catch (error) {
+            console.error('[MEGA] Error checking email:', error.message);
+            await new Promise(resolve => setTimeout(resolve, 3000));
+        }
+    }
+    
+    return null;
+}
+
+// Perform complete MEGA registration
+async function performMegaRegistration(email, password, updateStatus) {
     let driver = null;
     
     try {
@@ -180,7 +214,7 @@ async function performMegaRegistration(email, password, confirmationLink, update
         
         // Navigate to registration page
         await driver.get(MEGA_REG_URL);
-        await driver.sleep(5000);
+        await driver.sleep(3000);
         
         await updateStatus('✅ Processing registration form...');
         
@@ -189,7 +223,7 @@ async function performMegaRegistration(email, password, confirmationLink, update
         for (const [x, y] of clickPositions) {
             try {
                 await driver.executeScript(`window.scrollTo(0, ${y - 200});`);
-                await driver.sleep(500);
+                await driver.sleep(300);
                 
                 const element = await driver.executeScript(`
                     return document.elementFromPoint(arguments[0], arguments[1]);
@@ -201,9 +235,9 @@ async function performMegaRegistration(email, password, confirmationLink, update
                         arguments[2].dispatchEvent(event);
                     `, x, y, element);
                 }
-                await driver.sleep(1000);
+                await driver.sleep(500);
             } catch (error) {
-                console.error('[MEGA] Checkbox click error:', error.message);
+                // Silently continue
             }
         }
         
@@ -256,38 +290,21 @@ async function performMegaRegistration(email, password, confirmationLink, update
                 10000
             );
             await driver.executeScript("arguments[0].scrollIntoView(true);", registerButton);
-            await driver.sleep(1000);
+            await driver.sleep(500);
             await driver.executeScript("arguments[0].click();", registerButton);
         } catch (error) {
             // Fallback to coordinate click
             await driver.executeScript("var el = document.elementFromPoint(786, 224); if(el) el.click();");
         }
         
-        await driver.sleep(10000);
+        await driver.sleep(3000);
         
-        // Take screenshot after registration
-        const screenshot = await takeScreenshot(driver);
-        
-        // If confirmation link is available, open it in the SAME driver
-        if (confirmationLink) {
-            await updateStatus(`✅ Confirmation email received!\n🔗 Opening verification link...`);
-            await driver.get(confirmationLink);
-            await driver.sleep(5000);
-            
-            // Take final screenshot after confirmation
-            const finalScreenshot = await takeScreenshot(driver);
-            return { screenshot: finalScreenshot || screenshot, success: true };
-        }
-        
-        return { screenshot, success: true };
+        return driver;
         
     } catch (error) {
         console.error('[MEGA] Registration error:', error);
-        return { screenshot: null, success: false, error: error.message };
-    } finally {
-        if (driver) {
-            await driver.quit();
-        }
+        if (driver) await driver.quit();
+        throw error;
     }
 }
 
@@ -312,13 +329,13 @@ module.exports = {
                        `2. Automates MEGA registration using Selenium WebDriver\n` +
                        `3. Confirms email and extracts credentials\n` +
                        `4. Returns account details with screenshot\n\n` +
-                       `*Note:* This process takes 2-3 minutes\n` +
+                       `*Note:* This process takes 30-60 seconds\n` +
                        `> *Powered by ${config.botName}*`);
         }
         
         // Check if user already has an active session
         if (activeSessions.has(sender)) {
-            return reply(`⏳ *Account creation already in progress!*\n\nPlease wait for the previous request to complete.\nThis may take 2-3 minutes.`);
+            return reply(`⏳ *Account creation already in progress!*\n\nPlease wait for the previous request to complete.\nThis may take 30-60 seconds.`);
         }
         
         await react('📦');
@@ -326,7 +343,7 @@ module.exports = {
         // Send initial message
         const processingMsg = await reply(`🚀 *Starting MEGA Account Registration*\n\n` +
                                          `⏳ Creating temporary email...\n\n` +
-                                         `> This process takes 2-3 minutes`);
+                                         `> This process takes 30-60 seconds`);
         
         // Mark session as active
         activeSessions.set(sender, true);
@@ -340,15 +357,16 @@ module.exports = {
                     edit: currentMessage.key
                 });
             } catch (error) {
-                // If editing fails, send new message
                 const newMsg = await reply(status);
                 currentMessage = newMsg;
             }
         };
         
+        let driver = null;
+        
         try {
             // Step 1: Create temporary email
-            await updateStatus(`📧 *Step 1/5: Creating temporary email...*`);
+            await updateStatus(`📧 *Step 1/4: Creating temporary email...*`);
             
             const tempMail = new TempMailTM();
             const emailCreated = await tempMail.create();
@@ -362,67 +380,33 @@ module.exports = {
             
             await updateStatus(`✅ *Temporary Email Created!*\n\n` +
                               `📧 Email: \`${userEmail}\`\n` +
-                              `🔑 Generated Password: \`${megaPassword}\`\n\n` +
-                              `⚙️ *Step 2/5: Initializing browser...*`);
+                              `🔑 Password: \`${megaPassword}\`\n\n` +
+                              `⚙️ *Step 2/4: Starting browser automation...*`);
             
-            // Step 2: Submit registration
-            await updateStatus(`📬 *Step 3/5: Registration submitted!*\n⏳ Waiting for confirmation email...`);
+            // Step 2: Perform registration
+            driver = await performMegaRegistration(userEmail, megaPassword, updateStatus);
             
-            // Step 3: Wait for confirmation email
-            let confirmationLink = null;
-            let elapsed = 0;
-            const maxWait = 120; // 120 seconds
+            await updateStatus(`📬 *Step 3/4: Registration submitted!*\n⏳ Waiting for confirmation email...`);
             
-            while (elapsed < maxWait) {
-                const messages = await tempMail.fetchMessages();
-                
-                if (messages && messages.length > 0) {
-                    const latestMsg = messages.sort((a, b) => 
-                        new Date(b.createdAt) - new Date(a.createdAt)
-                    )[0];
-                    
-                    const msgContent = await tempMail.getMessageContent(latestMsg.id);
-                    
-                    if (msgContent) {
-                        const emailText = String(msgContent.text || '') + String(msgContent.html || '');
-                        confirmationLink = extractConfirmationLink(emailText);
-                        
-                        if (confirmationLink) {
-                            break;
-                        }
-                    }
-                }
-                
-                await new Promise(resolve => setTimeout(resolve, 10000));
-                elapsed += 10;
-                
-                if (elapsed % 30 === 0) {
-                    await updateStatus(`⏱️ Checked inbox (${Math.floor(elapsed/60)}m ${elapsed%60}s elapsed)...`);
-                }
-            }
+            // Step 3: Wait for confirmation email (check every 3 seconds like original)
+            const confirmationLink = await waitForConfirmationEmail(tempMail, 60);
             
             if (!confirmationLink) {
                 throw new Error('Confirmation email not received within time limit');
             }
             
-            // Step 4: Perform registration AND confirmation in the SAME browser session
-            await updateStatus(`🔗 *Step 4/5: Completing registration with confirmation link...*`);
+            await updateStatus(`✅ *Confirmation email received!*\n🔗 Opening verification link...`);
             
-            const { screenshot, success, error } = await performMegaRegistration(
-                userEmail, 
-                megaPassword, 
-                confirmationLink, 
-                updateStatus
-            );
+            // Step 4: Open confirmation link in the SAME driver
+            await driver.get(confirmationLink);
+            await driver.sleep(5000);
             
-            if (!success) {
-                throw new Error(error || 'Registration failed');
-            }
+            // Take final screenshot
+            const screenshot = await takeScreenshot(driver);
             
-            // Calculate total time
-            const totalTime = 180; // Approximate time in seconds
-            const mins = Math.floor(totalTime / 60);
-            const secs = totalTime % 60;
+            // Close driver
+            await driver.quit();
+            driver = null;
             
             // Send screenshot if available
             if (screenshot && screenshot.length > 0) {
@@ -434,7 +418,6 @@ module.exports = {
             
             // Send success message
             const resultMessage = `🎉 *MEGA ACCOUNT CREATED SUCCESSFULLY!*\n\n` +
-                                 `⏱️ Total Time: ${mins}m ${secs}s\n` +
                                  `📧 Email: \`${userEmail}\`\n` +
                                  `🔐 Password: \`${megaPassword}\`\n\n` +
                                  `⚠️ *Save these credentials immediately!*\n` +
@@ -451,13 +434,17 @@ module.exports = {
         } catch (error) {
             console.error('[MEGA] Error:', error);
             
+            if (driver) {
+                try { await driver.quit(); } catch (e) {}
+            }
+            
             let errorMessage = `❌ *Failed to create MEGA account*\n\n`;
             
             if (error.message.includes('temporary email')) {
                 errorMessage += `Could not create temporary email.\n` +
                                `• The mail.tm service might be down\n` +
                                `• Please try again later`;
-            } else if (error.message.includes('confirmation email')) {
+            } else if (error.message.includes('Confirmation email')) {
                 errorMessage += `Confirmation email not received.\n` +
                                `• The email might be delayed\n` +
                                `• Please try again`;
@@ -477,7 +464,6 @@ module.exports = {
             });
             await react('❌');
         } finally {
-            // Clean up session
             activeSessions.delete(sender);
         }
     }
