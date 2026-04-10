@@ -13,7 +13,6 @@ const path = require('path');
 const BASE = "https://api.mail.tm";
 const MEGA_REG_URL = "https://mega.nz/register";
 const MAX_RETRIES = 3;
-const RETRY_DELAY = 5000;
 
 // Store active sessions
 const activeCreations = new Map();
@@ -143,6 +142,15 @@ async function takeScreenshot(page, chatId, sock, caption) {
     }
 }
 
+async function waitForVisible(page, selector, timeout = 30000) {
+    try {
+        await page.waitForSelector(selector, { state: 'visible', timeout });
+        return true;
+    } catch (error) {
+        return false;
+    }
+}
+
 async function megaRegistration(chatId, sock, reply, react, userId) {
     const startTime = Date.now();
     let browser = null;
@@ -158,8 +166,8 @@ async function megaRegistration(chatId, sock, reply, react, userId) {
             return;
         }
         
-        const userEmail = escapeHtml(tempMail.address);
-        const megaPassword = escapeHtml(randomPassword());
+        const userEmail = tempMail.address;
+        const megaPassword = randomPassword();
         
         await reply(
             `✅ *Temporary Email Created!*\n` +
@@ -189,104 +197,202 @@ async function megaRegistration(chatId, sock, reply, react, userId) {
         
         await reply("✅ Processing registration form...");
         
-        // Fill in registration form using Playwright selectors
-        try {
-            // Find and fill all input fields
-            const inputs = await page.$$('input');
+        // Wait for the registration form to load (MEGA uses a specific structure)
+        await page.waitForTimeout(5000);
+        
+        // Method 1: Use JavaScript to find and fill inputs directly
+        const fillResult = await page.evaluate(async (email, password) => {
+            const results = { filled: 0, emailField: null, passwordField: null };
+            
+            // Find all input elements
+            const inputs = document.querySelectorAll('input');
             
             for (const input of inputs) {
-                const type = await input.getAttribute('type');
-                const id = await input.getAttribute('id') || '';
-                const name = await input.getAttribute('name') || '';
-                const placeholder = await input.getAttribute('placeholder') || '';
-                const inputClass = await input.getAttribute('class') || '';
+                const type = input.type;
+                const name = (input.name || '').toLowerCase();
+                const id = (input.id || '').toLowerCase();
+                const placeholder = (input.placeholder || '').toLowerCase();
+                const className = (input.className || '').toLowerCase();
                 
-                let value = null;
-                
-                // Detect email field
+                // Email field detection
                 if (type === 'email' || 
-                    id.toLowerCase().includes('email') || 
-                    name.toLowerCase().includes('email') ||
-                    placeholder.toLowerCase().includes('email')) {
-                    value = tempMail.address;
+                    name.includes('email') || 
+                    id.includes('email') ||
+                    placeholder.includes('email') ||
+                    className.includes('email')) {
+                    input.value = email;
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    results.emailField = true;
+                    results.filled++;
                 }
-                // Detect password field
+                // Password field detection
                 else if (type === 'password' ||
-                    id.toLowerCase().includes('password') ||
-                    name.toLowerCase().includes('password')) {
-                    value = megaPassword;
+                    name.includes('password') ||
+                    id.includes('password') ||
+                    placeholder.includes('password')) {
+                    input.value = password;
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    results.passwordField = true;
+                    results.filled++;
                 }
-                // Detect name/firstname/lastname fields
-                else if (id.toLowerCase().includes('name') || 
-                         name.toLowerCase().includes('name') ||
-                         placeholder.toLowerCase().includes('name')) {
-                    value = randomName(8);
-                }
-                // Default text fields
-                else if (type === 'text' || type === 'tel' || type === 'url' || !type) {
-                    value = randomName(8);
-                }
-                
-                if (value !== null) {
-                    await input.fill(value);
-                    await page.waitForTimeout(100);
-                }
-            }
-        } catch (error) {
-            console.error('[MEGA] Form filling error:', error.message);
-        }
-        
-        // Click checkboxes (terms and conditions)
-        try {
-            const checkboxes = await page.$$('input[type="checkbox"]');
-            for (const checkbox of checkboxes) {
-                const isChecked = await checkbox.isChecked();
-                if (!isChecked) {
-                    await checkbox.check();
-                    await page.waitForTimeout(500);
+                // Name/Firstname/Lastname fields
+                else if (type === 'text' &&
+                    (name.includes('name') || 
+                     id.includes('name') || 
+                     placeholder.includes('name') ||
+                     name.includes('first') ||
+                     id.includes('first'))) {
+                    const randomName = Math.random().toString(36).substring(2, 10);
+                    input.value = randomName;
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    results.filled++;
                 }
             }
-        } catch (error) {
-            console.error('[MEGA] Checkbox error:', error.message);
-        }
-        
-        // Click register button
-        try {
-            await reply("📬 Submitting registration form...");
             
-            // Try multiple selectors for the register button
-            const buttonSelectors = [
-                'button[type="submit"]',
-                'button.register-button',
-                '.register-button',
-                'button:has-text("Register")',
-                'button:has-text("Sign up")',
-                'button:has-text("Create account")',
-                '[data-testid="register-button"]'
+            return results;
+        }, userEmail, megaPassword);
+        
+        console.log('[MEGA] Fill result:', fillResult);
+        
+        if (!fillResult.emailField || !fillResult.passwordField) {
+            // Method 2: Try to find by specific MEGA selectors
+            await reply("⚠️ Trying alternative form filling method...");
+            
+            // MEGA uses specific data-testid attributes
+            const emailSelectors = [
+                'input[data-testid="register-email-input"]',
+                'input[name="email"]',
+                'input[type="email"]',
+                '#email',
+                '[data-testid="email-input"]'
             ];
             
-            let clicked = false;
-            for (const selector of buttonSelectors) {
+            const passwordSelectors = [
+                'input[data-testid="register-password-input"]',
+                'input[name="password"]',
+                'input[type="password"]',
+                '#password',
+                '[data-testid="password-input"]'
+            ];
+            
+            for (const selector of emailSelectors) {
                 try {
-                    const button = await page.$(selector);
-                    if (button) {
-                        await button.click();
-                        clicked = true;
+                    const element = await page.$(selector);
+                    if (element) {
+                        await element.fill(userEmail);
                         break;
                     }
                 } catch (e) {}
             }
             
-            // Fallback: click by text
-            if (!clicked) {
-                await page.click('button:has-text("Register")').catch(() => {});
-                await page.click('button:has-text("Sign up")').catch(() => {});
-                await page.click('button:has-text("Create account")').catch(() => {});
+            for (const selector of passwordSelectors) {
+                try {
+                    const element = await page.$(selector);
+                    if (element) {
+                        await element.fill(megaPassword);
+                        break;
+                    }
+                } catch (e) {}
             }
-            
-        } catch (error) {
-            console.error('[MEGA] Register button error:', error.message);
         }
+        
+        await page.waitForTimeout(1000);
+        
+        // Click checkboxes (Terms and Conditions)
+        await reply("📝 Accepting terms and conditions...");
+        
+        // Method 1: JavaScript click on checkboxes
+        const checkboxClicked = await page.evaluate(() => {
+            const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+            let clicked = 0;
+            for (const checkbox of checkboxes) {
+                if (!checkbox.checked) {
+                    checkbox.click();
+                    clicked++;
+                }
+            }
+            return clicked;
+        });
+        
+        console.log('[MEGA] Checkboxes clicked:', checkboxClicked);
+        
+        // Method 2: If JS didn't work, try Playwright click
+        if (checkboxClicked === 0) {
+            const checkboxes = await page.$$('input[type="checkbox"]');
+            for (const checkbox of checkboxes) {
+                try {
+                    const isChecked = await checkbox.isChecked();
+                    if (!isChecked) {
+                        await checkbox.check({ force: true });
+                    }
+                } catch (e) {}
+            }
+        }
+        
+        await page.waitForTimeout(1000);
+        
+        // Click Register/Sign Up button
+        await reply("📬 Submitting registration form...");
+        
+        // Try multiple methods to click the register button
+        let buttonClicked = false;
+        
+        // Method 1: JavaScript click
+        const jsClicked = await page.evaluate(() => {
+            const buttons = document.querySelectorAll('button, input[type="submit"], .register-button, [data-testid="register-button"]');
+            for (const button of buttons) {
+                const text = (button.textContent || '').toLowerCase();
+                if (text.includes('register') || text.includes('sign up') || text.includes('create account')) {
+                    button.click();
+                    return true;
+                }
+            }
+            return false;
+        });
+        
+        if (jsClicked) {
+            buttonClicked = true;
+            console.log('[MEGA] Button clicked via JavaScript');
+        }
+        
+        // Method 2: Playwright click by text
+        if (!buttonClicked) {
+            const buttonSelectors = [
+                'button:has-text("Register")',
+                'button:has-text("Sign up")',
+                'button:has-text("Create account")',
+                'button:has-text("Next")',
+                'button[type="submit"]',
+                '.register-button',
+                '[data-testid="register-button"]'
+            ];
+            
+            for (const selector of buttonSelectors) {
+                try {
+                    const button = await page.$(selector);
+                    if (button) {
+                        await button.click({ force: true });
+                        buttonClicked = true;
+                        console.log(`[MEGA] Button clicked via selector: ${selector}`);
+                        break;
+                    }
+                } catch (e) {}
+            }
+        }
+        
+        // Method 3: Coordinate click as last resort
+        if (!buttonClicked) {
+            await page.mouse.click(786, 224);
+            console.log('[MEGA] Button clicked via coordinates');
+        }
+        
+        if (!buttonClicked) {
+            await reply("⚠️ Could not find register button, but continuing...");
+        }
+        
+        await page.waitForTimeout(3000);
         
         await reply("📬 Registration submitted!\n⏳ Waiting for confirmation email...");
         
@@ -340,6 +446,7 @@ async function megaRegistration(chatId, sock, reply, react, userId) {
             `📧 Email: \`${userEmail}\`\n` +
             `🔐 Password: \`${megaPassword}\`\n\n` +
             "⚠️ *Save these credentials immediately!*\n" +
+            "🌐 *Login at:* https://mega.nz/login\n\n" +
             "> *Powered by Tech Zone Bot*";
         
         await reply(results);
