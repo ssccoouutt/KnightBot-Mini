@@ -1,349 +1,191 @@
-import express from 'express';
-import fs from 'fs';
-import pino from 'pino';
-import { makeWASocket, useMultiFileAuthState, delay, makeCacheableSignalKeyStore, Browsers, jidNormalizedUser, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
-import pn from 'awesome-phonenumber';
-import zlib from 'zlib';
+/**
+ * Pair Command - Generate WhatsApp pairing code for a number
+ * Uses external API to get pairing code
+ */
 
-const router = express.Router();
+const axios = require('axios');
+const config = require('../../config');
+const giftedBtns = require('gifted-btns');
+const { sendButtons } = giftedBtns;
 
-// Store active sessions to keep them alive
+const FORCE_AI_MODE = true;
+
+// Store active sessions
 const activeSessions = new Map();
 
-function removeFile(FilePath) {
-    try {
-        if (!fs.existsSync(FilePath)) return false;
-        fs.rmSync(FilePath, { recursive: true, force: true });
-    } catch (e) {
-        console.error('Error removing file:', e);
-    }
-}
+module.exports = {
+    name: 'pair',
+    aliases: ['paircode', 'getcode', 'pairing'],
+    description: 'Generate WhatsApp pairing code for a number',
+    usage: '.pair <phone_number>',
+    category: 'owner',
+    ownerOnly: true,
 
-function generateSessionString(credsPath) {
-    try {
-        const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
-        const jsonString = JSON.stringify(creds, null, 0);
-        const compressedData = zlib.gzipSync(jsonString);
-        const base64Data = compressedData.toString('base64');
-        const sessionString = `KnightBot!${base64Data}`;
-        const txtPath = credsPath.replace('creds.json', 'session.txt');
-        fs.writeFileSync(txtPath, sessionString);
-        console.log(`✅ Session string saved to: ${txtPath}`);
-        return sessionString;
-    } catch (error) {
-        console.error('Error generating session string:', error);
-        return null;
-    }
-}
-
-router.get('/', async (req, res) => {
-    let num = req.query.number;
-    let dirs = './' + (num || `session_${Date.now()}`);
-    
-    // Check if session already exists and is active
-    if (activeSessions.has(num)) {
-        const session = activeSessions.get(num);
-        if (session.socket && session.socket.user) {
-            console.log(`✅ Using existing active session for ${num}`);
-            return res.send({ code: session.code, existing: true });
-        } else {
-            // Session exists but not active, clean it up
-            activeSessions.delete(num);
+    async execute(sock, msg, args, context) {
+        const { from, sender, reply, react } = context;
+        
+        if (args.length === 0) {
+            return reply(`🔐 *Pair Code Generator*\n\n` +
+                       `*Usage:*\n` +
+                       `• \`${config.prefix}pair <phone_number>\` - Generate pairing code\n` +
+                       `• \`${config.prefix}pair 919876543210\`\n\n` +
+                       `*How it works:*\n` +
+                       `1. You request a code for your number\n` +
+                       `2. API generates a pairing code\n` +
+                       `3. You enter the code in WhatsApp → Linked Devices\n` +
+                       `4. API sends the session file to YOUR WhatsApp number\n` +
+                       `5. Check your phone for the session file!\n\n` +
+                       `> *Powered by ${config.botName}*`);
         }
-    }
-
-    // Remove existing session directory
-    await removeFile(dirs);
-
-    // Clean the phone number
-    num = num.replace(/[^0-9]/g, '');
-
-    // Validate the phone number
-    const phone = pn('+' + num);
-    if (!phone.isValid()) {
-        if (!res.headersSent) {
-            return res.status(400).send({ error: 'Invalid phone number. Please enter your full international number (e.g., 15551234567 for US, 447911123456 for UK) without + or spaces.' });
+        
+        // Extract number
+        let number = args[0].replace(/[^0-9]/g, '');
+        
+        if (number.length < 10 || number.length > 15) {
+            return reply(`❌ *Invalid number!*\n\nPlease provide a valid phone number with country code.\nExample: \`${config.prefix}pair 919876543210\``);
         }
-        return;
-    }
-    num = phone.getNumber('e164').replace('+', '');
-
-    let pairingCode = null;
-    let pairingTimeout = null;
-    let KnightBot = null;
-
-    async function initiateSession() {
-        const { state, saveCreds } = await useMultiFileAuthState(dirs);
-
-        try {
-            const { version, isLatest } = await fetchLatestBaileysVersion();
-            KnightBot = makeWASocket({
-                version,
-                auth: {
-                    creds: state.creds,
-                    keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
-                },
-                printQRInTerminal: false,
-                logger: pino({ level: "fatal" }).child({ level: "fatal" }),
-                browser: Browsers.windows('Chrome'),
-                markOnlineOnConnect: false,
-                generateHighQualityLinkPreview: false,
-                defaultQueryTimeoutMs: 60000,
-                connectTimeoutMs: 60000,
-                keepAliveIntervalMs: 30000,
-                retryRequestDelayMs: 250,
-                maxRetries: 5,
-            });
-
-            // Store session in map
-            activeSessions.set(num, {
-                socket: KnightBot,
-                dirs: dirs,
-                startTime: Date.now(),
-                code: null
-            });
-
-            KnightBot.ev.on('connection.update', async (update) => {
-                const { connection, lastDisconnect, isNewLogin, isOnline, qr } = update;
-
-                if (qr) {
-                    console.log(`📱 QR Code received for ${num} (but we're using pair code)`);
-                }
-
-                if (connection === 'open') {
-                    console.log(`✅ Connected successfully for ${num}!`);
-                    
-                    // Clear timeout if exists
-                    if (pairingTimeout) {
-                        clearTimeout(pairingTimeout);
-                        pairingTimeout = null;
-                    }
-                    
-                    try {
-                        // Wait a bit for the session to fully initialize
-                        await delay(2000);
-                        
-                        const sessionKnight = fs.readFileSync(dirs + '/creds.json');
-                        const userJid = jidNormalizedUser(num + '@s.whatsapp.net');
-                        
-                        // Send creds.json file
-                        await KnightBot.sendMessage(userJid, {
-                            document: sessionKnight,
-                            mimetype: 'application/json',
-                            fileName: 'creds.json'
-                        });
-                        console.log(`📄 Session file sent to ${num}`);
-
-                        // Generate and send session string
-                        const sessionString = generateSessionString(dirs + '/creds.json');
-                        if (sessionString) {
-                            await KnightBot.sendMessage(userJid, {
-                                text: `🔐 *Your Session String:*\n\n\`\`\`${sessionString}\`\`\`\n\n_Keep this safe! Do not share with anyone._`
-                            });
-                            console.log(`🔐 Session string sent to ${num}`);
-                        }
-
-                        // Send video guide
-                        await KnightBot.sendMessage(userJid, {
-                            image: { url: 'https://img.youtube.com/vi/-oz_u1iMgf8/maxresdefault.jpg' },
-                            caption: `🎬 *KnightBot MD V2.0 Full Setup Guide!*\n\n🚀 Bug Fixes + New Commands + Fast AI Chat\n📺 Watch Now: https://youtu.be/NjOipI2AoMk`
-                        });
-                        console.log(`🎬 Video guide sent to ${num}`);
-
-                        // Send warning
-                        await KnightBot.sendMessage(userJid, {
-                            text: `⚠️ Do not share this file with anybody ⚠️\n 
-┌┤✑  Thanks for using Knight Bot
-│└────────────┈ ⳹        
-│©2025 Mr Unique Hacker 
-└─────────────────┈ ⳹\n\n`
-                        });
-                        console.log(`⚠️ Warning message sent to ${num}`);
-                        
-                        // Keep session alive for 2 minutes after completion
-                        setTimeout(() => {
-                            if (activeSessions.has(num)) {
-                                console.log(`🧹 Cleaning up session for ${num} after 2 minutes`);
-                                const sess = activeSessions.get(num);
-                                if (sess.socket) {
-                                    try {
-                                        sess.socket.end();
-                                    } catch (e) {}
-                                }
-                                activeSessions.delete(num);
-                                setTimeout(() => {
-                                    removeFile(dirs);
-                                }, 5000);
-                            }
-                        }, 120000);
-                        
-                    } catch (error) {
-                        console.error(`❌ Error sending messages to ${num}:`, error);
-                    }
-                }
-
-                if (isNewLogin) {
-                    console.log(`🔐 New login via pair code for ${num}`);
-                }
-
-                if (isOnline) {
-                    console.log(`📶 Client is online for ${num}`);
-                }
-
-                if (connection === 'close') {
-                    const statusCode = lastDisconnect?.error?.output?.statusCode;
-                    console.log(`🔌 Connection closed for ${num}, status: ${statusCode}`);
-
-                    if (statusCode === 401) {
-                        console.log(`❌ Logged out for ${num}. Need to generate new pair code.`);
-                        activeSessions.delete(num);
-                    } else {
-                        console.log(`🔁 Connection closed for ${num} - session ended`);
-                        // Don't auto-reconnect for pairing sessions to avoid conflicts
-                    }
-                }
-            });
-
-            KnightBot.ev.on('creds.update', saveCreds);
-
-            // Request pairing code if not registered
-            if (!KnightBot.authState.creds.registered) {
-                // Wait for socket to be ready
-                await delay(8000); // Increased wait time for stability
-                
-                num = num.replace(/[^\d+]/g, '');
-                if (num.startsWith('+')) num = num.substring(1);
-
-                try {
-                    console.log(`📱 Requesting pairing code for ${num}`);
-                    
-                    // Request the pairing code
-                    let code = await KnightBot.requestPairingCode(num);
-                    
-                    // Format the code with dashes every 4 digits
-                    const formattedCode = code?.match(/.{1,4}/g)?.join('-') || code;
-                    pairingCode = formattedCode;
-                    
-                    console.log(`🔑 Pairing code for ${num}: ${pairingCode}`);
-                    
-                    // Update session with code
-                    if (activeSessions.has(num)) {
-                        const sess = activeSessions.get(num);
-                        sess.code = pairingCode;
-                        activeSessions.set(num, sess);
-                    }
-                    
-                    // Send response immediately with the code
-                    if (!res.headersSent) {
-                        return res.send({ 
-                            code: pairingCode,
-                            number: num,
-                            message: "Enter this code in WhatsApp within 5 minutes"
-                        });
-                    }
-                    
-                    // Set timeout for pairing (5 minutes)
-                    pairingTimeout = setTimeout(() => {
-                        console.log(`⏰ Pairing timeout for ${num} - no connection established within 5 minutes`);
-                        if (KnightBot) {
-                            try {
-                                KnightBot.end();
-                            } catch (e) {}
-                        }
-                        if (activeSessions.has(num)) {
-                            activeSessions.delete(num);
-                        }
-                        setTimeout(() => {
-                            removeFile(dirs);
-                        }, 5000);
-                    }, 300000); // 5 minutes
-                    
-                } catch (error) {
-                    console.error('Error requesting pairing code:', error);
-                    if (!res.headersSent) {
-                        return res.status(503).send({ 
-                            error: 'Failed to get pairing code. Please check your phone number and try again.',
-                            details: error.message
-                        });
-                    }
-                }
+        
+        // Check for existing session
+        if (activeSessions.has(sender)) {
+            const sessionData = activeSessions.get(sender);
+            const elapsed = Math.floor((Date.now() - sessionData.startTime) / 1000);
+            
+            if (elapsed < 120) {
+                return reply(`⏳ *Pairing already in progress!*\n\n` +
+                           `Number: +${sessionData.number}\n` +
+                           `Code: \`${sessionData.code}\`\n\n` +
+                           `Please enter this code in WhatsApp:\n` +
+                           `Settings → Linked Devices → Link a Device\n\n` +
+                           `Then check your phone (+${sessionData.number}) for the session file!`);
             } else {
-                // Already registered - this shouldn't happen for new pairings
-                console.log(`⚠️ Session for ${num} is already registered`);
-                if (!res.headersSent) {
-                    return res.status(400).send({ 
-                        error: 'This number already has an active session. Please use a different number or clear existing session.'
-                    });
+                activeSessions.delete(sender);
+            }
+        }
+        
+        await react('🔐');
+        
+        // Send initial message
+        const processingMsg = await reply(`🔐 *Generating Pair Code*\n\n` +
+                                        `📱 Number: +${number}\n` +
+                                        `⏳ Requesting code from API...\n\n` +
+                                        `This may take 10-15 seconds...`);
+        
+        try {
+            // Call API to get pairing code
+            const apiUrl = `https://knight-bot-paircode.onrender.com/pair?number=${number}`;
+            
+            console.log(`[PAIR] Requesting code for +${number}`);
+            
+            const response = await axios.get(apiUrl, {
+                timeout: 60000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 }
+            });
+            
+            if (response.data && response.data.code) {
+                let code = response.data.code;
+                
+                // Store session
+                activeSessions.set(sender, {
+                    number: number,
+                    code: code,
+                    startTime: Date.now()
+                });
+                
+                // Auto-cleanup after 5 minutes
+                setTimeout(() => {
+                    if (activeSessions.has(sender)) {
+                        activeSessions.delete(sender);
+                    }
+                }, 300000);
+                
+                // Create copy button for the code
+                const copyButtons = [{
+                    name: 'cta_copy',
+                    buttonParamsJson: JSON.stringify({
+                        display_text: '📋 Copy Code',
+                        copy_code: code.replace(/-/g, '')
+                    })
+                }];
+                
+                const successMessage = `🔐 *Pairing Code Generated!*\n\n` +
+                                     `📱 Number: +${number}\n` +
+                                     `🔑 Code: \`${code}\`\n\n` +
+                                     `*Instructions:*\n` +
+                                     `1. Open WhatsApp on your phone\n` +
+                                     `2. Go to Settings → Linked Devices\n` +
+                                     `3. Tap "Link a Device"\n` +
+                                     `4. Enter this code: \`${code}\`\n` +
+                                     `5. Wait 10-15 seconds for connection\n\n` +
+                                     `⚠️ *IMPORTANT:*\n` +
+                                     `• After entering the code, the API will send the session file\n` +
+                                     `• **CHECK YOUR PHONE (+${number})** for the session file!\n` +
+                                     `• The file will be sent as a WhatsApp message\n` +
+                                     `• Save the creds.json file and session string\n\n` +
+                                     `⏰ *Code expires in 5 minutes*\n\n` +
+                                     `> *Powered by ${config.botName}*`;
+                
+                await sendButtons(sock, from, {
+                    text: successMessage,
+                    footer: 'Pair Code',
+                    buttons: copyButtons,
+                    aimode: FORCE_AI_MODE
+                }, { edit: processingMsg.key });
+                
+                await react('✅');
+                
+                // Send a reminder after 30 seconds
+                setTimeout(async () => {
+                    if (activeSessions.has(sender)) {
+                        await sock.sendMessage(from, {
+                            text: `🔔 *Reminder:*\n\n` +
+                                 `Check your phone (+${number}) for the WhatsApp session file!\n\n` +
+                                 `The API should have sent:\n` +
+                                 `• creds.json file\n` +
+                                 `• session.txt file with session string\n` +
+                                 `• Setup guide video\n\n` +
+                                 `If you didn't receive anything within 1 minute, try again with \`.pair ${number}\``
+                        });
+                    }
+                }, 30000);
+                
+            } else {
+                throw new Error('Invalid response from server');
             }
             
-        } catch (err) {
-            console.error('Error initializing session:', err);
-            if (!res.headersSent) {
-                return res.status(503).send({ 
-                    error: 'Service Unavailable',
-                    details: err.message
-                });
+        } catch (error) {
+            console.error('[PAIR] Error:', error.message);
+            
+            let errorMessage = `❌ *Failed to generate pairing code*\n\n📱 +${number}\n\n`;
+            
+            if (error.response?.status === 400) {
+                errorMessage += `Invalid phone number format.\n` +
+                               `Please use international format without '+' or spaces.\n` +
+                               `Example: 919876543210 (India) or 447911123456 (UK)`;
+            } else if (error.response?.status === 503 || error.message === 'Service Unavailable') {
+                errorMessage += `Service is currently unavailable.\n` +
+                               `The API server might be busy or down.\n` +
+                               `Please try again later.`;
+            } else if (error.code === 'ECONNABORTED') {
+                errorMessage += `Request timed out.\n` +
+                               `The server is taking too long to respond.\n` +
+                               `Please try again.`;
+            } else if (error.message.includes('Invalid phone number')) {
+                errorMessage += `Invalid phone number.\n` +
+                               `Make sure you include the country code.\n` +
+                               `Example: 1 for USA, 91 for India, 44 for UK`;
+            } else {
+                errorMessage += `Failed to get pairing code.\n` +
+                               `Error: ${error.message}\n\n` +
+                               `Make sure your phone number is correct and has WhatsApp installed.`;
             }
+            
+            await sock.sendMessage(from, {
+                text: errorMessage,
+                edit: processingMsg.key
+            });
+            await react('❌');
         }
     }
-
-    await initiateSession();
-});
-
-// Cleanup inactive sessions every minute
-setInterval(() => {
-    const now = Date.now();
-    for (const [num, session] of activeSessions.entries()) {
-        // Remove sessions older than 10 minutes
-        if (now - session.startTime > 600000) {
-            console.log(`🧹 Cleaning up inactive session for ${num}`);
-            if (session.socket) {
-                try {
-                    session.socket.end();
-                } catch (e) {}
-            }
-            if (session.dirs) {
-                setTimeout(() => {
-                    removeFile(session.dirs);
-                }, 5000);
-            }
-            activeSessions.delete(num);
-        }
-    }
-}, 60000);
-
-// Global uncaught exception handler
-process.on('uncaughtException', (err) => {
-    let e = String(err);
-    if (e.includes("conflict")) return;
-    if (e.includes("not-authorized")) return;
-    if (e.includes("Socket connection timeout")) return;
-    if (e.includes("rate-overlimit")) return;
-    if (e.includes("Connection Closed")) return;
-    if (e.includes("Timed Out")) return;
-    if (e.includes("Value not found")) return;
-    if (e.includes("Stream Errored")) return;
-    if (e.includes("statusCode: 515")) return;
-    if (e.includes("statusCode: 503")) return;
-    console.log('Caught exception: ', err);
-});
-
-// Graceful shutdown handler
-process.on('SIGTERM', () => {
-    console.log('SIGTERM received, cleaning up sessions...');
-    for (const [num, session] of activeSessions.entries()) {
-        if (session.socket) {
-            try {
-                session.socket.end();
-            } catch (e) {}
-        }
-        if (session.dirs) {
-            removeFile(session.dirs);
-        }
-    }
-    activeSessions.clear();
-    process.exit(0);
-});
-
-export default router;
+};
