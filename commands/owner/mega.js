@@ -1,22 +1,94 @@
 /**
- * MEGA Account Creator - Create MEGA.nz accounts automatically
- * Uses Playwright for browser automation (Selenium-style logic)
+ * MEGA Account Creator - Create mega.nz accounts automatically
+ * Uses Playwright for browser automation
  */
 
-const { chromium } = require('playwright');
 const axios = require('axios');
+const { chromium } = require('playwright');
 const config = require('../../config');
+const sessionManager = require('../../utils/sessionManager');
+const fs = require('fs');
+const path = require('path');
 
-// Constants
-const BASE = "https://api.mail.tm";
-const MEGA_REG_URL = "https://mega.nz/register";
+// Store active processes
+const activeProcesses = new Map();
 
-// Store active sessions
-const activeCreations = new Map();
+module.exports = {
+    name: 'mega',
+    aliases: ['meganew', 'createmega', 'megacreate'],
+    description: 'Create new MEGA.nz accounts automatically',
+    usage: '.mega\n.mega --status\n.mega --stop',
+    category: 'owner',
+    ownerOnly: true,
 
-// Helper functions (exactly like Python script)
+    async execute(sock, msg, args, context) {
+        const { from, sender, reply, react } = context;
+        
+        if (args[0] === '--status') {
+            const process = activeProcesses.get(sender);
+            if (process && process.running) {
+                return reply(`🟢 *MEGA Account Creation in Progress*\n\n` +
+                           `📝 *Prompt:* ${process.prompt || 'N/A'}\n` +
+                           `⏱️ *Started:* ${new Date(process.startTime).toLocaleString()}\n` +
+                           `📊 *Status:* ${process.status || 'Running...'}`);
+            } else {
+                return reply(`🟡 *No active MEGA account creation*\n\nUse \`.mega\` to start a new one.`);
+            }
+        }
+        
+        if (args[0] === '--stop') {
+            const process = activeProcesses.get(sender);
+            if (process && process.running) {
+                process.running = false;
+                activeProcesses.delete(sender);
+                return reply(`🛑 *MEGA Account Creation Stopped*\n\nThe process has been terminated.`);
+            } else {
+                return reply(`🟡 *No active process to stop.*`);
+            }
+        }
+        
+        // Start new account creation
+        if (activeProcesses.has(sender) && activeProcesses.get(sender).running) {
+            return reply(`⚠️ *Already creating an account!*\n\nPlease wait for the current process to complete or use \`.mega --stop\` to cancel.`);
+        }
+        
+        await react('🚀');
+        
+        // Send initial message
+        const processingMsg = await reply(`🚀 *Starting MEGA Account Creation...*\n\n` +
+                                         `⏳ Creating temporary email...\n\n` +
+                                         `> This process takes 2-3 minutes`);
+        
+        // Start the creation process
+        const process = {
+            running: true,
+            startTime: Date.now(),
+            prompt: 'MEGA Account',
+            status: 'Starting...',
+            msgKey: processingMsg.key
+        };
+        activeProcesses.set(sender, process);
+        
+        // Run in background
+        megaRegistration(sock, from, sender, processingMsg, process).finally(() => {
+            activeProcesses.delete(sender);
+        });
+    }
+};
+
+// ==================== HELPER FUNCTIONS ====================
+
 function randomName(length = 10) {
     const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let result = '';
+    for (let i = 0; i < length; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+}
+
+function randomText(length = 8) {
+    const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     let result = '';
     for (let i = 0; i < length; i++) {
         result += chars.charAt(Math.floor(Math.random() * chars.length));
@@ -33,82 +105,77 @@ function randomPassword(length = 12) {
     return result;
 }
 
-function escapeHtml(text) {
-    return String(text)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
+async function createTempMail() {
+    const BASE = "https://api.mail.tm";
+    
+    try {
+        // Get domains
+        const domainsRes = await axios.get(`${BASE}/domains`);
+        const domains = domainsRes.data['hydra:member'] || [];
+        
+        if (!domains.length) return null;
+        
+        const domain = domains[Math.floor(Math.random() * domains.length)].domain;
+        const name = randomName();
+        const address = `${name}@${domain}`;
+        const password = randomName(12);
+        
+        // Create account
+        const regRes = await axios.post(`${BASE}/accounts`, {
+            address: address,
+            password: password
+        });
+        
+        if (regRes.status !== 200 && regRes.status !== 201) return null;
+        
+        const accountId = regRes.data.id;
+        
+        // Get token
+        const tokenRes = await axios.post(`${BASE}/token`, {
+            address: address,
+            password: password
+        });
+        
+        if (tokenRes.status !== 200) return null;
+        
+        return {
+            address: address,
+            password: password,
+            token: tokenRes.data.token,
+            accountId: accountId
+        };
+        
+    } catch (error) {
+        console.error('[MEGA] TempMail creation error:', error.message);
+        return null;
+    }
 }
 
-// Temporary Email Class (exactly like Python script)
-class TempMailTM {
-    constructor() {
-        this.address = null;
-        this.password = null;
-        this.token = null;
-        this.accountId = null;
+async function fetchMessages(token) {
+    const BASE = "https://api.mail.tm";
+    
+    try {
+        const res = await axios.get(`${BASE}/messages`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        return res.data['hydra:member'] || [];
+    } catch (error) {
+        console.error('[MEGA] Fetch messages error:', error.message);
+        return [];
     }
+}
 
-    async create() {
-        try {
-            const domainsRes = await axios.get(`${BASE}/domains`);
-            const domains = domainsRes.data['hydra:member'] || [];
-            if (!domains.length) return false;
-            
-            const domain = domains[Math.floor(Math.random() * domains.length)].domain;
-            const name = randomName();
-            this.address = `${name}@${domain}`;
-            this.password = randomName(12);
-            
-            const regRes = await axios.post(`${BASE}/accounts`, {
-                address: this.address,
-                password: this.password
-            });
-            
-            if (regRes.status !== 200 && regRes.status !== 201) return false;
-            
-            this.accountId = regRes.data.id;
-            
-            const tokenRes = await axios.post(`${BASE}/token`, {
-                address: this.address,
-                password: this.password
-            });
-            
-            if (tokenRes.status === 200) {
-                this.token = tokenRes.data.token;
-                return true;
-            }
-            return false;
-        } catch (error) {
-            console.error('[MEGA] TempMail error:', error.message);
-            return false;
-        }
-    }
-
-    async fetchMessages() {
-        if (!this.token) return [];
-        try {
-            const res = await axios.get(`${BASE}/messages`, {
-                headers: { 'Authorization': `Bearer ${this.token}` }
-            });
-            return res.data['hydra:member'] || [];
-        } catch (error) {
-            return [];
-        }
-    }
-
-    async getMessageContent(msgId) {
-        if (!this.token) return null;
-        try {
-            const res = await axios.get(`${BASE}/messages/${msgId}`, {
-                headers: { 'Authorization': `Bearer ${this.token}` }
-            });
-            return res.data;
-        } catch (error) {
-            return null;
-        }
+async function getMessageContent(token, msgId) {
+    const BASE = "https://api.mail.tm";
+    
+    try {
+        const res = await axios.get(`${BASE}/messages/${msgId}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        return res.data;
+    } catch (error) {
+        console.error('[MEGA] Get message content error:', error.message);
+        return null;
     }
 }
 
@@ -118,6 +185,7 @@ function extractConfirmationLink(text) {
         /https:\/\/mega\.co\.nz\/[^\s\n\r<>"']+/,
         /http:\/\/mega\.nz\/[^\s\n\r<>"']+/
     ];
+    
     for (const pattern of patterns) {
         const match = text.match(pattern);
         if (match) return match[0];
@@ -125,33 +193,44 @@ function extractConfirmationLink(text) {
     return null;
 }
 
-// Main registration function - EXACT logic like Python script
-async function megaRegistration(chatId, sock, reply, userId) {
-    const startTime = Date.now();
+async function updateStatus(sock, from, msgKey, process, text) {
+    if (!process.running) return;
+    
+    try {
+        process.status = text;
+        await sock.sendMessage(from, { text: text, edit: msgKey });
+    } catch (error) {
+        console.error('[MEGA] Status update error:', error.message);
+    }
+}
+
+async function megaRegistration(sock, from, sender, processingMsg, process) {
     let browser = null;
+    let context = null;
     let page = null;
     
     try {
-        await reply("🚀 Starting MEGA Account Registration\n⏳ Creating temporary email...");
-
-        // Create temporary email
-        const tempMail = new TempMailTM();
-        if (!await tempMail.create()) {
-            await reply("❌ Failed to create temporary email!\nPlease try again later.");
+        // Step 1: Create temporary email
+        await updateStatus(sock, from, processingMsg.key, process, 
+            `🚀 *Starting MEGA Account Creation...*\n\n⏳ Creating temporary email...`);
+        
+        const tempMail = await createTempMail();
+        if (!tempMail) {
+            await updateStatus(sock, from, processingMsg.key, process,
+                `❌ *Failed to create temporary email!*\n\nPlease try again later.`);
             return;
         }
-
+        
         const userEmail = tempMail.address;
         const megaPassword = randomPassword();
-
-        await reply(
-            `✅ Temporary Email Created!\n` +
-            `📧: \`${userEmail}\`\n` +
-            `🔑 Generated Password: \`${megaPassword}\`\n\n` +
-            `⚙️ Initializing browser...`
-        );
-
-        // Launch browser
+        
+        await updateStatus(sock, from, processingMsg.key, process,
+            `✅ *Temporary Email Created!*\n\n` +
+            `📧 Email: \`${userEmail}\`\n` +
+            `🔑 Password: \`${megaPassword}\`\n\n` +
+            `⚙️ Initializing browser...`);
+        
+        // Step 2: Launch browser
         browser = await chromium.launch({
             headless: true,
             args: [
@@ -162,163 +241,219 @@ async function megaRegistration(chatId, sock, reply, userId) {
             ]
         });
         
-        page = await browser.newPage();
-        await page.setViewportSize({ width: 1920, height: 1080 });
-
-        await reply("🌐 Loading MEGA registration page...");
-        await page.goto(MEGA_REG_URL);
-        await page.waitForTimeout(3000);
-
-        await reply("✅ Processing registration form...");
-
-        // ============ CLICK CHECKBOXES FIRST (like original script) ============
-        // The original Python script uses coordinates: (506, 598) and (506, 670)
-        try {
-            // Click first checkbox
-            await page.mouse.click(506, 598);
-            await page.waitForTimeout(500);
-            // Click second checkbox
-            await page.mouse.click(506, 670);
-            await page.waitForTimeout(500);
-            console.log('[MEGA] Checkboxes clicked via coordinates');
-        } catch (e) {
-            console.log('[MEGA] Checkbox error:', e.message);
-        }
-
-        // ============ FILL ALL TEXT INPUTS (like original script) ============
-        // Find all input fields and fill them
-        const inputs = await page.$$('input');
+        context = await browser.newContext({
+            viewport: { width: 1920, height: 1080 },
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        });
         
-        for (const input of inputs) {
-            const type = await input.getAttribute('type');
-            const id = await input.getAttribute('id') || '';
-            const name = await input.getAttribute('name') || '';
-            
+        page = await context.newPage();
+        
+        await updateStatus(sock, from, processingMsg.key, process,
+            `🌐 *Loading MEGA registration page...*`);
+        
+        // Step 3: Navigate to MEGA registration
+        await page.goto('https://mega.nz/register', { waitUntil: 'networkidle', timeout: 60000 });
+        await page.waitForTimeout(5000);
+        
+        await updateStatus(sock, from, processingMsg.key, process,
+            `✅ *Processing registration form...*`);
+        
+        // Step 4: Click checkboxes using coordinates (same as original)
+        const clickPositions = [[506, 598], [506, 670]];
+        for (const [x, y] of clickPositions) {
             try {
-                if (type === 'email' || id.includes('email') || name.includes('email')) {
-                    await input.fill(userEmail);
-                    console.log('[MEGA] Filled email field');
-                }
-                else if (type === 'password') {
-                    await input.fill(megaPassword);
-                    console.log('[MEGA] Filled password field');
-                }
-                else if (type === 'text' || type === 'tel' || type === 'url' || !type) {
-                    // Fill with random text for name/firstname/lastname fields
-                    await input.fill(randomName(8));
-                }
-            } catch (e) {}
+                await page.evaluate(([clickX, clickY]) => {
+                    window.scrollTo(0, clickY - 200);
+                    setTimeout(() => {
+                        const element = document.elementFromPoint(clickX, clickY);
+                        if (element) {
+                            const event = new MouseEvent('click', {
+                                bubbles: true,
+                                cancelable: true,
+                                clientX: clickX,
+                                clientY: clickY
+                            });
+                            element.dispatchEvent(event);
+                        }
+                    }, 500);
+                }, [x, y]);
+                await page.waitForTimeout(1000);
+            } catch (error) {
+                console.error(`[MEGA] Checkbox click error at (${x},${y}):`, error.message);
+            }
         }
-
-        await page.waitForTimeout(1000);
-
-        // ============ CLICK REGISTER BUTTON (like original script) ============
-        // Original uses coordinates (786, 224)
-        await reply("📬 Registration submitted!\n⏳ Waiting for confirmation email...");
+        
+        // Step 5: Fill input fields
+        const inputSelectors = [
+            'input[type="text"]',
+            'input[type="email"]',
+            'input[type="password"]',
+            'input[type="search"]',
+            'input[type="tel"]',
+            'input[type="url"]',
+            'textarea'
+        ];
+        
+        for (const selector of inputSelectors) {
+            try {
+                const elements = await page.$$(selector);
+                for (const element of elements) {
+                    const elementType = await element.getAttribute('type') || 'text';
+                    const elementId = await element.getAttribute('id') || '';
+                    const elementName = await element.getAttribute('name') || '';
+                    
+                    await element.scrollIntoViewIfNeeded();
+                    
+                    let value;
+                    if (elementType === 'email' || elementId.toLowerCase().includes('email') || elementName.toLowerCase().includes('email')) {
+                        value = userEmail;
+                    } else if (elementType === 'password') {
+                        value = megaPassword;
+                    } else {
+                        value = randomText();
+                    }
+                    
+                    await element.fill(value);
+                    await element.dispatchEvent('input', { bubbles: true });
+                }
+            } catch (error) {
+                // Silently continue
+            }
+        }
+        
+        // Step 6: Click register button
+        await updateStatus(sock, from, processingMsg.key, process,
+            `📬 *Registration submitted!*\n⏳ Waiting for confirmation email...`);
         
         try {
-            await page.mouse.click(786, 224);
-            console.log('[MEGA] Register button clicked');
-        } catch (e) {
-            console.log('[MEGA] Register button error:', e.message);
+            // Try CSS selector first
+            const registerButton = await page.$('button.register-button, .register-button-text');
+            if (registerButton) {
+                await registerButton.scrollIntoViewIfNeeded();
+                await page.waitForTimeout(1000);
+                await registerButton.click();
+            } else {
+                // Fallback to coordinate click
+                await page.evaluate(() => {
+                    const el = document.elementFromPoint(786, 224);
+                    if (el) el.click();
+                });
+            }
+        } catch (error) {
+            console.error('[MEGA] Register button click error:', error.message);
+            // Fallback coordinate
+            await page.evaluate(() => {
+                const el = document.elementFromPoint(786, 224);
+                if (el) el.click();
+            });
         }
-
-        // ============ WAIT FOR CONFIRMATION EMAIL (like original script) ============
+        
+        // Step 7: Wait for confirmation email
         let confirmationLink = null;
         let elapsed = 0;
         
-        while (elapsed < 120 && !confirmationLink) {
-            const messages = await tempMail.fetchMessages();
+        while (elapsed < 120 && process.running) {
+            const messages = await fetchMessages(tempMail.token);
+            
             if (messages && messages.length > 0) {
-                const latestMsg = messages[0];
-                const msgContent = await tempMail.getMessageContent(latestMsg.id);
+                const latestMsg = messages.sort((a, b) => 
+                    new Date(b.createdAt) - new Date(a.createdAt)
+                )[0];
+                
+                const msgContent = await getMessageContent(tempMail.token, latestMsg.id);
                 if (msgContent) {
-                    const emailText = String(msgContent.text || '') + String(msgContent.html || '');
+                    const emailText = (msgContent.text || '') + (msgContent.html || '');
                     confirmationLink = extractConfirmationLink(emailText);
                     if (confirmationLink) break;
                 }
             }
+            
             await page.waitForTimeout(10000);
             elapsed += 10;
             
-            if (!confirmationLink && elapsed % 30 === 0) {
-                await reply(`⏱️ Checked inbox (${Math.floor(elapsed / 60)}m ${elapsed % 60}s elapsed)...`);
+            if (process.running) {
+                await updateStatus(sock, from, processingMsg.key, process,
+                    `📬 *Registration submitted!*\n⏳ Waiting for confirmation email... (${elapsed / 60}m ${elapsed % 60}s elapsed)`);
             }
         }
-
-        // ============ OPEN CONFIRMATION LINK (like original script) ============
-        if (confirmationLink) {
-            await reply(`✅ Confirmation email received!\n🔗 Opening verification link...`);
-            await page.goto(confirmationLink);
+        
+        // Step 8: Open confirmation link
+        if (confirmationLink && process.running) {
+            await updateStatus(sock, from, processingMsg.key, process,
+                `✅ *Confirmation email received!*\n🔗 Opening verification link...`);
+            await page.goto(confirmationLink, { waitUntil: 'networkidle', timeout: 30000 });
             await page.waitForTimeout(3000);
         }
-
-        // Take screenshot
-        const screenshot = await page.screenshot({ type: 'png' });
-        await sock.sendMessage(chatId, {
-            image: screenshot,
-            caption: "🖼️ Final Registration Status"
-        });
-
-        const totalTime = (Date.now() - startTime) / 1000;
+        
+        // Step 9: Take screenshot
+        let screenshot = null;
+        try {
+            screenshot = await page.screenshot({ type: 'png', fullPage: false });
+        } catch (error) {
+            console.error('[MEGA] Screenshot error:', error.message);
+        }
+        
+        const totalTime = (Date.now() - process.startTime) / 1000;
         const mins = Math.floor(totalTime / 60);
         const secs = Math.floor(totalTime % 60);
         
-        const results = 
-            "🎉 MEGA ACCOUNT CREATED SUCCESSFULLY!\n\n" +
-            `⏱️ Total Time: ${mins}m ${secs}s\n` +
-            `📧 Email: ${userEmail}\n` +
-            `🔐 Password: ${megaPassword}\n\n` +
-            "⚠️ Save these credentials immediately!\n" +
-            "🔄 Use .mega again to create another account";
+        // Step 10: Send results
+        const resultMessage = `🎉 *MEGA ACCOUNT CREATED SUCCESSFULLY!*\n\n` +
+                             `⏱️ *Total Time:* ${mins}m ${secs}s\n` +
+                             `📧 *Email:* \`${userEmail}\`\n` +
+                             `🔐 *Password:* \`${megaPassword}\`\n\n` +
+                             `⚠️ *Save these credentials immediately!*\n\n` +
+                             `> *Powered by ${config.botName}*`;
         
-        await reply(results);
+        // Send screenshot if available
+        if (screenshot) {
+            await sock.sendMessage(from, {
+                image: screenshot,
+                caption: resultMessage
+            });
+        } else {
+            await sock.sendMessage(from, { text: resultMessage });
+        }
         
-        await browser.close();
-        activeCreations.delete(userId);
-
+        // Update processing message
+        await updateStatus(sock, from, processingMsg.key, process,
+            `✅ *Account Creation Complete!*\n\n` +
+            `📧 Email: \`${userEmail}\`\n` +
+            `🔐 Password: \`${megaPassword}\`\n\n` +
+            `💡 Use \`.mega\` to create another account`);
+        
     } catch (error) {
-        console.error('[MEGA] Error:', error);
+        console.error('[MEGA] Registration error:', error);
         
+        let errorMessage = `❌ *MEGA Account Creation Failed*\n\n`;
+        
+        if (error.message.includes('Timeout')) {
+            errorMessage += `⏰ Timeout error. The registration took too long.\nPlease try again.`;
+        } else if (error.message.includes('net::ERR')) {
+            errorMessage += `🌐 Network error. Please check your connection.\nTry again in a few moments.`;
+        } else {
+            errorMessage += `${error.message}\n\nPlease try again later.`;
+        }
+        
+        await updateStatus(sock, from, processingMsg.key, process, errorMessage);
+        
+        // Try to take error screenshot
         if (page) {
             try {
                 const errorScreenshot = await page.screenshot({ type: 'png' });
-                await sock.sendMessage(chatId, {
+                await sock.sendMessage(from, {
                     image: errorScreenshot,
-                    caption: "❌ Error Screenshot"
+                    caption: `❌ Error Screenshot\n\n${error.message}`
                 });
-            } catch (e) {}
+            } catch (ssError) {
+                // Ignore screenshot error
+            }
         }
         
-        await reply(`❌ Error: ${error.message}`);
-        
-        if (browser) await browser.close();
-        activeCreations.delete(userId);
+    } finally {
+        // Cleanup
+        if (page) await page.close().catch(() => {});
+        if (context) await context.close().catch(() => {});
+        if (browser) await browser.close().catch(() => {});
     }
 }
-
-module.exports = {
-    name: 'mega',
-    aliases: ['meganew', 'createaccount', 'megaaccount'],
-    description: 'Create MEGA.nz accounts automatically',
-    usage: '.mega',
-    category: 'owner',
-    ownerOnly: true,
-
-    async execute(sock, msg, args, context) {
-        const { from, sender, reply, react } = context;
-        
-        if (activeCreations.has(sender)) {
-            return reply(`⏳ You already have an active account creation in progress!\nPlease wait for it to complete.`);
-        }
-        
-        await react('🚀');
-        await reply(`🚀 Starting MEGA Account Creator\n⏳ This takes 2-3 minutes...`);
-        
-        activeCreations.set(sender, true);
-        
-        await megaRegistration(from, sock, reply, sender);
-        
-        activeCreations.delete(sender);
-    }
-};
