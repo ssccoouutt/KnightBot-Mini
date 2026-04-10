@@ -5,6 +5,11 @@
 
 const axios = require('axios');
 const config = require('../../config');
+const giftedBtns = require('gifted-btns');
+const { sendButtons, sendInteractiveMessage } = giftedBtns;
+
+// Force AI mode ON for gifted buttons
+const FORCE_AI_MODE = true;
 
 // Helper function for sleep/delay
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -73,7 +78,7 @@ module.exports = {
                     edit: processingMsg.key
                 });
                 
-                // Call API to get pairing code
+                // Call API to get pairing code (using /pair endpoint)
                 const apiUrl = `https://knight-bot-paircode.onrender.com/pair?number=${number}`;
                 const response = await axios.get(apiUrl, {
                     timeout: 30000,
@@ -92,7 +97,15 @@ module.exports = {
                     // Wait 5 seconds before sending code (as in original)
                     await sleep(5000);
                     
-                    // Send the pairing code
+                    // Create unique session ID for buttons
+                    const sessionId = `${Date.now()}_${number}`;
+                    
+                    // Create copy button
+                    const buttons = [
+                        { id: `pair_copy_${sessionId}_${code}`, text: '📋 Copy Code' }
+                    ];
+                    
+                    // Send the pairing code with copy button
                     const codeMessage = `🔐 *Your Pairing Code*\n\n` +
                                        `📱 Number: +${number}\n` +
                                        `🔑 Code: \`${code}\`\n\n` +
@@ -104,10 +117,13 @@ module.exports = {
                                        `⏰ *Code expires in 5 minutes*\n\n` +
                                        `> *Powered by ${config.botName}*`;
                     
-                    await sock.sendMessage(from, {
+                    // Send message with copy button
+                    const sentMsg = await sendButtons(sock, from, {
                         text: codeMessage,
-                        edit: processingMsg.key
-                    });
+                        footer: 'Pair Code',
+                        buttons: buttons,
+                        aimode: FORCE_AI_MODE
+                    }, { edit: processingMsg.key });
                     
                     await react('✅');
                     
@@ -139,5 +155,44 @@ module.exports = {
                 await react('❌');
             }
         }
+    },
+    
+    // Handle button clicks for copy functionality
+    async handleSession(sock, msg, session, context) {
+        const { from, sender, reply, react, isButtonClick } = context;
+        
+        if (isButtonClick) {
+            let buttonId = null;
+            
+            if (msg.message?.buttonsResponseMessage) {
+                buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
+            } else if (msg.message?.interactiveResponseMessage) {
+                const interactive = msg.message.interactiveResponseMessage;
+                if (interactive.nativeFlowResponseMessage) {
+                    try {
+                        const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
+                        buttonId = params.id;
+                    } catch (e) {}
+                }
+            } else if (msg.message?.templateButtonReplyMessage) {
+                buttonId = msg.message.templateButtonReplyMessage.selectedId;
+            }
+            
+            if (buttonId && buttonId.startsWith('pair_copy_')) {
+                // Extract code from button ID
+                const parts = buttonId.split('_');
+                const code = parts.slice(3).join('_');
+                
+                // Send the code in a copy-friendly format
+                await sock.sendMessage(from, {
+                    text: `📋 *Pairing Code*\n\n\`${code}\`\n\nTap and hold to copy the code.`,
+                });
+                
+                await react('📋');
+                return true;
+            }
+        }
+        
+        return true;
     }
 };
