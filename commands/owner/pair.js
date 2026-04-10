@@ -5,10 +5,11 @@
 
 const axios = require('axios');
 const config = require('../../config');
+const sessionManager = require('../../utils/sessionManager');
 const giftedBtns = require('gifted-btns');
 const { sendButtons, sendInteractiveMessage } = giftedBtns;
 
-// Force AI mode ON for gifted buttons
+// Force AI mode ON
 const FORCE_AI_MODE = true;
 
 // Helper function for sleep/delay
@@ -23,7 +24,7 @@ module.exports = {
     ownerOnly: true,
 
     async execute(sock, msg, args, context) {
-        const { from, reply, react } = context;
+        const { from, sender, reply, react } = context;
         
         if (args.length === 0) {
             return reply(`🔐 *Pair Code Generator*\n\n` +
@@ -97,15 +98,19 @@ module.exports = {
                     // Wait 5 seconds before sending code (as in original)
                     await sleep(5000);
                     
-                    // Create unique session ID for buttons
+                    // Create unique session ID
                     const sessionId = `${Date.now()}_${number}`;
                     
-                    // Create copy button
-                    const buttons = [
-                        { id: `pair_copy_${sessionId}_${code}`, text: '📋 Copy Code' }
-                    ];
+                    // Create copy button using native cta_copy (just like survey command)
+                    const copyButtons = [{
+                        name: 'cta_copy',
+                        buttonParamsJson: JSON.stringify({
+                            display_text: '📋 Copy Code',
+                            copy_code: code
+                        })
+                    }];
                     
-                    // Send the pairing code with copy button
+                    // Send the pairing code with native copy button
                     const codeMessage = `🔐 *Your Pairing Code*\n\n` +
                                        `📱 Number: +${number}\n` +
                                        `🔑 Code: \`${code}\`\n\n` +
@@ -117,11 +122,11 @@ module.exports = {
                                        `⏰ *Code expires in 5 minutes*\n\n` +
                                        `> *Powered by ${config.botName}*`;
                     
-                    // Send message with copy button
+                    // Send message with native copy button
                     const sentMsg = await sendButtons(sock, from, {
                         text: codeMessage,
                         footer: 'Pair Code',
-                        buttons: buttons,
+                        buttons: copyButtons,
                         aimode: FORCE_AI_MODE
                     }, { edit: processingMsg.key });
                     
@@ -155,44 +160,5 @@ module.exports = {
                 await react('❌');
             }
         }
-    },
-    
-    // Handle button clicks for copy functionality
-    async handleSession(sock, msg, session, context) {
-        const { from, sender, reply, react, isButtonClick } = context;
-        
-        if (isButtonClick) {
-            let buttonId = null;
-            
-            if (msg.message?.buttonsResponseMessage) {
-                buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
-            } else if (msg.message?.interactiveResponseMessage) {
-                const interactive = msg.message.interactiveResponseMessage;
-                if (interactive.nativeFlowResponseMessage) {
-                    try {
-                        const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
-                        buttonId = params.id;
-                    } catch (e) {}
-                }
-            } else if (msg.message?.templateButtonReplyMessage) {
-                buttonId = msg.message.templateButtonReplyMessage.selectedId;
-            }
-            
-            if (buttonId && buttonId.startsWith('pair_copy_')) {
-                // Extract code from button ID
-                const parts = buttonId.split('_');
-                const code = parts.slice(3).join('_');
-                
-                // Send the code in a copy-friendly format
-                await sock.sendMessage(from, {
-                    text: `📋 *Pairing Code*\n\n\`${code}\`\n\nTap and hold to copy the code.`,
-                });
-                
-                await react('📋');
-                return true;
-            }
-        }
-        
-        return true;
     }
 };
