@@ -47,15 +47,6 @@ function randomPassword(length = 12) {
     return result;
 }
 
-function escapeHtml(text) {
-    return String(text)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
-
 // TempMail.tm API Class
 class TempMailTM {
     constructor() {
@@ -166,8 +157,8 @@ async function takeScreenshot(driver) {
     }
 }
 
-// Perform MEGA registration using Selenium WebDriver
-async function performMegaRegistration(email, password, updateStatus) {
+// Perform complete MEGA registration (including confirmation) using Selenium WebDriver
+async function performMegaRegistration(email, password, confirmationLink, updateStatus) {
     let driver = null;
     
     try {
@@ -274,43 +265,25 @@ async function performMegaRegistration(email, password, updateStatus) {
         
         await driver.sleep(10000);
         
-        // Take screenshot
+        // Take screenshot after registration
         const screenshot = await takeScreenshot(driver);
+        
+        // If confirmation link is available, open it in the SAME driver
+        if (confirmationLink) {
+            await updateStatus(`✅ Confirmation email received!\n🔗 Opening verification link...`);
+            await driver.get(confirmationLink);
+            await driver.sleep(5000);
+            
+            // Take final screenshot after confirmation
+            const finalScreenshot = await takeScreenshot(driver);
+            return { screenshot: finalScreenshot || screenshot, success: true };
+        }
         
         return { screenshot, success: true };
         
     } catch (error) {
         console.error('[MEGA] Registration error:', error);
         return { screenshot: null, success: false, error: error.message };
-    } finally {
-        if (driver) {
-            await driver.quit();
-        }
-    }
-}
-
-// Open confirmation link using Selenium
-async function openConfirmationLink(confirmationLink) {
-    let driver = null;
-    
-    try {
-        const chromeOptions = new chrome.Options();
-        chromeOptions.addArguments('--headless');
-        chromeOptions.addArguments('--no-sandbox');
-        chromeOptions.addArguments('--disable-dev-shm-usage');
-        
-        driver = await new Builder()
-            .forBrowser('chrome')
-            .setChromeOptions(chromeOptions)
-            .build();
-        
-        await driver.get(confirmationLink);
-        await driver.sleep(5000);
-        
-        return true;
-    } catch (error) {
-        console.error('[MEGA] Confirmation link error:', error.message);
-        return false;
     } finally {
         if (driver) {
             await driver.quit();
@@ -392,13 +365,7 @@ module.exports = {
                               `🔑 Generated Password: \`${megaPassword}\`\n\n` +
                               `⚙️ *Step 2/5: Initializing browser...*`);
             
-            // Step 2: Perform MEGA registration
-            const { screenshot, success, error } = await performMegaRegistration(userEmail, megaPassword, updateStatus);
-            
-            if (!success) {
-                throw new Error(error || 'Registration failed');
-            }
-            
+            // Step 2: Submit registration
             await updateStatus(`📬 *Step 3/5: Registration submitted!*\n⏳ Waiting for confirmation email...`);
             
             // Step 3: Wait for confirmation email
@@ -434,10 +401,22 @@ module.exports = {
                 }
             }
             
-            // Step 4: Open confirmation link if found
-            if (confirmationLink) {
-                await updateStatus(`✅ *Confirmation email received!*\n🔗 Opening verification link...`);
-                await openConfirmationLink(confirmationLink);
+            if (!confirmationLink) {
+                throw new Error('Confirmation email not received within time limit');
+            }
+            
+            // Step 4: Perform registration AND confirmation in the SAME browser session
+            await updateStatus(`🔗 *Step 4/5: Completing registration with confirmation link...*`);
+            
+            const { screenshot, success, error } = await performMegaRegistration(
+                userEmail, 
+                megaPassword, 
+                confirmationLink, 
+                updateStatus
+            );
+            
+            if (!success) {
+                throw new Error(error || 'Registration failed');
             }
             
             // Calculate total time
@@ -449,7 +428,7 @@ module.exports = {
             if (screenshot && screenshot.length > 0) {
                 await sock.sendMessage(from, {
                     image: screenshot,
-                    caption: `🖼️ *Final Registration Status*`
+                    caption: `🖼️ *Final Registration Status - Account Confirmed!*`
                 });
             }
             
@@ -478,15 +457,15 @@ module.exports = {
                 errorMessage += `Could not create temporary email.\n` +
                                `• The mail.tm service might be down\n` +
                                `• Please try again later`;
+            } else if (error.message.includes('confirmation email')) {
+                errorMessage += `Confirmation email not received.\n` +
+                               `• The email might be delayed\n` +
+                               `• Please try again`;
             } else if (error.message.includes('WebDriver') || error.message.includes('chrome')) {
                 errorMessage += `Browser automation failed.\n` +
                                `• Selenium WebDriver or Chrome may not be installed\n` +
                                `• Run: npm install selenium-webdriver\n` +
                                `• Install Chrome browser on your server`;
-            } else if (error.message.includes('timeout')) {
-                errorMessage += `Operation timed out.\n` +
-                               `• The process took too long\n` +
-                               `• Please try again`;
             } else {
                 errorMessage += `${error.message}\n\n` +
                                `Please try again later.`;
