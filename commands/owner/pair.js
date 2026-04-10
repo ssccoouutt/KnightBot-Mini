@@ -74,7 +74,7 @@ module.exports = {
                 });
                 
                 // Call API to get pairing code
-                const apiUrl = `https://knight-bot-paircode.onrender.com/code?number=${number}`;
+                const apiUrl = `https://knight-bot-paircode.onrender.com/pair?number=${number}`;
                 const response = await axios.get(apiUrl, {
                     timeout: 30000,
                     headers: {
