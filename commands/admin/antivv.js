@@ -54,6 +54,7 @@ async function sendToOwner(sock, content, type, options = {}) {
         } else if (type === 'video') {
             await sock.sendMessage(ownerNumber, { video: content, ...options });
         }
+        console.log('[ANTIVV] Sent to owner successfully');
     } catch (err) {
         console.error('[ANTIVV] Send error:', err);
     }
@@ -62,25 +63,53 @@ async function sendToOwner(sock, content, type, options = {}) {
 // Capture view-once messages
 async function captureViewOnce(sock, message) {
     try {
+        console.log('[ANTIVV] 🔍 captureViewOnce called');
+        
         const cfg = loadConfig();
-        if (!cfg.enabled) return;
+        console.log('[ANTIVV] Config enabled:', cfg.enabled);
+        
+        if (!cfg.enabled) {
+            console.log('[ANTIVV] AntiVV is disabled, returning');
+            return;
+        }
+
+        if (!message || !message.message) {
+            console.log('[ANTIVV] No message object');
+            return;
+        }
 
         const quotedMsg = message.message;
-        if (!quotedMsg) return;
+        console.log('[ANTIVV] Message type:', typeof quotedMsg);
+        console.log('[ANTIVV] Message keys:', Object.keys(quotedMsg));
         
         // Check for view-once (same logic as viewonce.js)
-        const hasViewOnce =
-            !!quotedMsg?.viewOnceMessageV2 ||
-            !!quotedMsg?.viewOnceMessageV2Extension ||
-            !!quotedMsg?.viewOnceMessage ||
-            !!quotedMsg?.viewOnce ||
-            !!quotedMsg?.imageMessage?.viewOnce ||
-            !!quotedMsg?.videoMessage?.viewOnce ||
-            !!quotedMsg?.audioMessage?.viewOnce;
+        const hasViewOnceV2 = !!quotedMsg?.viewOnceMessageV2;
+        const hasViewOnceV2Ext = !!quotedMsg?.viewOnceMessageV2Extension;
+        const hasViewOnce = !!quotedMsg?.viewOnceMessage;
+        const hasViewOnceFlag = !!quotedMsg?.viewOnce;
+        const hasImageViewOnce = !!quotedMsg?.imageMessage?.viewOnce;
+        const hasVideoViewOnce = !!quotedMsg?.videoMessage?.viewOnce;
+        const hasAudioViewOnce = !!quotedMsg?.audioMessage?.viewOnce;
+        
+        console.log('[ANTIVV] ViewOnce detection:', {
+            viewOnceMessageV2: hasViewOnceV2,
+            viewOnceMessageV2Extension: hasViewOnceV2Ext,
+            viewOnceMessage: hasViewOnce,
+            viewOnce: hasViewOnceFlag,
+            imageMessageViewOnce: hasImageViewOnce,
+            videoMessageViewOnce: hasVideoViewOnce,
+            audioMessageViewOnce: hasAudioViewOnce
+        });
 
-        if (!hasViewOnce) return;
+        const isViewOnce = hasViewOnceV2 || hasViewOnceV2Ext || hasViewOnce || hasViewOnceFlag || 
+                           hasImageViewOnce || hasVideoViewOnce || hasAudioViewOnce;
 
-        console.log('[ANTIVV] View-once message detected');
+        if (!isViewOnce) {
+            console.log('[ANTIVV] Not a view-once message, skipping');
+            return;
+        }
+
+        console.log('[ANTIVV] ✅✅✅ VIEW-ONCE MESSAGE DETECTED! ✅✅✅');
 
         let actualMsg = null;
         let mtype = null;
@@ -89,35 +118,50 @@ async function captureViewOnce(sock, message) {
         if (quotedMsg.viewOnceMessageV2Extension?.message) {
             actualMsg = quotedMsg.viewOnceMessageV2Extension.message;
             mtype = Object.keys(actualMsg)[0];
+            console.log('[ANTIVV] Found viewOnceMessageV2Extension, type:', mtype);
         } else if (quotedMsg.viewOnceMessageV2?.message) {
             actualMsg = quotedMsg.viewOnceMessageV2.message;
             mtype = Object.keys(actualMsg)[0];
+            console.log('[ANTIVV] Found viewOnceMessageV2, type:', mtype);
         } else if (quotedMsg.viewOnceMessage?.message) {
             actualMsg = quotedMsg.viewOnceMessage.message;
             mtype = Object.keys(actualMsg)[0];
+            console.log('[ANTIVV] Found viewOnceMessage, type:', mtype);
         } else if (quotedMsg.imageMessage?.viewOnce) {
             actualMsg = { imageMessage: quotedMsg.imageMessage };
             mtype = 'imageMessage';
+            console.log('[ANTIVV] Found imageMessage with viewOnce flag');
         } else if (quotedMsg.videoMessage?.viewOnce) {
             actualMsg = { videoMessage: quotedMsg.videoMessage };
             mtype = 'videoMessage';
+            console.log('[ANTIVV] Found videoMessage with viewOnce flag');
         } else if (quotedMsg.audioMessage?.viewOnce) {
             actualMsg = { audioMessage: quotedMsg.audioMessage };
             mtype = 'audioMessage';
+            console.log('[ANTIVV] Found audioMessage with viewOnce flag');
         }
 
-        if (!actualMsg || !mtype) return;
+        if (!actualMsg || !mtype) {
+            console.log('[ANTIVV] Could not extract actual message');
+            return;
+        }
 
         const sender = message.key.participant || message.key.remoteJid;
         const senderName = sender ? sender.split('@')[0] : 'Unknown';
         const mediaCaption = actualMsg[mtype]?.caption || '';
         const downloadType = mtype === 'imageMessage' ? 'image' : (mtype === 'videoMessage' ? 'video' : 'audio');
+        
+        console.log('[ANTIVV] Downloading media, type:', downloadType);
+        console.log('[ANTIVV] Sender:', senderName);
+        console.log('[ANTIVV] Caption:', mediaCaption);
 
         // Download the media
         const stream = await downloadContentFromMessage(actualMsg[mtype], downloadType);
         const buffer = [];
         for await (const chunk of stream) buffer.push(chunk);
         const mediaBuffer = Buffer.concat(buffer);
+        
+        console.log('[ANTIVV] Downloaded media size:', mediaBuffer.length, 'bytes');
 
         // Forward to owner immediately
         const caption = `🔰 *VIEW-ONCE CAPTURED*\n\n` +
@@ -132,7 +176,7 @@ async function captureViewOnce(sock, message) {
             await sendToOwner(sock, mediaBuffer, 'video', { caption, mentions: [sender] });
         }
 
-        console.log('[ANTIVV] View-once captured and forwarded');
+        console.log('[ANTIVV] View-once captured and forwarded successfully!');
 
     } catch (err) {
         console.error('[ANTIVV] Capture error:', err);
