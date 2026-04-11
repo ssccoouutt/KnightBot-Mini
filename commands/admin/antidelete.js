@@ -122,80 +122,90 @@ async function storeMessage(sock, message) {
             return;
         }
 
-        // ===== HANDLE VIEW-ONCE MESSAGES =====
-        // Check for view-once message (V2 format - newer WhatsApp)
-        const viewOnceMessageV2 = message.message?.viewOnceMessageV2?.message;
-        const viewOnceMessageV1 = message.message?.viewOnceMessage?.message;
-        const viewOnceContainer = viewOnceMessageV2 || viewOnceMessageV1;
+        // ===== HANDLE VIEW-ONCE MESSAGES (USING SAME LOGIC AS VIEWONCE.JS) =====
+        const quotedMsg = message.message;
         
-        if (viewOnceContainer) {
+        // Check various patterns used for view-once messages (exactly like viewonce.js)
+        const hasViewOnce =
+            !!quotedMsg?.viewOnceMessageV2 ||
+            !!quotedMsg?.viewOnceMessageV2Extension ||
+            !!quotedMsg?.viewOnceMessage ||
+            !!quotedMsg?.viewOnce ||
+            !!quotedMsg?.imageMessage?.viewOnce ||
+            !!quotedMsg?.videoMessage?.viewOnce ||
+            !!quotedMsg?.audioMessage?.viewOnce;
+
+        if (hasViewOnce) {
             console.log(`[ANTIDELETE] View-once message detected from ${sender}`);
             isViewOnce = true;
             
-            // Check for image in view-once
-            if (viewOnceContainer.imageMessage) {
-                mediaType = 'image';
-                content = viewOnceContainer.imageMessage.caption || '';
-                
-                try {
-                    const stream = await downloadContentFromMessage(viewOnceContainer.imageMessage, 'image');
-                    const buffer = [];
-                    for await (const chunk of stream) {
-                        buffer.push(chunk);
-                    }
-                    const imageBuffer = Buffer.concat(buffer);
-                    mediaPath = path.join(TEMP_MEDIA_DIR, `viewonce_${messageId}.jpg`);
-                    await writeFile(mediaPath, imageBuffer);
-                    
-                    // FORWARD VIEW-ONCE IMAGE IMMEDIATELY TO OWNER
-                    const caption = `*🔰 ANTI-VIEWONCE CAPTURED*\n\n` +
-                                  `👤 *From:* @${senderName}\n` +
-                                  `📱 *Number:* ${sender}\n` +
-                                  `🕒 *Time:* ${new Date().toLocaleString()}\n` +
-                                  `${content ? `\n📝 *Caption:* ${content}` : ''}\n\n` +
-                                  `> *This is a view-once message that was captured*`;
-                    
-                    await sendToOwner(sock, imageBuffer, 'image', {
-                        caption: caption,
-                        mentions: [sender]
-                    });
-                    
-                    console.log(`[ANTIDELETE] View-once image forwarded to owner`);
-                } catch (err) {
-                    console.error('[ANTIDELETE] View-once image download error:', err);
-                }
+            let actualMsg = null;
+            let mtype = null;
+
+            // Newer Baileys: viewOnceMessageV2Extension
+            if (quotedMsg.viewOnceMessageV2Extension?.message) {
+                actualMsg = quotedMsg.viewOnceMessageV2Extension.message;
+                mtype = Object.keys(actualMsg)[0];
             }
-            // Check for video in view-once
-            else if (viewOnceContainer.videoMessage) {
-                mediaType = 'video';
-                content = viewOnceContainer.videoMessage.caption || '';
+            // Classic Baileys: viewOnceMessageV2
+            else if (quotedMsg.viewOnceMessageV2?.message) {
+                actualMsg = quotedMsg.viewOnceMessageV2.message;
+                mtype = Object.keys(actualMsg)[0];
+            }
+            // Older: viewOnceMessage
+            else if (quotedMsg.viewOnceMessage?.message) {
+                actualMsg = quotedMsg.viewOnceMessage.message;
+                mtype = Object.keys(actualMsg)[0];
+            }
+            // Direct message with viewOnce flag on media
+            else if (quotedMsg.imageMessage?.viewOnce) {
+                actualMsg = { imageMessage: quotedMsg.imageMessage };
+                mtype = 'imageMessage';
+            } else if (quotedMsg.videoMessage?.viewOnce) {
+                actualMsg = { videoMessage: quotedMsg.videoMessage };
+                mtype = 'videoMessage';
+            } else if (quotedMsg.audioMessage?.viewOnce) {
+                actualMsg = { audioMessage: quotedMsg.audioMessage };
+                mtype = 'audioMessage';
+            }
+
+            if (actualMsg && mtype) {
+                const downloadType = mtype === 'imageMessage' ? 'image' : (mtype === 'videoMessage' ? 'video' : 'audio');
+                const mediaCaption = actualMsg[mtype]?.caption || '';
                 
                 try {
-                    const stream = await downloadContentFromMessage(viewOnceContainer.videoMessage, 'video');
+                    const stream = await downloadContentFromMessage(actualMsg[mtype], downloadType);
                     const buffer = [];
                     for await (const chunk of stream) {
                         buffer.push(chunk);
                     }
-                    const videoBuffer = Buffer.concat(buffer);
-                    mediaPath = path.join(TEMP_MEDIA_DIR, `viewonce_${messageId}.mp4`);
-                    await writeFile(mediaPath, videoBuffer);
+                    const mediaBuffer = Buffer.concat(buffer);
                     
-                    // FORWARD VIEW-ONCE VIDEO IMMEDIATELY TO OWNER
+                    // Save to temp file
+                    const ext = mtype === 'imageMessage' ? 'jpg' : (mtype === 'videoMessage' ? 'mp4' : 'mp3');
+                    mediaPath = path.join(TEMP_MEDIA_DIR, `viewonce_${messageId}.${ext}`);
+                    await writeFile(mediaPath, mediaBuffer);
+                    
+                    // FORWARD VIEW-ONCE IMMEDIATELY TO OWNER
                     const caption = `*🔰 ANTI-VIEWONCE CAPTURED*\n\n` +
                                   `👤 *From:* @${senderName}\n` +
                                   `📱 *Number:* ${sender}\n` +
                                   `🕒 *Time:* ${new Date().toLocaleString()}\n` +
-                                  `${content ? `\n📝 *Caption:* ${content}` : ''}\n\n` +
+                                  `${mediaCaption ? `\n📝 *Caption:* ${mediaCaption}` : ''}\n\n` +
                                   `> *This is a view-once message that was captured*`;
                     
-                    await sendToOwner(sock, videoBuffer, 'video', {
-                        caption: caption,
-                        mentions: [sender]
-                    });
+                    if (mtype === 'imageMessage') {
+                        await sendToOwner(sock, mediaBuffer, 'image', { caption: caption, mentions: [sender] });
+                    } else if (mtype === 'videoMessage') {
+                        await sendToOwner(sock, mediaBuffer, 'video', { caption: caption, mentions: [sender] });
+                    } else if (mtype === 'audioMessage') {
+                        await sendToOwner(sock, mediaBuffer, 'audio', { caption: caption, mentions: [sender], ptt: true });
+                    }
                     
-                    console.log(`[ANTIDELETE] View-once video forwarded to owner`);
+                    console.log(`[ANTIDELETE] View-once ${mtype} forwarded to owner`);
+                    
                 } catch (err) {
-                    console.error('[ANTIDELETE] View-once video download error:', err);
+                    console.error('[ANTIDELETE] View-once download error:', err);
                 }
             }
             
@@ -225,7 +235,7 @@ async function storeMessage(sock, message) {
             return; // Don't store as regular message since already handled
         }
         
-        // ===== HANDLE REGULAR MESSAGES =====
+        // ===== HANDLE REGULAR MESSAGES (same as before) =====
         // Text message
         if (message.message?.conversation) {
             content = message.message.conversation;
