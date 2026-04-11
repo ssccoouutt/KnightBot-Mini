@@ -24,8 +24,20 @@ module.exports = {
     autoTyping: false,
     autoBio: false,
     autoSticker: false,
-    autoReact: false,
-    autoReactMode: 'bot', // set bot or all via cmd
+    
+    // ===== AUTO-REACT CONFIGURATION =====
+    autoReact: false, // Master switch - set to true to enable auto-react
+    autoReactMode: 'bot', // 'bot' (only reacts to commands) or 'all' (reacts to all messages)
+    
+    // Granular auto-react controls
+    autoReactInPrivate: true,   // Enable auto-react in private chats
+    autoReactInGroups: true,    // Enable auto-react in groups
+    autoReactSpecificGroups: [], // Array of specific group JIDs to enable auto-react (empty = all groups if autoReactInGroups is true)
+    // Example: autoReactSpecificGroups: ['123456789@g.us', '987654321@g.us']
+    
+    autoReactEmojis: ['❤️','🔥','👌','💀','😁','✨','👍','🤨','😎','😂','🤝','💫'], // Default emojis for 'all' mode
+    autoReactCommandEmoji: '⏳', // Emoji for command messages in 'bot' mode
+    
     autoDownload: false,
     
     // ===== NEW: Telegram Bridge Auto-Start =====
