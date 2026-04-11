@@ -20,6 +20,15 @@ const messageStore = new Map();
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(TEMP_MEDIA_DIR)) fs.mkdirSync(TEMP_MEDIA_DIR, { recursive: true });
 
+// Get owner number safely
+function getOwnerNumber() {
+    if (config.ownerNumber && Array.isArray(config.ownerNumber) && config.ownerNumber.length > 0) {
+        return config.ownerNumber[0] + '@s.whatsapp.net';
+    }
+    // Fallback - you should replace this with your actual number
+    return '923401809397@s.whatsapp.net';
+}
+
 // Load config
 function loadConfig() {
     try {
@@ -77,7 +86,7 @@ setInterval(cleanTempFolderIfLarge, 60 * 1000);
 // Send to owner
 async function sendToOwner(sock, content, type, options = {}) {
     try {
-        const ownerNumber = config.ownerNumber[0] + '@s.whatsapp.net';
+        const ownerNumber = getOwnerNumber();
         if (type === 'text') {
             await sock.sendMessage(ownerNumber, { text: content });
         } else if (type === 'image') {
@@ -95,8 +104,8 @@ async function sendToOwner(sock, content, type, options = {}) {
 // Store incoming messages
 async function storeMessage(sock, message) {
     try {
-        const config = loadConfig();
-        if (!config.enabled) return;
+        const cfg = loadConfig();
+        if (!cfg.enabled) return;
         if (!message.key?.id) return;
 
         const messageId = message.key.id;
@@ -165,13 +174,19 @@ async function storeMessage(sock, message) {
 // Handle message deletion
 async function handleMessageRevocation(sock, revocationMessage) {
     try {
-        const config = loadConfig();
-        if (!config.enabled) return;
+        const cfg = loadConfig();
+        if (!cfg.enabled) return;
 
-        const messageId = revocationMessage.message.protocolMessage.key.id;
-        const deletedBy = revocationMessage.participant || revocationMessage.key.participant || revocationMessage.key.remoteJid;
-        const ownerNumber = config.ownerNumber[0] + '@s.whatsapp.net';
+        // Safely extract message ID
+        const messageId = revocationMessage.message?.protocolMessage?.key?.id;
+        if (!messageId) return;
 
+        const deletedBy = revocationMessage.participant || revocationMessage.key?.participant || revocationMessage.key?.remoteJid;
+        if (!deletedBy) return;
+
+        const ownerNumber = getOwnerNumber();
+
+        // Don't report if bot or owner deleted
         if (deletedBy.includes(sock.user.id) || deletedBy === ownerNumber) return;
 
         const original = messageStore.get(messageId);
