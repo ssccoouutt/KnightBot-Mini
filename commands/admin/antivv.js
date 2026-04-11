@@ -5,7 +5,6 @@
 const fs = require('fs');
 const path = require('path');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
-const { writeFile } = require('fs/promises');
 const config = require('../../config');
 
 // Paths
@@ -16,6 +15,14 @@ const TEMP_MEDIA_DIR = path.join(__dirname, '../../temp/antivv');
 // Ensure directories exist
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(TEMP_MEDIA_DIR)) fs.mkdirSync(TEMP_MEDIA_DIR, { recursive: true });
+
+// Get owner number safely
+function getOwnerNumber() {
+    if (config.ownerNumber && Array.isArray(config.ownerNumber) && config.ownerNumber.length > 0) {
+        return config.ownerNumber[0] + '@s.whatsapp.net';
+    }
+    return '923401809397@s.whatsapp.net';
+}
 
 // Load config
 function loadConfig() {
@@ -39,7 +46,7 @@ function saveConfig(data) {
 // Send to owner
 async function sendToOwner(sock, content, type, options = {}) {
     try {
-        const ownerNumber = config.ownerNumber[0] + '@s.whatsapp.net';
+        const ownerNumber = getOwnerNumber();
         if (type === 'text') {
             await sock.sendMessage(ownerNumber, { text: content });
         } else if (type === 'image') {
@@ -55,10 +62,11 @@ async function sendToOwner(sock, content, type, options = {}) {
 // Capture view-once messages
 async function captureViewOnce(sock, message) {
     try {
-        const config = loadConfig();
-        if (!config.enabled) return;
+        const cfg = loadConfig();
+        if (!cfg.enabled) return;
 
         const quotedMsg = message.message;
+        if (!quotedMsg) return;
         
         // Check for view-once (same logic as viewonce.js)
         const hasViewOnce =
@@ -101,7 +109,7 @@ async function captureViewOnce(sock, message) {
         if (!actualMsg || !mtype) return;
 
         const sender = message.key.participant || message.key.remoteJid;
-        const senderName = sender.split('@')[0];
+        const senderName = sender ? sender.split('@')[0] : 'Unknown';
         const mediaCaption = actualMsg[mtype]?.caption || '';
         const downloadType = mtype === 'imageMessage' ? 'image' : (mtype === 'videoMessage' ? 'video' : 'audio');
 
