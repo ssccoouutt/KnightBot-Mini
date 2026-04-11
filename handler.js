@@ -25,16 +25,6 @@ const CACHE_TTL = 60000; // 1 minute cache
 // Load all commands
 const commands = loadCommands();
 
-// Helper function to convert stream to buffer
-const streamToBuffer = async (stream) => {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    stream.on('data', chunk => chunks.push(chunk));
-    stream.on('end', () => resolve(Buffer.concat(chunks)));
-    stream.on('error', reject);
-  });
-};
-
 // Check if message should be forwarded based on filters
 const shouldForwardMessage = (messageContent, filters) => {
   if (!filters) return true;
@@ -243,16 +233,6 @@ const isBotAdmin = async (sock, groupId, groupMetadata = null) => {
   } catch (error) {
     return false;
   }
-};
-
-const isUrl = (text) => {
-  const urlRegex = /(https?:\/\/[^\s]+)/gi;
-  return urlRegex.test(text);
-};
-
-const hasGroupLink = (text) => {
-  const linkRegex = /chat.whatsapp.com\/([0-9A-Za-z]{20,24})/i;
-  return linkRegex.test(text);
 };
 
 // System JID filter - checks if JID is from broadcast/status/newsletter
@@ -632,7 +612,6 @@ const handleMessage = async (sock, msg) => {
     if (!isGroup && !msg.key.fromMe && body && !body.startsWith(config.prefix)) {
       const autoReplied = await autoreply.checkAutoReply(sock, from, sender, body, (text) => sock.sendMessage(from, { text }, { quoted: msg }));
       if (autoReplied) {
-        // Message was handled by auto-reply, don't process further
         console.log(`[AUTOREPLY] Handled message: "${body}" from ${sender}`);
         return;
       }
@@ -755,51 +734,6 @@ const handleMessage = async (sock, msg) => {
         }
       }
     }
-
-    // Check for active bomb games
-    try {
-      const bombModule = require('./commands/fun/bomb');
-      if (bombModule.gameState && bombModule.gameState.has(sender)) {
-        const bombCommand = commands.get('bomb');
-        if (bombCommand && bombCommand.execute) {
-          await bombCommand.execute(sock, msg, [], {
-            from, sender, isGroup, groupMetadata,
-            isOwner: isOwner(sender),
-            isAdmin: await isAdmin(sock, sender, from, groupMetadata),
-            isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
-            isMod: isMod(sender),
-            reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
-            react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
-          });
-          return;
-        }
-      }
-    } catch (e) {}
-    
-    // Check for active tictactoe games
-    try {
-      const tictactoeModule = require('./commands/fun/tictactoe');
-      if (tictactoeModule.handleTicTacToeMove) {
-        const isInGame = Object.values(tictactoeModule.games || {}).some(room => 
-          room.id.startsWith('tictactoe') && 
-          [room.game.playerX, room.game.playerO].includes(sender) && 
-          room.state === 'PLAYING'
-        );
-        
-        if (isInGame) {
-          const handled = await tictactoeModule.handleTicTacToeMove(sock, msg, {
-            from, sender, isGroup, groupMetadata,
-            isOwner: isOwner(sender),
-            isAdmin: await isAdmin(sock, sender, from, groupMetadata),
-            isBotAdmin: await isBotAdmin(sock, from, groupMetadata),
-            isMod: isMod(sender),
-            reply: (text) => sock.sendMessage(from, { text }, { quoted: msg }),
-            react: (emoji) => sock.sendMessage(from, { react: { text: emoji, key: msg.key } })
-          });
-          if (handled) return;
-        }
-      }
-    } catch (e) {}
     
     // ===== UNIVERSAL SESSION DETECTION =====
     const quotedMessageId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
