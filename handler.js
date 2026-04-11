@@ -13,6 +13,7 @@ const axios = require('axios');
 const sessionManager = require('./utils/sessionManager');
 const autoreply = require('./commands/owner/autoreply');
 const autoReact = require('./utils/autoReact');
+const antidelete = require('./commands/admin/antidelete');
 const { 
   normalizeJid, 
   normalizeJidWithLid, 
@@ -467,6 +468,17 @@ const handleMessage = async (sock, msg) => {
     if (isSystemJid(from)) {
       return;
     }
+    
+    // ===== HANDLE MESSAGE DELETIONS (ANTIDELETE) =====
+    // Check if this is a message deletion protocol message
+    if (msg.message?.protocolMessage && msg.message.protocolMessage.type === 0) {
+      await antidelete.handleMessageRevocation(sock, msg);
+      return; // Don't process further
+    }
+    
+    // ===== STORE MESSAGE FOR ANTIDELETE =====
+    // Store message before any processing (for anti-delete feature)
+    await antidelete.storeMessage(sock, msg);
     
     // ===== AUTO-REACT SYSTEM WITH GRANULAR CONTROLS =====
     try {
