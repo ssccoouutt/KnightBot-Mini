@@ -10,8 +10,16 @@ const { sendButtons } = giftedBtns;
 
 const FORCE_AI_MODE = true;
 
-// Store game sessions
+// Store game sessions for quick lookup
 const gameSessions = new Map();
+
+// Helper to get JID from sender (handles LID format)
+const getJid = (sender) => {
+  if (sender.includes('@')) {
+    return sender.split('@')[0];
+  }
+  return sender;
+};
 
 module.exports = {
   name: 'tictactoe',
@@ -26,8 +34,18 @@ module.exports = {
     
     try {
       // Check if player is already in a game
-      const existingGame = await findPlayerGame(sender);
-      if (existingGame && existingGame.state === 'PLAYING') {
+      let existingGame = null;
+      for (const [id, session] of gameSessions) {
+        if ((session.data.playerX === sender || session.data.playerO === sender) && 
+            session.data.state === 'PLAYING' &&
+            !session.data.game.winner &&
+            session.data.game.turns !== 9) {
+          existingGame = session;
+          break;
+        }
+      }
+      
+      if (existingGame) {
         await reply('❌ You are still in a game. Type *surrender* to quit.');
         return;
       }
@@ -50,9 +68,6 @@ module.exports = {
         waitingRoom.data.game.playerO = sender;
         waitingRoom.data.game.currentTurn = waitingRoom.data.game.playerX;
         
-        // Update session
-        sessionManager.updateSession(sender, from, waitingRoom.data);
-        
         const arr = waitingRoom.data.game.render().map(v => ({
           'X': '❎',
           'O': '⭕',
@@ -67,13 +82,8 @@ module.exports = {
           '9': '9️⃣',
         }[v]));
         
-        const sessionId = waitingRoom.id.split(':').pop();
-        const buttons = [
-          { id: `ttt_surrender_${sessionId}`, text: '🏳️ Surrender' }
-        ];
-        
         const str = `🎮 *TicTacToe Game Started!*\n\n` +
-                   `Waiting for @${waitingRoom.data.game.currentTurn.split('@')[0]} to play...\n\n` +
+                   `Waiting for @${getJid(waitingRoom.data.game.currentTurn)} to play...\n\n` +
                    `${arr.slice(0, 3).join('')}\n` +
                    `${arr.slice(3, 6).join('')}\n` +
                    `${arr.slice(6).join('')}\n\n` +
@@ -83,45 +93,52 @@ module.exports = {
                    `• Type a number (1-9) to place your symbol\n` +
                    `• Type *surrender* to give up`;
         
-        // Send to both players
-        const sentMsg = await sendButtons(sock, from, {
+        // Send to player X
+        const playerXChat = waitingRoom.data.playerX.includes('@') ? 
+          waitingRoom.data.playerX : 
+          waitingRoom.data.playerX + '@s.whatsapp.net';
+        
+        await sock.sendMessage(playerXChat, { 
           text: str,
-          footer: 'TicTacToe',
-          buttons: buttons,
-          aimode: FORCE_AI_MODE
-        }, {});
+          mentions: [waitingRoom.data.game.currentTurn, waitingRoom.data.playerX, waitingRoom.data.playerO]
+        });
         
-        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'tictactoe');
-        
-        // Also send to the other player if different chat
-        if (waitingRoom.data.playerX !== sender) {
-          const otherChat = waitingRoom.data.playerX.split('@')[0] + '@s.whatsapp.net';
-          const otherMsg = await sendButtons(sock, otherChat, {
-            text: str,
-            footer: 'TicTacToe',
-            buttons: buttons,
-            aimode: FORCE_AI_MODE
-          }, {});
-          sessionManager.addPendingMessage(waitingRoom.data.playerX, otherChat, otherMsg.key.id, 'tictactoe');
-        }
+        // Send to player O (joiner)
+        await sock.sendMessage(from, { 
+          text: str,
+          mentions: [waitingRoom.data.game.currentTurn, waitingRoom.data.playerX, waitingRoom.data.playerO]
+        });
         
         await react('🎮');
         
       } else {
         // Create new room
-        const session = sessionManager.createSession(sender, from, 'tictactoe', {
-          game: new TicTacToe(sender, 'o'),
-          playerX: sender,
-          playerO: null,
-          state: 'WAITING',
-          roomName: roomName,
-          startTime: Date.now()
-        });
+        const sessionId = Date.now().toString();
+        const session = {
+          id: `tictactoe-${sessionId}`,
+          command: 'tictactoe',
+          data: {
+            game: new TicTacToe(sender, 'o'),
+            playerX: sender,
+            playerO: null,
+            state: 'WAITING',
+            roomName: roomName,
+            startTime: Date.now()
+          },
+          lastActivity: Date.now()
+        };
         
         gameSessions.set(session.id, session);
         
         await reply(`⏳ *Waiting for opponent*\nType \`.ttt ${roomName || ''}\` to join!\n\nRoom ID: ${session.id}`);
         await react('⏳');
+        
+        // Auto-cleanup after 2 minutes if no one joins
+        setTimeout(() => {
+          if (gameSessions.has(session.id) && gameSessions.get(session.id).data.state === 'WAITING') {
+            gameSessions.delete(session.id);
+          }
+        }, 120000);
       }
       
     } catch (error) {
@@ -133,30 +150,37 @@ module.exports = {
   async handleSession(sock, msg, session, context) {
     const { from, sender, reply, react, isButtonClick } = context;
     
-    console.log(`[TICTACTOE] handleSession called for ${sender}, isButtonClick: ${isButtonClick}`);
+    // Find the actual game session
+    let gameSession = null;
+    for (const [id, sess] of gameSessions) {
+      if (sess.data.playerX === sender || sess.data.playerO === sender) {
+        gameSession = sess;
+        break;
+      }
+    }
+    
+    if (!gameSession) {
+      return true;
+    }
     
     // Handle button clicks (surrender)
     if (isButtonClick) {
       let buttonId = null;
-      let buttonText = null;
       
       if (msg.message?.buttonsResponseMessage) {
         buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
-        buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
       } else if (msg.message?.interactiveResponseMessage) {
         const interactive = msg.message.interactiveResponseMessage;
         if (interactive.nativeFlowResponseMessage) {
           try {
             const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
             buttonId = params.id;
-            buttonText = params.display_text;
           } catch (e) {}
         }
       }
       
       if (buttonId && buttonId.includes('ttt_surrender_')) {
-        console.log(`[TICTACTOE] Surrender button clicked by ${sender}`);
-        await handleSurrender(sock, session, sender, reply);
+        await handleSurrender(sock, gameSession, sender, reply);
         return true;
       }
       return true;
@@ -174,38 +198,37 @@ module.exports = {
     
     // Handle surrender command
     if (text.toLowerCase() === 'surrender' || text.toLowerCase() === 'give up') {
-      await handleSurrender(sock, session, sender, reply);
+      await handleSurrender(sock, gameSession, sender, reply);
       return true;
     }
     
     // Check if game is waiting for opponent
-    if (session.data.state === 'WAITING') {
-      await reply(`⏳ *Waiting for opponent...*\nType \`.ttt ${session.data.roomName || ''}\` to join!`);
+    if (gameSession.data.state === 'WAITING') {
+      await reply(`⏳ *Waiting for opponent...*\nType \`.ttt ${gameSession.data.roomName || ''}\` to join!`);
       return true;
     }
     
     // Check if game is over
-    if (session.data.game.winner || session.data.game.turns === 9) {
+    if (gameSession.data.game.winner || gameSession.data.game.turns === 9) {
       await reply(`❌ This game has already ended. Start a new game with \`.ttt\``);
-      sessionManager.clearSession(session.id);
-      gameSessions.delete(session.id);
+      gameSessions.delete(gameSession.id);
       return true;
     }
     
     // Check if it's the player's turn
-    const isPlayerX = sender === session.data.playerX;
-    const isPlayerO = sender === session.data.playerO;
+    const isPlayerX = sender === gameSession.data.playerX;
+    const isPlayerO = sender === gameSession.data.playerO;
     
     if (!isPlayerX && !isPlayerO) {
       await reply(`❌ You are not a player in this game.`);
       return true;
     }
     
-    const isOTurn = session.data.game.currentTurn === session.data.playerO;
+    const isOTurn = gameSession.data.game.currentTurn === gameSession.data.playerO;
     
     if ((isPlayerX && isOTurn) || (isPlayerO && !isOTurn)) {
-      await reply(`❌ Not your turn! Wait for @${session.data.game.currentTurn.split('@')[0]} to play.`, {
-        mentions: [session.data.game.currentTurn]
+      await reply(`❌ Not your turn! Wait for @${getJid(gameSession.data.game.currentTurn)} to play.`, {
+        mentions: [gameSession.data.game.currentTurn]
       });
       return true;
     }
@@ -218,21 +241,18 @@ module.exports = {
     }
     
     // Make the move
-    const ok = session.data.game.turn(isPlayerO, position - 1);
+    const ok = gameSession.data.game.turn(isPlayerO, position - 1);
     
     if (!ok) {
       await reply(`❌ Invalid move! That position is already taken.`);
       return true;
     }
     
-    // Update session
-    session.data.game = session.data.game;
-    
     // Check game status
-    const winner = session.data.game.winner;
-    const isTie = session.data.game.turns === 9 && !winner;
+    const winner = gameSession.data.game.winner;
+    const isTie = gameSession.data.game.turns === 9 && !winner;
     
-    const arr = session.data.game.render().map(v => ({
+    const arr = gameSession.data.game.render().map(v => ({
       'X': '❎',
       'O': '⭕',
       '1': '1️⃣',
@@ -246,18 +266,13 @@ module.exports = {
       '9': '9️⃣',
     }[v]));
     
-    const sessionId = session.id.split(':').pop();
-    const buttons = [
-      { id: `ttt_surrender_${sessionId}`, text: '🏳️ Surrender' }
-    ];
-    
     let gameStatus;
     if (winner) {
-      gameStatus = `🎉 @${winner.split('@')[0]} wins the game!`;
+      gameStatus = `🎉 @${getJid(winner)} wins the game!`;
     } else if (isTie) {
       gameStatus = `🤝 Game ended in a draw!`;
     } else {
-      gameStatus = `🎲 Turn: @${session.data.game.currentTurn.split('@')[0]} (${session.data.game.currentTurn === session.data.playerX ? '❎' : '⭕'})`;
+      gameStatus = `🎲 Turn: @${getJid(gameSession.data.game.currentTurn)} (${gameSession.data.game.currentTurn === gameSession.data.playerX ? '❎' : '⭕'})`;
     }
     
     const str = `🎮 *TicTacToe Game*\n\n` +
@@ -265,44 +280,41 @@ module.exports = {
                `${arr.slice(0, 3).join('')}\n` +
                `${arr.slice(3, 6).join('')}\n` +
                `${arr.slice(6).join('')}\n\n` +
-               `▢ Player ❎: @${session.data.playerX.split('@')[0]}\n` +
-               `▢ Player ⭕: @${session.data.playerO.split('@')[0]}\n\n` +
+               `▢ Player ❎: @${getJid(gameSession.data.playerX)}\n` +
+               `▢ Player ⭕: @${getJid(gameSession.data.playerO)}\n\n` +
                `${!winner && !isTie ? '• Type a number (1-9) to make your move\n• Type *surrender* to give up' : ''}`;
     
     const mentions = [
-      session.data.playerX,
-      session.data.playerO,
-      ...(winner ? [winner] : [session.data.game.currentTurn])
+      gameSession.data.playerX,
+      gameSession.data.playerO,
+      ...(winner ? [winner] : [gameSession.data.game.currentTurn])
     ];
     
     // Send updated board to both players
-    const playerXChat = session.data.playerX.split('@')[0] + '@s.whatsapp.net';
-    const playerOChat = session.data.playerO.split('@')[0] + '@s.whatsapp.net';
+    const playerXChat = gameSession.data.playerX.includes('@') ? 
+      gameSession.data.playerX : 
+      gameSession.data.playerX + '@s.whatsapp.net';
     
-    const sentMsgX = await sendButtons(sock, playerXChat, {
+    const playerOChat = gameSession.data.playerO.includes('@') ? 
+      gameSession.data.playerO : 
+      gameSession.data.playerO + '@s.whatsapp.net';
+    
+    await sock.sendMessage(playerXChat, { 
       text: str,
-      footer: 'TicTacToe',
-      buttons: !winner && !isTie ? buttons : [],
-      aimode: FORCE_AI_MODE
-    }, {});
-    
-    sessionManager.addPendingMessage(session.data.playerX, playerXChat, sentMsgX.key.id, 'tictactoe');
+      mentions: mentions
+    });
     
     if (playerXChat !== playerOChat) {
-      const sentMsgO = await sendButtons(sock, playerOChat, {
+      await sock.sendMessage(playerOChat, { 
         text: str,
-        footer: 'TicTacToe',
-        buttons: !winner && !isTie ? buttons : [],
-        aimode: FORCE_AI_MODE
-      }, {});
-      sessionManager.addPendingMessage(session.data.playerO, playerOChat, sentMsgO.key.id, 'tictactoe');
+        mentions: mentions
+      });
     }
     
     // Clean up if game ended
     if (winner || isTie) {
       setTimeout(() => {
-        sessionManager.clearSession(session.id);
-        gameSessions.delete(session.id);
+        gameSessions.delete(gameSession.id);
       }, 5000);
     }
     
@@ -310,35 +322,27 @@ module.exports = {
   }
 };
 
-// Helper function to find player's active game
-async function findPlayerGame(sender) {
-  for (const [id, session] of gameSessions) {
-    if ((session.data.playerX === sender || session.data.playerO === sender) && 
-        session.data.state === 'PLAYING' &&
-        !session.data.game.winner &&
-        session.data.game.turns !== 9) {
-      return session.data;
-    }
-  }
-  return null;
-}
-
 // Helper function to handle surrender
-async function handleSurrender(sock, session, sender, reply) {
-  const isPlayerX = sender === session.data.playerX;
-  const isPlayerO = sender === session.data.playerO;
+async function handleSurrender(sock, gameSession, sender, reply) {
+  const isPlayerX = sender === gameSession.data.playerX;
+  const isPlayerO = sender === gameSession.data.playerO;
   
   if (!isPlayerX && !isPlayerO) {
     await reply(`❌ You are not a player in this game.`);
     return;
   }
   
-  const winner = isPlayerX ? session.data.playerO : session.data.playerX;
+  const winner = isPlayerX ? gameSession.data.playerO : gameSession.data.playerX;
   
-  const str = `🏳️ @${sender.split('@')[0]} has surrendered! @${winner.split('@')[0]} wins the game!`;
+  const str = `🏳️ @${getJid(sender)} has surrendered! @${getJid(winner)} wins the game!`;
   
-  const playerXChat = session.data.playerX.split('@')[0] + '@s.whatsapp.net';
-  const playerOChat = session.data.playerO.split('@')[0] + '@s.whatsapp.net';
+  const playerXChat = gameSession.data.playerX.includes('@') ? 
+    gameSession.data.playerX : 
+    gameSession.data.playerX + '@s.whatsapp.net';
+  
+  const playerOChat = gameSession.data.playerO.includes('@') ? 
+    gameSession.data.playerO : 
+    gameSession.data.playerO + '@s.whatsapp.net';
   
   await sock.sendMessage(playerXChat, { text: str, mentions: [sender, winner] });
   
@@ -346,6 +350,5 @@ async function handleSurrender(sock, session, sender, reply) {
     await sock.sendMessage(playerOChat, { text: str, mentions: [sender, winner] });
   }
   
-  sessionManager.clearSession(session.id);
-  gameSessions.delete(session.id);
+  gameSessions.delete(gameSession.id);
 }
