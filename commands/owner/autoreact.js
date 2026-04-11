@@ -1,158 +1,349 @@
 /**
- * Auto-React Command - Configure automatic reactions
+ * Auto-React Command - Configure automatic reactions with buttons
  */
 
 const { load, save, DEFAULT_EMOJIS, DEFAULT_COMMAND_EMOJI } = require('../../utils/autoReact');
+const sessionManager = require('../../utils/sessionManager');
+const giftedBtns = require('gifted-btns');
+const { sendButtons, sendInteractiveMessage } = giftedBtns;
+
+const FORCE_AI_MODE = true;
 
 module.exports = {
   name: 'autoreact',
   aliases: ['ar'],
   category: 'owner',
   description: 'Configure automatic reactions to messages',
-  usage: '.autoreact <on/off/set bot/set all/private/groups/addgroup/rmgroup/emojis/cmdemoj>',
+  usage: '.autoreact',
   ownerOnly: true,
 
-  async execute(sock, msg, args, extra) {
-    try {
-      const { from, reply } = extra;
-      const db = load();
+  async execute(sock, msg, args, context) {
+    const { from, sender, reply, react } = context;
+    
+    // Create session
+    const session = sessionManager.createSession(sender, from, 'autoreact', {
+      step: 'main_menu'
+    });
+    
+    await react('⚙️');
+    
+    const sessionId = session.id.split(':').pop();
+    const db = load();
+    
+    // Build status display
+    const statusEmoji = db.enabled ? '✅' : '❌';
+    const modeText = db.mode === 'bot' ? '🤖 Bot Commands Only' : '🌟 All Messages';
+    const privateStatus = db.inPrivate ? '✅ Enabled' : '❌ Disabled';
+    const groupsStatus = db.inGroups ? '✅ Enabled' : '❌ Disabled';
+    const specificGroupsCount = db.specificGroups?.length || 0;
+    const groupsInfo = specificGroupsCount > 0 
+      ? `🎯 Specific Groups (${specificGroupsCount})` 
+      : '🌍 All Groups';
+    
+    const statusMessage = `⚙️ *Auto-React Configuration*\n\n` +
+                         `${statusEmoji} *Status:* ${db.enabled ? 'ON' : 'OFF'}\n` +
+                         `🎭 *Mode:* ${modeText}\n` +
+                         `💬 *Private Chats:* ${privateStatus}\n` +
+                         `👥 *Groups:* ${groupsStatus} (${groupsInfo})\n` +
+                         `🎨 *Emojis (All mode):* ${db.emojis?.slice(0, 5).join(' ') || DEFAULT_EMOJIS.slice(0, 5).join(' ')}${db.emojis?.length > 5 ? '...' : ''}\n` +
+                         `🔧 *Command Emoji:* ${db.commandEmoji || DEFAULT_COMMAND_EMOJI}\n\n` +
+                         `*Click a button below to change settings:*`;
+    
+    // Create buttons based on current state
+    const buttons = [
+      { id: `autoreact_toggle_${sessionId}`, text: db.enabled ? '🔴 Disable' : '🟢 Enable' },
+      { id: `autoreact_mode_${sessionId}`, text: db.mode === 'bot' ? '🌟 Switch to All' : '🤖 Switch to Bot' },
+      { id: `autoreact_private_${sessionId}`, text: db.inPrivate ? '🔇 Disable Private' : '🔊 Enable Private' },
+      { id: `autoreact_groups_${sessionId}`, text: db.inGroups ? '🔇 Disable Groups' : '🔊 Enable Groups' }
+    ];
+    
+    // Add specific groups button only if in a group
+    const isInGroup = from.endsWith('@g.us');
+    if (isInGroup) {
+      buttons.push({ id: `autoreact_group_toggle_${sessionId}`, text: '🎯 Toggle This Group' });
+    }
+    
+    buttons.push({ id: `autoreact_settings_${sessionId}`, text: '⚙️ Advanced Settings' });
+    buttons.push({ id: `autoreact_cancel_${sessionId}`, text: '❌ Close' });
+    
+    const sentMsg = await sendButtons(sock, from, {
+      text: statusMessage,
+      footer: 'Auto-React Manager',
+      buttons: buttons,
+      aimode: FORCE_AI_MODE
+    }, { quoted: msg });
+    
+    sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'autoreact');
+  },
+  
+  async handleSession(sock, msg, session, context) {
+    const { from, sender, reply, react, isButtonClick } = context;
+    
+    console.log(`[AUTOREACT] handleSession called, isButtonClick: ${isButtonClick}`);
+    
+    // Handle button clicks
+    if (isButtonClick) {
+      let buttonId = null;
+      let buttonText = null;
       
-      if (!args[0]) {
-        const groupStatus = db.specificGroups && db.specificGroups.length > 0 
-          ? `\n• Specific Groups: ${db.specificGroups.length} group(s)` 
-          : '\n• Specific Groups: All groups';
-        
-        return reply(`📋 *Auto-React Configuration*\n\n` +
-                   `• Status: ${db.enabled ? '✅ ON' : '❌ OFF'}\n` +
-                   `• Mode: ${db.mode === 'bot' ? '🤖 Bot commands only' : '🌟 All messages'}\n` +
-                   `• Private Chats: ${db.inPrivate ? '✅' : '❌'}\n` +
-                   `• Groups: ${db.inGroups ? '✅' : '❌'}${groupStatus}\n` +
-                   `• Emojis (all mode): ${db.emojis?.join(' ') || DEFAULT_EMOJIS.join(' ')}\n` +
-                   `• Command Emoji: ${db.commandEmoji || DEFAULT_COMMAND_EMOJI}\n\n` +
-                   `*Commands:*\n` +
-                   `• \`.autoreact on/off\` - Enable/disable\n` +
-                   `• \`.autoreact set bot/all\` - Set mode\n` +
-                   `• \`.autoreact private on/off\` - Private chat reactions\n` +
-                   `• \`.autoreact groups on/off\` - Group reactions\n` +
-                   `• \`.autoreact addgroup\` - Add current group\n` +
-                   `• \`.autoreact rmgroup\` - Remove current group\n` +
-                   `• \`.autoreact emojis 🎉 🎊 🎈\` - Set custom emojis\n` +
-                   `• \`.autoreact cmdemoj ⏳\` - Set command emoji`);
+      // Extract button ID based on message type
+      if (msg.message?.buttonsResponseMessage) {
+        buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
+        buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
+        console.log(`[AUTOREACT] ButtonsResponseMessage - ID: ${buttonId}, Text: ${buttonText}`);
+      } else if (msg.message?.interactiveResponseMessage) {
+        const interactive = msg.message.interactiveResponseMessage;
+        if (interactive.nativeFlowResponseMessage) {
+          try {
+            const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
+            buttonId = params.id;
+            buttonText = params.display_text;
+            console.log(`[AUTOREACT] InteractiveResponseMessage - ID: ${buttonId}, Text: ${buttonText}`);
+          } catch (e) {}
+        }
       }
-
-      const opt = args.join(' ').toLowerCase();
-
-      // Basic on/off
-      if (opt === 'on') {
-        db.enabled = true;
+      
+      if (!buttonId) return true;
+      
+      // Load current config
+      const db = load();
+      const sessionId = session.id.split(':').pop();
+      
+      // Handle Cancel/Close
+      if (buttonId.includes('autoreact_cancel_')) {
+        sessionManager.clearSession(session.id);
+        await reply('❌ Auto-React configuration closed.');
+        return true;
+      }
+      
+      // Handle Toggle Enable/Disable
+      if (buttonId.includes('autoreact_toggle_')) {
+        db.enabled = !db.enabled;
         save(db);
-        return reply('✅ Auto-react enabled.');
+        await react(db.enabled ? '✅' : '❌');
+        await showUpdatedMenu(sock, from, sender, session, reply);
+        return true;
       }
-
-      if (opt === 'off') {
-        db.enabled = false;
+      
+      // Handle Mode Toggle
+      if (buttonId.includes('autoreact_mode_')) {
+        db.mode = db.mode === 'bot' ? 'all' : 'bot';
         save(db);
-        return reply('❌ Auto-react disabled.');
+        await react('🎭');
+        await showUpdatedMenu(sock, from, sender, session, reply);
+        return true;
       }
-
-      // Set mode
-      if (opt === 'set bot') {
-        db.mode = 'bot';
+      
+      // Handle Private Toggle
+      if (buttonId.includes('autoreact_private_')) {
+        db.inPrivate = !db.inPrivate;
         save(db);
-        return reply('🤖 Auto-react mode: Bot commands only');
+        await react('💬');
+        await showUpdatedMenu(sock, from, sender, session, reply);
+        return true;
       }
-
-      if (opt === 'set all') {
-        db.mode = 'all';
+      
+      // Handle Groups Toggle
+      if (buttonId.includes('autoreact_groups_')) {
+        db.inGroups = !db.inGroups;
         save(db);
-        return reply('🌟 Auto-react mode: All messages (random emojis)');
+        await react('👥');
+        await showUpdatedMenu(sock, from, sender, session, reply);
+        return true;
       }
-
-      // Private chat settings
-      if (opt === 'private on') {
-        db.inPrivate = true;
-        save(db);
-        return reply('✅ Auto-react enabled for private chats.');
-      }
-
-      if (opt === 'private off') {
-        db.inPrivate = false;
-        save(db);
-        return reply('❌ Auto-react disabled for private chats.');
-      }
-
-      // Group settings
-      if (opt === 'groups on') {
-        db.inGroups = true;
-        save(db);
-        return reply('✅ Auto-react enabled for groups.');
-      }
-
-      if (opt === 'groups off') {
-        db.inGroups = false;
-        save(db);
-        return reply('❌ Auto-react disabled for groups.');
-      }
-
-      // Add current group to specific groups
-      if (opt === 'addgroup') {
-        const isGroup = from.endsWith('@g.us');
-        if (!isGroup) {
-          return reply('❌ This command must be used in a group!');
+      
+      // Handle Toggle This Group (add/remove current group)
+      if (buttonId.includes('autoreact_group_toggle_')) {
+        const isInGroup = from.endsWith('@g.us');
+        if (!isInGroup) {
+          await reply('❌ This option is only available in groups!');
+          return true;
         }
         
         if (!db.specificGroups) db.specificGroups = [];
-        if (!db.specificGroups.includes(from)) {
-          db.specificGroups.push(from);
-          save(db);
-          return reply(`✅ Added this group to auto-react list.\nAuto-react will now work ONLY in: ${db.specificGroups.length} group(s)`);
+        
+        if (db.specificGroups.includes(from)) {
+          // Remove group
+          db.specificGroups = db.specificGroups.filter(g => g !== from);
+          await reply(`✅ Removed this group from auto-react list.\nAuto-react will now work in: ${db.specificGroups.length === 0 ? 'ALL groups' : db.specificGroups.length + ' specific group(s)'}`);
         } else {
-          return reply('❌ This group is already in the auto-react list.');
-        }
-      }
-
-      // Remove current group from specific groups
-      if (opt === 'rmgroup') {
-        const isGroup = from.endsWith('@g.us');
-        if (!isGroup) {
-          return reply('❌ This command must be used in a group!');
+          // Add group
+          db.specificGroups.push(from);
+          await reply(`✅ Added this group to auto-react list.\nAuto-react will now work ONLY in ${db.specificGroups.length} specific group(s).`);
         }
         
-        if (db.specificGroups && db.specificGroups.includes(from)) {
-          db.specificGroups = db.specificGroups.filter(g => g !== from);
-          save(db);
-          return reply(`✅ Removed this group from auto-react list.\nAuto-react will now work in: ${db.specificGroups.length === 0 ? 'ALL groups' : db.specificGroups.length + ' group(s)'}`);
-        } else {
-          return reply('❌ This group is not in the auto-react list.');
-        }
-      }
-
-      // Set custom emojis for 'all' mode
-      if (opt.startsWith('emojis')) {
-        const emojis = args.slice(1);
-        if (emojis.length === 0) {
-          return reply('❌ Please provide at least one emoji.\nExample: `.autoreact emojis 🎉 🎊 🎈`');
-        }
-        db.emojis = emojis;
         save(db);
-        return reply(`✅ Custom emojis set: ${emojis.join(' ')}`);
+        await showUpdatedMenu(sock, from, sender, session, reply);
+        return true;
       }
-
-      // Set command emoji for 'bot' mode
-      if (opt.startsWith('cmdemoj')) {
-        const emoji = args[1];
-        if (!emoji) {
-          return reply('❌ Please provide an emoji.\nExample: `.autoreact cmdemoj 🤖`');
-        }
-        db.commandEmoji = emoji;
+      
+      // Handle Advanced Settings
+      if (buttonId.includes('autoreact_settings_')) {
+        await showAdvancedSettings(sock, from, sender, session, reply, db);
+        return true;
+      }
+      
+      // Handle Emoji Settings from advanced menu
+      if (buttonId.includes('autoreact_emojis_')) {
+        sessionManager.updateSession(sender, from, { step: 'waiting_emojis' });
+        await reply(`🎨 *Set Custom Emojis*\n\nSend a list of emojis separated by spaces.\nExample: \`🎉 🎊 🎈 🎯 🎮\`\n\nCurrent emojis: ${db.emojis?.join(' ') || DEFAULT_EMOJIS.join(' ')}\n\nType \`cancel\` to go back.`);
+        return true;
+      }
+      
+      // Handle Command Emoji Settings
+      if (buttonId.includes('autoreact_cmdemoji_')) {
+        sessionManager.updateSession(sender, from, { step: 'waiting_cmdemoji' });
+        await reply(`🔧 *Set Command Emoji*\n\nSend an emoji to use for command reactions.\nExample: \`🤖\` or \`⚡\` or \`💫\`\n\nCurrent emoji: ${db.commandEmoji || DEFAULT_COMMAND_EMOJI}\n\nType \`cancel\` to go back.`);
+        return true;
+      }
+      
+      // Handle Reset to Defaults
+      if (buttonId.includes('autoreact_reset_')) {
+        db.enabled = false;
+        db.mode = 'bot';
+        db.inPrivate = true;
+        db.inGroups = true;
+        db.specificGroups = [];
+        db.emojis = [...DEFAULT_EMOJIS];
+        db.commandEmoji = DEFAULT_COMMAND_EMOJI;
         save(db);
-        return reply(`✅ Command reaction emoji set to: ${emoji}`);
+        await react('🔄');
+        await reply('✅ Auto-React settings reset to defaults!');
+        await showUpdatedMenu(sock, from, sender, session, reply);
+        return true;
       }
-
-      reply('❌ Invalid option. Use `.autoreact` to see all options.');
-    } catch (err) {
-      console.error('[autoreact cmd] error:', err);
-      extra.reply('❌ Error configuring auto-react.');
+      
+      return true;
     }
+    
+    // Handle text input for emojis or command emoji
+    let text = '';
+    if (msg.message?.conversation) {
+      text = msg.message.conversation.trim();
+    } else if (msg.message?.extendedTextMessage?.text) {
+      text = msg.message.extendedTextMessage.text.trim();
+    }
+    
+    if (!text) return true;
+    
+    const db = load();
+    
+    // Handle cancel
+    if (text.toLowerCase() === 'cancel') {
+      sessionManager.updateSession(sender, from, { step: 'main_menu' });
+      await showUpdatedMenu(sock, from, sender, session, reply);
+      return true;
+    }
+    
+    // Handle emoji input
+    if (session.data.step === 'waiting_emojis') {
+      const emojis = text.split(/\s+/).filter(e => e.length > 0);
+      if (emojis.length === 0) {
+        await reply('❌ Please send at least one emoji.\nExample: `🎉 🎊 🎈`');
+        return true;
+      }
+      
+      db.emojis = emojis;
+      save(db);
+      await react('🎨');
+      await reply(`✅ Custom emojis set: ${emojis.join(' ')}`);
+      sessionManager.updateSession(sender, from, { step: 'main_menu' });
+      await showUpdatedMenu(sock, from, sender, session, reply);
+      return true;
+    }
+    
+    // Handle command emoji input
+    if (session.data.step === 'waiting_cmdemoji') {
+      const emoji = text.trim();
+      if (emoji.length === 0 || emoji.length > 2) {
+        await reply('❌ Please send a single emoji.\nExample: `🤖`');
+        return true;
+      }
+      
+      db.commandEmoji = emoji;
+      save(db);
+      await react('🔧');
+      await reply(`✅ Command reaction emoji set to: ${emoji}`);
+      sessionManager.updateSession(sender, from, { step: 'main_menu' });
+      await showUpdatedMenu(sock, from, sender, session, reply);
+      return true;
+    }
+    
+    return true;
   }
 };
+
+// Helper function to show updated menu
+async function showUpdatedMenu(sock, from, sender, session, reply) {
+  const db = load();
+  const sessionId = session.id.split(':').pop();
+  
+  const statusEmoji = db.enabled ? '✅' : '❌';
+  const modeText = db.mode === 'bot' ? '🤖 Bot Commands Only' : '🌟 All Messages';
+  const privateStatus = db.inPrivate ? '✅ Enabled' : '❌ Disabled';
+  const groupsStatus = db.inGroups ? '✅ Enabled' : '❌ Disabled';
+  const specificGroupsCount = db.specificGroups?.length || 0;
+  const groupsInfo = specificGroupsCount > 0 
+    ? `🎯 Specific Groups (${specificGroupsCount})` 
+    : '🌍 All Groups';
+  
+  const statusMessage = `⚙️ *Auto-React Configuration*\n\n` +
+                       `${statusEmoji} *Status:* ${db.enabled ? 'ON' : 'OFF'}\n` +
+                       `🎭 *Mode:* ${modeText}\n` +
+                       `💬 *Private Chats:* ${privateStatus}\n` +
+                       `👥 *Groups:* ${groupsStatus} (${groupsInfo})\n` +
+                       `🎨 *Emojis (All mode):* ${db.emojis?.slice(0, 5).join(' ') || DEFAULT_EMOJIS.slice(0, 5).join(' ')}${db.emojis?.length > 5 ? '...' : ''}\n` +
+                       `🔧 *Command Emoji:* ${db.commandEmoji || DEFAULT_COMMAND_EMOJI}\n\n` +
+                       `*Click a button below to change settings:*`;
+  
+  const buttons = [
+    { id: `autoreact_toggle_${sessionId}`, text: db.enabled ? '🔴 Disable' : '🟢 Enable' },
+    { id: `autoreact_mode_${sessionId}`, text: db.mode === 'bot' ? '🌟 Switch to All' : '🤖 Switch to Bot' },
+    { id: `autoreact_private_${sessionId}`, text: db.inPrivate ? '🔇 Disable Private' : '🔊 Enable Private' },
+    { id: `autoreact_groups_${sessionId}`, text: db.inGroups ? '🔇 Disable Groups' : '🔊 Enable Groups' }
+  ];
+  
+  const isInGroup = from.endsWith('@g.us');
+  if (isInGroup) {
+    const isGroupInList = db.specificGroups?.includes(from);
+    buttons.push({ id: `autoreact_group_toggle_${sessionId}`, text: isGroupInList ? '🚫 Remove This Group' : '➕ Add This Group' });
+  }
+  
+  buttons.push({ id: `autoreact_settings_${sessionId}`, text: '⚙️ Advanced Settings' });
+  buttons.push({ id: `autoreact_cancel_${sessionId}`, text: '❌ Close' });
+  
+  const sentMsg = await sendButtons(sock, from, {
+    text: statusMessage,
+    footer: 'Auto-React Manager',
+    buttons: buttons,
+    aimode: FORCE_AI_MODE
+  }, {});
+  
+  sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'autoreact');
+}
+
+// Helper function to show advanced settings menu
+async function showAdvancedSettings(sock, from, sender, session, reply, db) {
+  const sessionId = session.id.split(':').pop();
+  
+  const advancedMessage = `⚙️ *Advanced Auto-React Settings*\n\n` +
+                         `🎨 *Current Emojis (All mode):*\n${db.emojis?.join(' ') || DEFAULT_EMOJIS.join(' ')}\n\n` +
+                         `🔧 *Command Emoji:* ${db.commandEmoji || DEFAULT_COMMAND_EMOJI}\n\n` +
+                         `*Choose an option:*`;
+  
+  const buttons = [
+    { id: `autoreact_emojis_${sessionId}`, text: '🎨 Set Custom Emojis' },
+    { id: `autoreact_cmdemoji_${sessionId}`, text: '🔧 Set Command Emoji' },
+    { id: `autoreact_reset_${sessionId}`, text: '🔄 Reset to Defaults' },
+    { id: `autoreact_back_${sessionId}`, text: '◀️ Back to Main Menu' }
+  ];
+  
+  const sentMsg = await sendButtons(sock, from, {
+    text: advancedMessage,
+    footer: 'Auto-React Advanced',
+    buttons: buttons,
+    aimode: FORCE_AI_MODE
+  }, {});
+  
+  sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'autoreact');
+}
