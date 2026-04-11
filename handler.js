@@ -75,6 +75,7 @@ const shouldForwardMessage = (messageContent, filters) => {
 };
 
 // Unwrap WhatsApp containers (ephemeral, view once, etc.)
+// IMPORTANT: This is called AFTER antivv capture
 const getMessageContent = (msg) => {
   if (!msg || !msg.message) return null;
   
@@ -476,7 +477,8 @@ const handleMessage = async (sock, msg) => {
       return;
     }
     
-    // ===== CAPTURE VIEW-ONCE MESSAGES (ANTIVV) =====
+    // ===== CAPTURE VIEW-ONCE MESSAGES (ANTIVV) - MUST BE BEFORE getMessageContent! =====
+    // This needs to see the raw message BEFORE view-once is unwrapped
     await antivv.captureViewOnce(sock, msg);
     
     // ===== STORE MESSAGE FOR ANTIDELETE =====
@@ -516,7 +518,8 @@ const handleMessage = async (sock, msg) => {
       console.error('[AutoReact Error]', e.message);
     }
     
-    // Unwrap containers first
+    // ===== UNWRAP CONTAINERS - THIS MUST COME AFTER view-once capture! =====
+    // getMessageContent unwraps view-once, ephemeral, etc.
     const content = getMessageContent(msg);
     
     // ===== CHECK AND FORWARD MESSAGE =====
