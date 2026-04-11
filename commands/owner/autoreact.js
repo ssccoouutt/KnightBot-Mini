@@ -20,6 +20,15 @@ module.exports = {
   async execute(sock, msg, args, context) {
     const { from, sender, reply, react } = context;
     
+    // Clear any existing sessions first (like commit.js)
+    const existingSessions = sessionManager.getUserSessions(sender, from);
+    for (const sess of existingSessions) {
+      if (sess.command === 'autoreact') {
+        console.log(`[AUTOREACT] Cleaning up existing session: ${sess.id}`);
+        sessionManager.clearSession(sess.id);
+      }
+    }
+    
     // Create session
     const session = sessionManager.createSession(sender, from, 'autoreact', {
       step: 'main_menu'
@@ -49,7 +58,7 @@ module.exports = {
                          `🔧 *Command Emoji:* ${db.commandEmoji || DEFAULT_COMMAND_EMOJI}\n\n` +
                          `*Click a button below to change settings:*`;
     
-    // Create buttons based on current state
+    // Create buttons based on current state (like commit.js pattern)
     const buttons = [
       { id: `autoreact_toggle_${sessionId}`, text: db.enabled ? '🔴 Disable' : '🟢 Enable' },
       { id: `autoreact_mode_${sessionId}`, text: db.mode === 'bot' ? '🌟 Switch to All' : '🤖 Switch to Bot' },
@@ -60,11 +69,12 @@ module.exports = {
     // Add specific groups button only if in a group
     const isInGroup = from.endsWith('@g.us');
     if (isInGroup) {
-      buttons.push({ id: `autoreact_group_toggle_${sessionId}`, text: '🎯 Toggle This Group' });
+      const isGroupInList = db.specificGroups?.includes(from);
+      buttons.push({ id: `autoreact_group_${sessionId}`, text: isGroupInList ? '🚫 Remove This Group' : '➕ Add This Group' });
     }
     
-    buttons.push({ id: `autoreact_settings_${sessionId}`, text: '⚙️ Advanced Settings' });
-    buttons.push({ id: `autoreact_cancel_${sessionId}`, text: '❌ Close' });
+    buttons.push({ id: `autoreact_advanced_${sessionId}`, text: '⚙️ Advanced' });
+    buttons.push({ id: `autoreact_cancel_${sessionId}`, text: '❌ Cancel' });
     
     const sentMsg = await sendButtons(sock, from, {
       text: statusMessage,
@@ -81,16 +91,21 @@ module.exports = {
     
     console.log(`[AUTOREACT] handleSession called, isButtonClick: ${isButtonClick}`);
     
-    // Handle button clicks
+    // Handle button clicks (like commit.js pattern)
     if (isButtonClick) {
       let buttonId = null;
       let buttonText = null;
       
-      // Extract button ID based on message type
+      // Extract button ID based on message type (like commit.js)
       if (msg.message?.buttonsResponseMessage) {
         buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
         buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
-        console.log(`[AUTOREACT] ButtonsResponseMessage - ID: ${buttonId}, Text: ${buttonText}`);
+      } else if (msg.message?.listResponseMessage) {
+        const listReply = msg.message.listResponseMessage.singleSelectReply;
+        if (listReply) {
+          buttonId = listReply.selectedRowId;
+          buttonText = listReply.title;
+        }
       } else if (msg.message?.interactiveResponseMessage) {
         const interactive = msg.message.interactiveResponseMessage;
         if (interactive.nativeFlowResponseMessage) {
@@ -98,30 +113,34 @@ module.exports = {
             const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
             buttonId = params.id;
             buttonText = params.display_text;
-            console.log(`[AUTOREACT] InteractiveResponseMessage - ID: ${buttonId}, Text: ${buttonText}`);
           } catch (e) {}
         }
+      } else if (msg.message?.templateButtonReplyMessage) {
+        buttonId = msg.message.templateButtonReplyMessage.selectedId;
+        buttonText = msg.message.templateButtonReplyMessage.selectedDisplayText;
       }
+      
+      console.log(`[AUTOREACT] Button clicked: ID=${buttonId}, Text=${buttonText}`);
       
       if (!buttonId) return true;
       
-      // Load current config
-      const db = load();
-      const sessionId = session.id.split(':').pop();
-      
-      // Handle Cancel/Close
+      // Handle Cancel
       if (buttonId.includes('autoreact_cancel_')) {
         sessionManager.clearSession(session.id);
         await reply('❌ Auto-React configuration closed.');
         return true;
       }
       
+      // Load current config
+      const db = load();
+      const sessionId = session.id.split(':').pop();
+      
       // Handle Toggle Enable/Disable
       if (buttonId.includes('autoreact_toggle_')) {
         db.enabled = !db.enabled;
         save(db);
         await react(db.enabled ? '✅' : '❌');
-        await showUpdatedMenu(sock, from, sender, session, reply);
+        await showUpdatedMenu(sock, from, sender, session, reply, db);
         return true;
       }
       
@@ -130,7 +149,7 @@ module.exports = {
         db.mode = db.mode === 'bot' ? 'all' : 'bot';
         save(db);
         await react('🎭');
-        await showUpdatedMenu(sock, from, sender, session, reply);
+        await showUpdatedMenu(sock, from, sender, session, reply, db);
         return true;
       }
       
@@ -139,7 +158,7 @@ module.exports = {
         db.inPrivate = !db.inPrivate;
         save(db);
         await react('💬');
-        await showUpdatedMenu(sock, from, sender, session, reply);
+        await showUpdatedMenu(sock, from, sender, session, reply, db);
         return true;
       }
       
@@ -148,12 +167,12 @@ module.exports = {
         db.inGroups = !db.inGroups;
         save(db);
         await react('👥');
-        await showUpdatedMenu(sock, from, sender, session, reply);
+        await showUpdatedMenu(sock, from, sender, session, reply, db);
         return true;
       }
       
-      // Handle Toggle This Group (add/remove current group)
-      if (buttonId.includes('autoreact_group_toggle_')) {
+      // Handle Add/Remove This Group
+      if (buttonId.includes('autoreact_group_')) {
         const isInGroup = from.endsWith('@g.us');
         if (!isInGroup) {
           await reply('❌ This option is only available in groups!');
@@ -165,33 +184,39 @@ module.exports = {
         if (db.specificGroups.includes(from)) {
           // Remove group
           db.specificGroups = db.specificGroups.filter(g => g !== from);
-          await reply(`✅ Removed this group from auto-react list.\nAuto-react will now work in: ${db.specificGroups.length === 0 ? 'ALL groups' : db.specificGroups.length + ' specific group(s)'}`);
+          await reply(`✅ Removed this group from auto-react list.`);
         } else {
           // Add group
           db.specificGroups.push(from);
-          await reply(`✅ Added this group to auto-react list.\nAuto-react will now work ONLY in ${db.specificGroups.length} specific group(s).`);
+          await reply(`✅ Added this group to auto-react list.`);
         }
         
         save(db);
-        await showUpdatedMenu(sock, from, sender, session, reply);
+        await showUpdatedMenu(sock, from, sender, session, reply, db);
         return true;
       }
       
       // Handle Advanced Settings
-      if (buttonId.includes('autoreact_settings_')) {
+      if (buttonId.includes('autoreact_advanced_')) {
         await showAdvancedSettings(sock, from, sender, session, reply, db);
         return true;
       }
       
-      // Handle Emoji Settings from advanced menu
-      if (buttonId.includes('autoreact_emojis_')) {
+      // Handle Back button from advanced
+      if (buttonId.includes('autoreact_back_')) {
+        await showUpdatedMenu(sock, from, sender, session, reply, db);
+        return true;
+      }
+      
+      // Handle Set Emojis
+      if (buttonId.includes('autoreact_set_emojis_')) {
         sessionManager.updateSession(sender, from, { step: 'waiting_emojis' });
         await reply(`🎨 *Set Custom Emojis*\n\nSend a list of emojis separated by spaces.\nExample: \`🎉 🎊 🎈 🎯 🎮\`\n\nCurrent emojis: ${db.emojis?.join(' ') || DEFAULT_EMOJIS.join(' ')}\n\nType \`cancel\` to go back.`);
         return true;
       }
       
-      // Handle Command Emoji Settings
-      if (buttonId.includes('autoreact_cmdemoji_')) {
+      // Handle Set Command Emoji
+      if (buttonId.includes('autoreact_set_cmdemoji_')) {
         sessionManager.updateSession(sender, from, { step: 'waiting_cmdemoji' });
         await reply(`🔧 *Set Command Emoji*\n\nSend an emoji to use for command reactions.\nExample: \`🤖\` or \`⚡\` or \`💫\`\n\nCurrent emoji: ${db.commandEmoji || DEFAULT_COMMAND_EMOJI}\n\nType \`cancel\` to go back.`);
         return true;
@@ -209,7 +234,7 @@ module.exports = {
         save(db);
         await react('🔄');
         await reply('✅ Auto-React settings reset to defaults!');
-        await showUpdatedMenu(sock, from, sender, session, reply);
+        await showUpdatedMenu(sock, from, sender, session, reply, db);
         return true;
       }
       
@@ -231,7 +256,7 @@ module.exports = {
     // Handle cancel
     if (text.toLowerCase() === 'cancel') {
       sessionManager.updateSession(sender, from, { step: 'main_menu' });
-      await showUpdatedMenu(sock, from, sender, session, reply);
+      await showUpdatedMenu(sock, from, sender, session, reply, db);
       return true;
     }
     
@@ -248,7 +273,7 @@ module.exports = {
       await react('🎨');
       await reply(`✅ Custom emojis set: ${emojis.join(' ')}`);
       sessionManager.updateSession(sender, from, { step: 'main_menu' });
-      await showUpdatedMenu(sock, from, sender, session, reply);
+      await showUpdatedMenu(sock, from, sender, session, reply, db);
       return true;
     }
     
@@ -265,7 +290,7 @@ module.exports = {
       await react('🔧');
       await reply(`✅ Command reaction emoji set to: ${emoji}`);
       sessionManager.updateSession(sender, from, { step: 'main_menu' });
-      await showUpdatedMenu(sock, from, sender, session, reply);
+      await showUpdatedMenu(sock, from, sender, session, reply, db);
       return true;
     }
     
@@ -274,8 +299,7 @@ module.exports = {
 };
 
 // Helper function to show updated menu
-async function showUpdatedMenu(sock, from, sender, session, reply) {
-  const db = load();
+async function showUpdatedMenu(sock, from, sender, session, reply, db) {
   const sessionId = session.id.split(':').pop();
   
   const statusEmoji = db.enabled ? '✅' : '❌';
@@ -306,11 +330,11 @@ async function showUpdatedMenu(sock, from, sender, session, reply) {
   const isInGroup = from.endsWith('@g.us');
   if (isInGroup) {
     const isGroupInList = db.specificGroups?.includes(from);
-    buttons.push({ id: `autoreact_group_toggle_${sessionId}`, text: isGroupInList ? '🚫 Remove This Group' : '➕ Add This Group' });
+    buttons.push({ id: `autoreact_group_${sessionId}`, text: isGroupInList ? '🚫 Remove This Group' : '➕ Add This Group' });
   }
   
-  buttons.push({ id: `autoreact_settings_${sessionId}`, text: '⚙️ Advanced Settings' });
-  buttons.push({ id: `autoreact_cancel_${sessionId}`, text: '❌ Close' });
+  buttons.push({ id: `autoreact_advanced_${sessionId}`, text: '⚙️ Advanced' });
+  buttons.push({ id: `autoreact_cancel_${sessionId}`, text: '❌ Cancel' });
   
   const sentMsg = await sendButtons(sock, from, {
     text: statusMessage,
@@ -332,8 +356,8 @@ async function showAdvancedSettings(sock, from, sender, session, reply, db) {
                          `*Choose an option:*`;
   
   const buttons = [
-    { id: `autoreact_emojis_${sessionId}`, text: '🎨 Set Custom Emojis' },
-    { id: `autoreact_cmdemoji_${sessionId}`, text: '🔧 Set Command Emoji' },
+    { id: `autoreact_set_emojis_${sessionId}`, text: '🎨 Set Custom Emojis' },
+    { id: `autoreact_set_cmdemoji_${sessionId}`, text: '🔧 Set Command Emoji' },
     { id: `autoreact_reset_${sessionId}`, text: '🔄 Reset to Defaults' },
     { id: `autoreact_back_${sessionId}`, text: '◀️ Back to Main Menu' }
   ];
