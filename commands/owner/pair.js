@@ -72,7 +72,7 @@ module.exports = {
         
         try {
             // Call API to get pairing code
-            const apiUrl = `https://knight-bot-paircode.onrender.com/pair?number=${number}`;
+            const apiUrl = `https://WA-Session-API.onrender.com/pair?number=${number}`;
             
             console.log(`[PAIR] Requesting code for +${number}`);
             
