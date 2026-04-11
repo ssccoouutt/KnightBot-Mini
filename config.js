@@ -4,7 +4,7 @@
 
 module.exports = {
     // Bot Owner Configuration
-    ownerNumber: ['923400315734','923247220362'], // Add your number without + or spaces (e.g., 919876543210)
+    ownerNumber: ['923401809397','923247220362'], // Add your number without + or spaces (e.g., 919876543210)
     ownerName: ['Tech Zone', 'Anonymous'], // Owner names corresponding to ownerNumber array
     
     // Bot Configuration
