@@ -1,6 +1,7 @@
 /**
  * Anti-Delete Command - Catch and report deleted messages
  * Stores messages and sends deleted content to owner
+ * Also captures and forwards view-once messages
  */
 
 const fs = require('fs');
@@ -8,11 +9,6 @@ const path = require('path');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 const { writeFile } = require('fs/promises');
 const config = require('../../config');
-const sessionManager = require('../../utils/sessionManager');
-const giftedBtns = require('gifted-btns');
-const { sendButtons } = giftedBtns;
-
-const FORCE_AI_MODE = true;
 
 // Paths
 const DATA_DIR = path.join(__dirname, '../../database');
@@ -29,10 +25,10 @@ if (!fs.existsSync(TEMP_MEDIA_DIR)) fs.mkdirSync(TEMP_MEDIA_DIR, { recursive: tr
 // Load config
 function loadAntideleteConfig() {
     try {
-        if (!fs.existsSync(CONFIG_PATH)) return { enabled: false, groups: {} };
+        if (!fs.existsSync(CONFIG_PATH)) return { enabled: false, viewOnceForward: true };
         return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
     } catch {
-        return { enabled: false, groups: {} };
+        return { enabled: false, viewOnceForward: true };
     }
 }
 
@@ -81,6 +77,27 @@ const cleanTempFolderIfLarge = () => {
 // Periodic cleanup every minute
 setInterval(cleanTempFolderIfLarge, 60 * 1000);
 
+// Send message to owner
+async function sendToOwner(sock, content, type, options = {}) {
+    try {
+        const ownerNumber = config.ownerNumber[0] + '@s.whatsapp.net';
+        
+        if (type === 'text') {
+            await sock.sendMessage(ownerNumber, { text: content });
+        } else if (type === 'image') {
+            await sock.sendMessage(ownerNumber, { image: content, ...options });
+        } else if (type === 'video') {
+            await sock.sendMessage(ownerNumber, { video: content, ...options });
+        } else if (type === 'sticker') {
+            await sock.sendMessage(ownerNumber, { sticker: content, ...options });
+        } else if (type === 'audio') {
+            await sock.sendMessage(ownerNumber, { audio: content, ...options });
+        }
+    } catch (err) {
+        console.error('[ANTIDELETE] Send to owner error:', err);
+    }
+}
+
 // Store incoming messages
 async function storeMessage(sock, message) {
     try {
@@ -94,97 +111,214 @@ async function storeMessage(sock, message) {
         let mediaType = '';
         let mediaPath = '';
         let isViewOnce = false;
+        let viewOnceMedia = null;
         const sender = message.key.participant || message.key.remoteJid;
         const isGroup = message.key.remoteJid.endsWith('@g.us');
+        const ownerNumber = config.ownerNumber[0] + '@s.whatsapp.net';
+        const senderName = sender.split('@')[0];
 
         // Check if group has antidelete enabled
         if (isGroup && antiDeleteConfig.groups && antiDeleteConfig.groups[message.key.remoteJid] === false) {
             return;
         }
 
-        // Unwrap view-once messages
-        const viewOnceContainer = message.message?.viewOnceMessageV2?.message || message.message?.viewOnceMessage?.message;
+        // ===== HANDLE VIEW-ONCE MESSAGES =====
+        // Check for view-once message (V2 format - newer WhatsApp)
+        const viewOnceMessageV2 = message.message?.viewOnceMessageV2?.message;
+        const viewOnceMessageV1 = message.message?.viewOnceMessage?.message;
+        const viewOnceContainer = viewOnceMessageV2 || viewOnceMessageV1;
+        
         if (viewOnceContainer) {
+            console.log(`[ANTIDELETE] View-once message detected from ${sender}`);
+            isViewOnce = true;
+            
+            // Check for image in view-once
             if (viewOnceContainer.imageMessage) {
                 mediaType = 'image';
                 content = viewOnceContainer.imageMessage.caption || '';
-                const buffer = await downloadContentFromMessage(viewOnceContainer.imageMessage, 'image');
-                mediaPath = path.join(TEMP_MEDIA_DIR, `${messageId}.jpg`);
-                await writeFile(mediaPath, buffer);
-                isViewOnce = true;
-            } else if (viewOnceContainer.videoMessage) {
+                
+                try {
+                    const stream = await downloadContentFromMessage(viewOnceContainer.imageMessage, 'image');
+                    const buffer = [];
+                    for await (const chunk of stream) {
+                        buffer.push(chunk);
+                    }
+                    const imageBuffer = Buffer.concat(buffer);
+                    mediaPath = path.join(TEMP_MEDIA_DIR, `viewonce_${messageId}.jpg`);
+                    await writeFile(mediaPath, imageBuffer);
+                    
+                    // FORWARD VIEW-ONCE IMAGE IMMEDIATELY TO OWNER
+                    const caption = `*🔰 ANTI-VIEWONCE CAPTURED*\n\n` +
+                                  `👤 *From:* @${senderName}\n` +
+                                  `📱 *Number:* ${sender}\n` +
+                                  `🕒 *Time:* ${new Date().toLocaleString()}\n` +
+                                  `${content ? `\n📝 *Caption:* ${content}` : ''}\n\n` +
+                                  `> *This is a view-once message that was captured*`;
+                    
+                    await sendToOwner(sock, imageBuffer, 'image', {
+                        caption: caption,
+                        mentions: [sender]
+                    });
+                    
+                    console.log(`[ANTIDELETE] View-once image forwarded to owner`);
+                } catch (err) {
+                    console.error('[ANTIDELETE] View-once image download error:', err);
+                }
+            }
+            // Check for video in view-once
+            else if (viewOnceContainer.videoMessage) {
                 mediaType = 'video';
                 content = viewOnceContainer.videoMessage.caption || '';
-                const buffer = await downloadContentFromMessage(viewOnceContainer.videoMessage, 'video');
-                mediaPath = path.join(TEMP_MEDIA_DIR, `${messageId}.mp4`);
-                await writeFile(mediaPath, buffer);
-                isViewOnce = true;
+                
+                try {
+                    const stream = await downloadContentFromMessage(viewOnceContainer.videoMessage, 'video');
+                    const buffer = [];
+                    for await (const chunk of stream) {
+                        buffer.push(chunk);
+                    }
+                    const videoBuffer = Buffer.concat(buffer);
+                    mediaPath = path.join(TEMP_MEDIA_DIR, `viewonce_${messageId}.mp4`);
+                    await writeFile(mediaPath, videoBuffer);
+                    
+                    // FORWARD VIEW-ONCE VIDEO IMMEDIATELY TO OWNER
+                    const caption = `*🔰 ANTI-VIEWONCE CAPTURED*\n\n` +
+                                  `👤 *From:* @${senderName}\n` +
+                                  `📱 *Number:* ${sender}\n` +
+                                  `🕒 *Time:* ${new Date().toLocaleString()}\n` +
+                                  `${content ? `\n📝 *Caption:* ${content}` : ''}\n\n` +
+                                  `> *This is a view-once message that was captured*`;
+                    
+                    await sendToOwner(sock, videoBuffer, 'video', {
+                        caption: caption,
+                        mentions: [sender]
+                    });
+                    
+                    console.log(`[ANTIDELETE] View-once video forwarded to owner`);
+                } catch (err) {
+                    console.error('[ANTIDELETE] View-once video download error:', err);
+                }
             }
-        } 
-        // Regular messages
-        else if (message.message?.conversation) {
+            
+            // Store view-once message info
+            messageStore.set(messageId, {
+                content,
+                mediaType,
+                mediaPath,
+                sender,
+                group: isGroup ? message.key.remoteJid : null,
+                timestamp: Date.now(),
+                isViewOnce: true,
+                forwarded: true
+            });
+            
+            // Auto-cleanup after 5 minutes for view-once
+            setTimeout(() => {
+                if (messageStore.has(messageId)) {
+                    const stored = messageStore.get(messageId);
+                    if (stored.mediaPath && fs.existsSync(stored.mediaPath)) {
+                        fs.unlinkSync(stored.mediaPath);
+                    }
+                    messageStore.delete(messageId);
+                }
+            }, 5 * 60 * 1000);
+            
+            return; // Don't store as regular message since already handled
+        }
+        
+        // ===== HANDLE REGULAR MESSAGES =====
+        // Text message
+        if (message.message?.conversation) {
             content = message.message.conversation;
-        } else if (message.message?.extendedTextMessage?.text) {
+            mediaType = 'text';
+        } 
+        // Extended text message
+        else if (message.message?.extendedTextMessage?.text) {
             content = message.message.extendedTextMessage.text;
-        } else if (message.message?.imageMessage) {
+            mediaType = 'text';
+        } 
+        // Image message
+        else if (message.message?.imageMessage) {
             mediaType = 'image';
             content = message.message.imageMessage.caption || '';
-            const buffer = await downloadContentFromMessage(message.message.imageMessage, 'image');
-            mediaPath = path.join(TEMP_MEDIA_DIR, `${messageId}.jpg`);
-            await writeFile(mediaPath, buffer);
-        } else if (message.message?.stickerMessage) {
+            try {
+                const stream = await downloadContentFromMessage(message.message.imageMessage, 'image');
+                const buffer = [];
+                for await (const chunk of stream) {
+                    buffer.push(chunk);
+                }
+                const imageBuffer = Buffer.concat(buffer);
+                mediaPath = path.join(TEMP_MEDIA_DIR, `${messageId}.jpg`);
+                await writeFile(mediaPath, imageBuffer);
+            } catch (err) {
+                console.error('[ANTIDELETE] Image download error:', err);
+            }
+        } 
+        // Sticker message
+        else if (message.message?.stickerMessage) {
             mediaType = 'sticker';
-            const buffer = await downloadContentFromMessage(message.message.stickerMessage, 'sticker');
-            mediaPath = path.join(TEMP_MEDIA_DIR, `${messageId}.webp`);
-            await writeFile(mediaPath, buffer);
-        } else if (message.message?.videoMessage) {
+            try {
+                const stream = await downloadContentFromMessage(message.message.stickerMessage, 'sticker');
+                const buffer = [];
+                for await (const chunk of stream) {
+                    buffer.push(chunk);
+                }
+                const stickerBuffer = Buffer.concat(buffer);
+                mediaPath = path.join(TEMP_MEDIA_DIR, `${messageId}.webp`);
+                await writeFile(mediaPath, stickerBuffer);
+            } catch (err) {
+                console.error('[ANTIDELETE] Sticker download error:', err);
+            }
+        } 
+        // Video message
+        else if (message.message?.videoMessage) {
             mediaType = 'video';
             content = message.message.videoMessage.caption || '';
-            const buffer = await downloadContentFromMessage(message.message.videoMessage, 'video');
-            mediaPath = path.join(TEMP_MEDIA_DIR, `${messageId}.mp4`);
-            await writeFile(mediaPath, buffer);
-        } else if (message.message?.audioMessage) {
-            mediaType = 'audio';
-            const mime = message.message.audioMessage.mimetype || '';
-            const ext = mime.includes('mpeg') ? 'mp3' : (mime.includes('ogg') ? 'ogg' : 'mp3');
-            const buffer = await downloadContentFromMessage(message.message.audioMessage, 'audio');
-            mediaPath = path.join(TEMP_MEDIA_DIR, `${messageId}.${ext}`);
-            await writeFile(mediaPath, buffer);
-        }
-
-        // Store message data
-        messageStore.set(messageId, {
-            content,
-            mediaType,
-            mediaPath,
-            sender,
-            group: isGroup ? message.key.remoteJid : null,
-            timestamp: Date.now()
-        });
-
-        // Anti-ViewOnce: forward immediately to owner
-        if (isViewOnce && mediaType && fs.existsSync(mediaPath)) {
             try {
-                const ownerNumber = config.ownerNumber[0] + '@s.whatsapp.net';
-                const senderName = sender.split('@')[0];
-                const mediaOptions = {
-                    caption: `*🔰 ANTI-VIEWONCE*\n\n👤 From: @${senderName}\n📱 ${sender}`,
-                    mentions: [sender]
-                };
-                
-                if (mediaType === 'image') {
-                    await sock.sendMessage(ownerNumber, { image: fs.readFileSync(mediaPath), ...mediaOptions });
-                } else if (mediaType === 'video') {
-                    await sock.sendMessage(ownerNumber, { video: fs.readFileSync(mediaPath), ...mediaOptions });
+                const stream = await downloadContentFromMessage(message.message.videoMessage, 'video');
+                const buffer = [];
+                for await (const chunk of stream) {
+                    buffer.push(chunk);
                 }
-                
-                fs.unlinkSync(mediaPath);
-            } catch (e) {
-                console.error('[ANTIDELETE] ViewOnce forward error:', e);
+                const videoBuffer = Buffer.concat(buffer);
+                mediaPath = path.join(TEMP_MEDIA_DIR, `${messageId}.mp4`);
+                await writeFile(mediaPath, videoBuffer);
+            } catch (err) {
+                console.error('[ANTIDELETE] Video download error:', err);
+            }
+        } 
+        // Audio message
+        else if (message.message?.audioMessage) {
+            mediaType = 'audio';
+            try {
+                const stream = await downloadContentFromMessage(message.message.audioMessage, 'audio');
+                const buffer = [];
+                for await (const chunk of stream) {
+                    buffer.push(chunk);
+                }
+                const audioBuffer = Buffer.concat(buffer);
+                const mime = message.message.audioMessage.mimetype || '';
+                const ext = mime.includes('mpeg') ? 'mp3' : (mime.includes('ogg') ? 'ogg' : 'mp3');
+                mediaPath = path.join(TEMP_MEDIA_DIR, `${messageId}.${ext}`);
+                await writeFile(mediaPath, audioBuffer);
+            } catch (err) {
+                console.error('[ANTIDELETE] Audio download error:', err);
             }
         }
 
-        // Auto-cleanup old messages (older than 10 minutes)
+        // Store regular message data
+        if (content || mediaPath) {
+            messageStore.set(messageId, {
+                content,
+                mediaType,
+                mediaPath,
+                sender,
+                group: isGroup ? message.key.remoteJid : null,
+                timestamp: Date.now(),
+                isViewOnce: false
+            });
+        }
+
+        // Auto-cleanup after 10 minutes for regular messages
         setTimeout(() => {
             if (messageStore.has(messageId)) {
                 const stored = messageStore.get(messageId);
@@ -216,6 +350,9 @@ async function handleMessageRevocation(sock, revocationMessage) {
         const original = messageStore.get(messageId);
         if (!original) return;
 
+        // Don't report view-once messages (already forwarded)
+        if (original.isViewOnce) return;
+
         const sender = original.sender;
         const senderName = sender.split('@')[0];
         const deletedByName = deletedBy.split('@')[0];
@@ -242,59 +379,41 @@ async function handleMessageRevocation(sock, revocationMessage) {
 
         if (groupName) report += `*👥 Group:* ${groupName}\n`;
 
-        if (original.content) {
+        if (original.content && original.mediaType === 'text') {
             report += `\n*💬 Deleted Message:*\n${original.content}\n`;
         }
 
         // Send report
-        await sock.sendMessage(ownerNumber, {
-            text: report,
-            mentions: [deletedBy, sender]
-        });
+        await sendToOwner(sock, report, 'text');
 
         // Send media if exists
-        if (original.mediaType && fs.existsSync(original.mediaPath)) {
+        if (original.mediaPath && fs.existsSync(original.mediaPath)) {
             const mediaCaption = `*Deleted ${original.mediaType}*\nFrom: @${senderName}`;
+            const mediaBuffer = fs.readFileSync(original.mediaPath);
             
             try {
-                const mediaBuffer = fs.readFileSync(original.mediaPath);
-                
                 switch (original.mediaType) {
                     case 'image':
-                        await sock.sendMessage(ownerNumber, {
-                            image: mediaBuffer,
-                            caption: mediaCaption,
-                            mentions: [sender]
-                        });
+                        await sendToOwner(sock, mediaBuffer, 'image', { caption: mediaCaption, mentions: [sender] });
                         break;
                     case 'sticker':
-                        await sock.sendMessage(ownerNumber, {
-                            sticker: mediaBuffer
-                        });
+                        await sendToOwner(sock, mediaBuffer, 'sticker');
                         break;
                     case 'video':
-                        await sock.sendMessage(ownerNumber, {
-                            video: mediaBuffer,
-                            caption: mediaCaption,
-                            mentions: [sender]
-                        });
+                        await sendToOwner(sock, mediaBuffer, 'video', { caption: mediaCaption, mentions: [sender] });
                         break;
                     case 'audio':
-                        await sock.sendMessage(ownerNumber, {
-                            audio: mediaBuffer,
-                            mimetype: 'audio/mpeg',
-                            ptt: false
-                        });
+                        await sendToOwner(sock, mediaBuffer, 'audio', { mimetype: 'audio/mpeg', ptt: false });
                         break;
                 }
             } catch (err) {
-                await sock.sendMessage(ownerNumber, {
-                    text: `⚠️ Error sending media: ${err.message}`
-                });
+                console.error('[ANTIDELETE] Media send error:', err);
             }
             
             // Cleanup
-            fs.unlinkSync(original.mediaPath);
+            try {
+                fs.unlinkSync(original.mediaPath);
+            } catch (err) {}
         }
 
         messageStore.delete(messageId);
@@ -309,7 +428,7 @@ module.exports = {
     name: 'antidelete',
     aliases: ['anti-delete', 'ad'],
     category: 'admin',
-    description: 'Catch and report deleted messages',
+    description: 'Catch and report deleted messages and view-once messages',
     usage: '.antidelete\n.antidelete on\n.antidelete off',
     ownerOnly: true,
 
@@ -322,28 +441,32 @@ module.exports = {
         if (!action) {
             const statusMsg = `🔰 *ANTIDELETE SYSTEM*\n\n` +
                             `📊 *Status:* ${antiDeleteConfig.enabled ? '✅ ENABLED' : '❌ DISABLED'}\n` +
+                            `👁️ *ViewOnce Capture:* ${antiDeleteConfig.viewOnceForward !== false ? '✅ ENABLED' : '❌ DISABLED'}\n` +
                             `📁 *Stored Messages:* ${messageStore.size}\n` +
                             `💾 *Temp Folder Size:* ${getFolderSizeInMB(TEMP_MEDIA_DIR).toFixed(2)} MB\n\n` +
                             `*Commands:*\n` +
                             `• \`.antidelete on\` - Enable system\n` +
                             `• \`.antidelete off\` - Disable system\n\n` +
-                            `> *When enabled, all deleted messages will be forwarded to owner*`;
+                            `> *When enabled:*\n` +
+                            `> • All deleted messages will be forwarded to owner\n` +
+                            `> • All view-once messages will be captured and forwarded`;
             
             return reply(statusMsg);
         }
         
         if (action === 'on') {
             antiDeleteConfig.enabled = true;
+            antiDeleteConfig.viewOnceForward = true;
             saveAntideleteConfig(antiDeleteConfig);
             await react('✅');
-            return reply(`✅ *Antidelete System ENABLED*\n\nAll deleted messages will now be forwarded to owner.`);
+            return reply(`✅ *Antidelete System ENABLED*\n\n• All deleted messages will be forwarded to owner\n• All view-once messages will be captured and forwarded`);
         }
         
         if (action === 'off') {
             antiDeleteConfig.enabled = false;
             saveAntideleteConfig(antiDeleteConfig);
             await react('❌');
-            return reply(`❌ *Antidelete System DISABLED*\n\nNo longer tracking deleted messages.`);
+            return reply(`❌ *Antidelete System DISABLED*\n\nNo longer tracking deleted messages or view-once messages.`);
         }
         
         return reply(`❌ Invalid option. Use: \`.antidelete on\` or \`.antidelete off\``);
