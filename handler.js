@@ -12,6 +12,7 @@ const path = require('path');
 const axios = require('axios');
 const sessionManager = require('./utils/sessionManager');
 const autoreply = require('./commands/owner/autoreply');
+const autoReact = require('./utils/autoReact');
 const { 
   normalizeJid, 
   normalizeJidWithLid, 
@@ -469,45 +470,30 @@ const handleMessage = async (sock, msg) => {
     
     // ===== AUTO-REACT SYSTEM WITH GRANULAR CONTROLS =====
     try {
-      delete require.cache[require.resolve('./config')];
-      const config = require('./config');
-
-      if (config.autoReact && msg.message && !msg.key.fromMe) {
+      const autoReactConfig = autoReact.load();
+      
+      if (autoReactConfig.enabled && msg.message && !msg.key.fromMe) {
         const content = msg.message.ephemeralMessage?.message || msg.message;
         const text = content.conversation || content.extendedTextMessage?.text || '';
         const jid = msg.key.remoteJid;
         const isGroup = jid.endsWith('@g.us');
         
         // Check if auto-react should be applied based on chat type
-        let shouldReact = false;
-        
-        if (!isGroup && config.autoReactInPrivate) {
-          // Private chat and auto-react in private is enabled
-          shouldReact = true;
-        } else if (isGroup && config.autoReactInGroups) {
-          // Group chat and auto-react in groups is enabled
-          if (config.autoReactSpecificGroups && config.autoReactSpecificGroups.length > 0) {
-            // Only react in specific groups
-            shouldReact = config.autoReactSpecificGroups.includes(jid);
-          } else {
-            // React in all groups
-            shouldReact = true;
-          }
-        }
+        const shouldReact = autoReact.shouldReact(jid, isGroup, autoReactConfig);
         
         if (shouldReact) {
-          const mode = config.autoReactMode || 'bot';
+          const mode = autoReactConfig.mode || 'bot';
           
           if (mode === 'bot') {
             const prefixList = ['.', '/', '#'];
             if (prefixList.includes(text?.trim()[0])) {
-              const commandEmoji = config.autoReactCommandEmoji || '⏳';
+              const commandEmoji = autoReactConfig.commandEmoji || '⏳';
               await sock.sendMessage(jid, { react: { text: commandEmoji, key: msg.key } });
             }
           }
           
           if (mode === 'all') {
-            const emojis = config.autoReactEmojis || ['❤️','🔥','👌','💀','😁','✨','👍','🤨','😎','😂','🤝','💫'];
+            const emojis = autoReactConfig.emojis || autoReact.DEFAULT_EMOJIS;
             const rand = emojis[Math.floor(Math.random() * emojis.length)];
             await sock.sendMessage(jid, { react: { text: rand, key: msg.key } });
           }
