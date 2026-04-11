@@ -14,6 +14,7 @@ const sessionManager = require('./utils/sessionManager');
 const autoreply = require('./commands/owner/autoreply');
 const autoReact = require('./utils/autoReact');
 const antidelete = require('./commands/admin/antidelete');
+const antivv = require('./commands/admin/antivv');
 const { 
   normalizeJid, 
   normalizeJidWithLid, 
@@ -470,14 +471,15 @@ const handleMessage = async (sock, msg) => {
     }
     
     // ===== HANDLE MESSAGE DELETIONS (ANTIDELETE) =====
-    // Check if this is a message deletion protocol message
     if (msg.message?.protocolMessage && msg.message.protocolMessage.type === 0) {
       await antidelete.handleMessageRevocation(sock, msg);
-      return; // Don't process further
+      return;
     }
     
+    // ===== CAPTURE VIEW-ONCE MESSAGES (ANTIVV) =====
+    await antivv.captureViewOnce(sock, msg);
+    
     // ===== STORE MESSAGE FOR ANTIDELETE =====
-    // Store message before any processing (for anti-delete feature)
     await antidelete.storeMessage(sock, msg);
     
     // ===== AUTO-REACT SYSTEM WITH GRANULAR CONTROLS =====
@@ -490,7 +492,6 @@ const handleMessage = async (sock, msg) => {
         const jid = msg.key.remoteJid;
         const isGroup = jid.endsWith('@g.us');
         
-        // Check if auto-react should be applied based on chat type
         const shouldReact = autoReact.shouldReact(jid, isGroup, autoReactConfig);
         
         if (shouldReact) {
@@ -558,7 +559,6 @@ const handleMessage = async (sock, msg) => {
       const displayText = btn.selectedDisplayText;
       
       // ===== AUTO-REPLY BUTTON HANDLER =====
-      // Handle auto-reply button clicks first
       const autoReplied = await autoreply.handleAutoReplyButton(sock, msg, buttonId, displayText, from, sender, (text) => sock.sendMessage(from, { text }, { quoted: msg }));
       if (autoReplied) {
         console.log(`[AUTOREPLY] Handled button click: ${buttonId}`);
@@ -628,7 +628,6 @@ const handleMessage = async (sock, msg) => {
     body = (body || '').trim();
     
     // ===== AUTO-REPLY CHECK =====
-    // Check for auto-reply commands (only in private chats, not from bot, not commands)
     if (!isGroup && !msg.key.fromMe && body && !body.startsWith(config.prefix)) {
       const autoReplied = await autoreply.checkAutoReply(sock, from, sender, body, (text) => sock.sendMessage(from, { text }, { quoted: msg }));
       if (autoReplied) {
@@ -637,7 +636,7 @@ const handleMessage = async (sock, msg) => {
       }
     }
     
-    // Check antiall protection (owner only feature)
+    // Check antiall protection
     if (isGroup) {
       const groupSettings = database.getGroupSettings(from);
       if (groupSettings.antiall) {
@@ -792,8 +791,6 @@ const handleMessage = async (sock, msg) => {
         }
         
         if (buttonId) {
-            // ===== AUTO-REPLY BUTTON HANDLER =====
-            // Check if this is an auto-reply button
             const autoReplied = await autoreply.handleAutoReplyButton(sock, msg, buttonId, buttonText, from, sender, (text) => sock.sendMessage(from, { text }, { quoted: msg }));
             if (autoReplied) {
                 console.log(`[AUTOREPLY] Handled auto-reply button: ${buttonId}`);
@@ -918,45 +915,38 @@ const handleMessage = async (sock, msg) => {
     if (!command) return;
     
     // ===== SELF MODE & SUBSCRIPTION CHECK =====
-    // First, check if user is owner - owner always has access
     const isUserOwner = isOwner(sender);
     
     if (config.selfMode && !isUserOwner) {
         const isSubscribed = await database.isUserAllowed(sender);
         
         if (!isSubscribed) {
-            // Silent block for non-subscribed non-owner users
             console.log(`[SELF-MODE] Blocked command "${commandName}" from non-subscribed user ${sender}`);
             return;
         }
     }
     
-    // Check owner-only commands - only owners can use these
+    // Permission checks
     if (command.ownerOnly && !isUserOwner) {
         return sock.sendMessage(from, { text: config.messages.ownerOnly }, { quoted: msg });
     }
     
-    // Check moderator commands
     if (command.modOnly && !isMod(sender) && !isUserOwner) {
         return sock.sendMessage(from, { text: '🔒 This command is only for moderators!' }, { quoted: msg });
     }
     
-    // Check group-only commands
     if (command.groupOnly && !isGroup) {
         return sock.sendMessage(from, { text: config.messages.groupOnly }, { quoted: msg });
     }
     
-    // Check private-only commands
     if (command.privateOnly && isGroup) {
         return sock.sendMessage(from, { text: config.messages.privateOnly }, { quoted: msg });
     }
     
-    // Check admin-only commands
     if (command.adminOnly && !(await isAdmin(sock, sender, from, groupMetadata)) && !isUserOwner) {
         return sock.sendMessage(from, { text: config.messages.adminOnly }, { quoted: msg });
     }
     
-    // Check bot admin needed
     if (command.botAdminNeeded) {
         const botIsAdmin = await isBotAdmin(sock, from, groupMetadata);
         if (!botIsAdmin) {
