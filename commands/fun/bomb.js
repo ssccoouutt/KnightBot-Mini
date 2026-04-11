@@ -1,13 +1,16 @@
 /**
  * Bomb Game - Interactive number guessing game
- * Thanks To Kasan
+ * Uses session manager for game state
  */
 
-// Store game state per user
-const gameState = new Map();
+const sessionManager = require('../../utils/sessionManager');
+const giftedBtns = require('gifted-btns');
+const { sendButtons } = giftedBtns;
+
+const FORCE_AI_MODE = true;
+const TIMEOUT = 180000; // 3 minutes
 
 module.exports = {
-  gameState, // Export for handler access
   name: 'bomb',
   aliases: ['bom'],
   category: 'fun',
@@ -15,95 +18,20 @@ module.exports = {
   usage: '.bomb',
   
   async execute(sock, msg, args, extra) {
+    const { from, sender, reply, react } = extra;
+    
     try {
-      const sender = extra.sender;
-      const timeout = 180000; // 3 minutes
+      // Check if user already has an active game session
+      const existingSessions = sessionManager.getUserSessions(sender, from);
+      const existingGame = existingSessions.find(s => s.command === 'bomb');
       
-      // Check if user already has an active game
-      if (gameState.has(sender)) {
-        const game = gameState.get(sender);
-        
-        // Check if user wants to surrender
-        const text = msg.message?.conversation || 
-                     msg.message?.extendedTextMessage?.text || 
-                     '';
-        
-        if (text.toLowerCase().trim() === 'suren' || text.toLowerCase().trim() === 'surrender') {
-          const bombBox = game.array.find(v => v.emot === '💥');
-          await extra.reply(`*You surrendered!* 💣\n\nThe bomb was in box number ${bombBox.number}.`, { quoted: game.msg });
-          clearTimeout(game.timeoutId);
-          gameState.delete(sender);
-          return;
-        }
-        
-        // Check if user sent a number (1-9)
-        const number = parseInt(text.trim());
-        if (isNaN(number) || number < 1 || number > 9) {
-          return; // Ignore non-number messages during game
-        }
-        
-        // Find the box at this position
-        const selectedBox = game.array.find(v => v.position === number);
-        if (!selectedBox || selectedBox.state) {
-          return; // Box already opened or invalid
-        }
-        
-        // Mark box as opened
-        selectedBox.state = true;
-        
-        // Check if it's the bomb
-        if (selectedBox.emot === '💥') {
-          // Game over - hit the bomb!
-          let teks = `💥 *B O M B  E X P L O D E D!*\n\n`;
-          teks += `You selected box number ${selectedBox.number} and...\n\n`;
-          teks += `💣 *BOOM!* 💣\n\n`;
-          teks += `Game Over! Points deducted.\n\n`;
-          teks += `*Final Result:*\n`;
-          for (let i = 0; i < game.array.length; i += 3) {
-            teks += game.array.slice(i, i + 3).map(v => v.emot).join('') + '\n';
-          }
-          
-          await sock.sendMessage(extra.from, { text: teks }, { quoted: game.msg });
-          clearTimeout(game.timeoutId);
-          gameState.delete(sender);
-          return;
-        }
-        
-        // Check if all safe boxes are opened (win condition)
-        const safeBoxes = game.array.filter(v => v.emot === '✅');
-        const openedSafeBoxes = safeBoxes.filter(v => v.state);
-        
-        if (openedSafeBoxes.length === safeBoxes.length) {
-          // Win! All safe boxes opened
-          let teks = `🎉 *YOU WIN!*\n\n`;
-          teks += `Congratulations! You successfully opened all safe boxes!\n\n`;
-          teks += `*Final Result:*\n`;
-          for (let i = 0; i < game.array.length; i += 3) {
-            teks += game.array.slice(i, i + 3).map(v => v.emot).join('') + '\n';
-          }
-          teks += `\n✅ Points added!`;
-          
-          await sock.sendMessage(extra.from, { text: teks }, { quoted: game.msg });
-          clearTimeout(game.timeoutId);
-          gameState.delete(sender);
-          return;
-        }
-        
-        // Update game board
-        let teks = `乂  *B O M B*\n\n`;
-        teks += `Box number ${selectedBox.number} opened: ${selectedBox.emot}\n\n`;
-        teks += `Send number *1* - *9* to open a box:\n\n`;
-        for (let i = 0; i < game.array.length; i += 3) {
-          teks += game.array.slice(i, i + 3).map(v => v.state ? v.emot : v.number).join('') + '\n';
-        }
-        teks += `\nTimeout : [ *${((timeout / 1000) / 60)} minutes* ]\n`;
-        teks += `Type *suren* to surrender.`;
-        
-        await sock.sendMessage(extra.from, { text: teks }, { quoted: game.msg });
-        return;
+      if (existingGame) {
+        return reply(`🎮 *You already have an active bomb game!*\n\nSend a number (1-9) to open a box.\nType \`suren\` or \`surrender\` to end the game.`);
       }
       
-      // Start new game
+      await react('💣');
+      
+      // Create game board
       const bom = ['💥', '✅', '✅', '✅', '✅', '✅', '✅', '✅', '✅'].sort(() => Math.random() - 0.5);
       const number = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣'];
       const array = bom.map((v, i) => ({
@@ -113,58 +41,215 @@ module.exports = {
         state: false
       }));
       
+      // Create session for the game
+      const session = sessionManager.createSession(sender, from, 'bomb', {
+        array: array,
+        gameActive: true,
+        startTime: Date.now()
+      });
+      
+      // Build initial game board display
       let teks = `乂  *B O M B*\n\n`;
       teks += `Send number *1* - *9* to open the *9* boxes below:\n\n`;
       for (let i = 0; i < array.length; i += 3) {
         teks += array.slice(i, i + 3).map(v => v.state ? v.emot : v.number).join('') + '\n';
       }
-      teks += `\nTimeout : [ *${((timeout / 1000) / 60)} minutes* ]\n`;
-      teks += `If you get the box with the bomb, points will be deducted. Type *suren* to surrender.`;
+      teks += `\nTimeout : [ *3 minutes* ]\n`;
+      teks += `If you get the box with the bomb, you lose.\n`;
+      teks += `Type *suren* or *surrender* to give up.`;
       
-      const gameMsg = await sock.sendMessage(extra.from, {
+      // Send game message with buttons
+      const sessionId = session.id.split(':').pop();
+      const buttons = [
+        { id: `bomb_surrender_${sessionId}`, text: '🏳️ Surrender' }
+      ];
+      
+      const gameMsg = await sendButtons(sock, from, {
         text: teks,
-        contextInfo: {
-          externalAdReply: {
-            title: "Bomb Game",
-            body: 'Avoid the bomb!',
-            thumbnailUrl: "https://telegra.ph/file/b3138928493e78b55526f.jpg",
-            sourceUrl: "",
-            mediaType: 1,
-            renderLargerThumbnail: true
-          }
-        }
+        footer: 'Bomb Game',
+        buttons: buttons,
+        aimode: FORCE_AI_MODE
       }, { quoted: msg });
       
-      // Set timeout
-      const timeoutId = setTimeout(() => {
-        if (gameState.has(sender)) {
-          const game = gameState.get(sender);
-          const bombBox = game.array.find(v => v.emot === '💥');
-          sock.sendMessage(extra.from, {
-            text: `*Time's up!* ⏰\n\nThe bomb was in box number ${bombBox.number}.`
-          }, { quoted: game.msg });
-          gameState.delete(sender);
-        }
-      }, timeout);
-      
-      // Store game state
-      gameState.set(sender, {
-        msg: gameMsg,
-        array: array,
-        timeoutId: timeoutId
+      // Store message reference in session
+      sessionManager.updateSession(sender, from, {
+        msgId: gameMsg.key.id
       });
       
-      // Cleanup game state after timeout + 1 minute
-      setTimeout(() => {
-        if (gameState.has(sender)) {
-          gameState.delete(sender);
+      sessionManager.addPendingMessage(sender, from, gameMsg.key.id, 'bomb');
+      
+      // Set timeout for game
+      const timeoutId = setTimeout(async () => {
+        const currentSession = sessionManager.getSession(session.id);
+        if (currentSession && currentSession.data.gameActive) {
+          const bombBox = currentSession.data.array.find(v => v.emot === '💥');
+          await sock.sendMessage(from, {
+            text: `⏰ *Time's up!*\n\nThe bomb was in box number ${bombBox.number}.`
+          });
+          sessionManager.clearSession(session.id);
         }
-      }, timeout + 60000);
+      }, TIMEOUT);
+      
+      // Store timeout ID in session
+      sessionManager.updateSession(sender, from, {
+        timeoutId: timeoutId
+      });
       
     } catch (error) {
       console.error('Error in bomb command:', error);
       return extra.reply('❌ Error: ' + (error.message || 'Unknown error occurred'));
     }
   },
+  
+  async handleSession(sock, msg, session, context) {
+    const { from, sender, reply, react, isButtonClick } = context;
+    
+    // Handle button clicks (surrender)
+    if (isButtonClick) {
+      let buttonId = null;
+      if (msg.message?.buttonsResponseMessage) {
+        buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
+      } else if (msg.message?.interactiveResponseMessage) {
+        const interactive = msg.message.interactiveResponseMessage;
+        if (interactive.nativeFlowResponseMessage) {
+          try {
+            const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
+            buttonId = params.id;
+          } catch (e) {}
+        }
+      }
+      
+      if (buttonId && buttonId.includes('bomb_surrender_')) {
+        // Clear timeout if exists
+        if (session.data.timeoutId) {
+          clearTimeout(session.data.timeoutId);
+        }
+        
+        const bombBox = session.data.array.find(v => v.emot === '💥');
+        await reply(`🏳️ *You surrendered!*\n\nThe bomb was in box number ${bombBox.number}.`);
+        sessionManager.clearSession(session.id);
+        return true;
+      }
+      return true;
+    }
+    
+    // Handle text input (number guesses)
+    let text = '';
+    if (msg.message?.conversation) {
+      text = msg.message.conversation.trim();
+    } else if (msg.message?.extendedTextMessage?.text) {
+      text = msg.message.extendedTextMessage.text.trim();
+    }
+    
+    if (!text) return true;
+    
+    // Handle surrender command
+    if (text.toLowerCase() === 'suren' || text.toLowerCase() === 'surrender') {
+      if (session.data.timeoutId) {
+        clearTimeout(session.data.timeoutId);
+      }
+      
+      const bombBox = session.data.array.find(v => v.emot === '💥');
+      await reply(`🏳️ *You surrendered!*\n\nThe bomb was in box number ${bombBox.number}.`);
+      sessionManager.clearSession(session.id);
+      return true;
+    }
+    
+    // Handle number guess
+    const number = parseInt(text);
+    if (isNaN(number) || number < 1 || number > 9) {
+      await reply(`❌ *Invalid input!*\n\nSend a number between *1* and *9* to open a box.\nType \`suren\` to surrender.`);
+      return true;
+    }
+    
+    // Find the box at this position
+    const selectedBox = session.data.array.find(v => v.position === number);
+    if (!selectedBox || selectedBox.state) {
+      await reply(`❌ *Box already opened!*\n\nChoose a different box (1-9).`);
+      return true;
+    }
+    
+    // Mark box as opened
+    selectedBox.state = true;
+    
+    // Update session
+    sessionManager.updateSession(sender, from, {
+      array: session.data.array
+    });
+    
+    // Check if it's the bomb
+    if (selectedBox.emot === '💥') {
+      // Clear timeout
+      if (session.data.timeoutId) {
+        clearTimeout(session.data.timeoutId);
+      }
+      
+      // Game over - hit the bomb!
+      let teks = `💥 *B O M B  E X P L O D E D!*\n\n`;
+      teks += `You selected box number ${selectedBox.number} and...\n\n`;
+      teks += `💣 *BOOM!* 💣\n\n`;
+      teks += `Game Over!\n\n`;
+      teks += `*Final Result:*\n`;
+      for (let i = 0; i < session.data.array.length; i += 3) {
+        teks += session.data.array.slice(i, i + 3).map(v => v.emot).join('') + '\n';
+      }
+      
+      await react('💀');
+      await sock.sendMessage(from, { text: teks });
+      sessionManager.clearSession(session.id);
+      return true;
+    }
+    
+    // Check if all safe boxes are opened (win condition)
+    const safeBoxes = session.data.array.filter(v => v.emot === '✅');
+    const openedSafeBoxes = safeBoxes.filter(v => v.state);
+    
+    if (openedSafeBoxes.length === safeBoxes.length) {
+      // Clear timeout
+      if (session.data.timeoutId) {
+        clearTimeout(session.data.timeoutId);
+      }
+      
+      // Win! All safe boxes opened
+      let teks = `🎉 *YOU WIN!*\n\n`;
+      teks += `Congratulations! You successfully opened all safe boxes!\n\n`;
+      teks += `*Final Result:*\n`;
+      for (let i = 0; i < session.data.array.length; i += 3) {
+        teks += session.data.array.slice(i, i + 3).map(v => v.emot).join('') + '\n';
+      }
+      
+      await react('🎉');
+      await sock.sendMessage(from, { text: teks });
+      sessionManager.clearSession(session.id);
+      return true;
+    }
+    
+    // Update game board display
+    let teks = `乂  *B O M B*\n\n`;
+    teks += `Box number ${selectedBox.number} opened: ${selectedBox.emot}\n\n`;
+    teks += `Send number *1* - *9* to open a box:\n\n`;
+    for (let i = 0; i < session.data.array.length; i += 3) {
+      teks += session.data.array.slice(i, i + 3).map(v => v.state ? v.emot : v.number).join('') + '\n';
+    }
+    teks += `\nTimeout : [ *${((TIMEOUT / 1000) / 60)} minutes* ]\n`;
+    teks += `Type *suren* to surrender.`;
+    
+    // Create new buttons for the updated game state
+    const sessionId = session.id.split(':').pop();
+    const buttons = [
+      { id: `bomb_surrender_${sessionId}`, text: '🏳️ Surrender' }
+    ];
+    
+    // Send updated game board
+    const updatedMsg = await sendButtons(sock, from, {
+      text: teks,
+      footer: 'Bomb Game',
+      buttons: buttons,
+      aimode: FORCE_AI_MODE
+    }, {});
+    
+    sessionManager.addPendingMessage(sender, from, updatedMsg.key.id, 'bomb');
+    
+    return true;
+  }
 };
-
