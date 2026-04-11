@@ -27,12 +27,12 @@ module.exports = {
     
     // ===== AUTO-REACT CONFIGURATION =====
     autoReact: false, // Master switch - set to true to enable auto-react
-    autoReactMode: 'bot', // 'bot' (only reacts to commands) or 'all' (reacts to all messages)
+    autoReactMode: 'all', // 'bot' (only reacts to commands) or 'all' (reacts to all messages)
     
     // Granular auto-react controls
-    autoReactInPrivate: true,   // Enable auto-react in private chats
+    autoReactInPrivate: false,   // Enable auto-react in private chats
     autoReactInGroups: true,    // Enable auto-react in groups
-    autoReactSpecificGroups: [], // Array of specific group JIDs to enable auto-react (empty = all groups if autoReactInGroups is true)
+    autoReactSpecificGroups: ['120363408035540146@g.us'], // Array of specific group JIDs to enable auto-react (empty = all groups if autoReactInGroups is true)
     // Example: autoReactSpecificGroups: ['123456789@g.us', '987654321@g.us']
     
     autoReactEmojis: ['❤️','🔥','👌','💀','😁','✨','👍','🤨','😎','😂','🤝','💫'], // Default emojis for 'all' mode
