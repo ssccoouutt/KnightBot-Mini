@@ -467,7 +467,7 @@ const handleMessage = async (sock, msg) => {
       return;
     }
     
-    // Auto-React System
+    // ===== AUTO-REACT SYSTEM WITH GRANULAR CONTROLS =====
     try {
       delete require.cache[require.resolve('./config')];
       const config = require('./config');
@@ -476,19 +476,41 @@ const handleMessage = async (sock, msg) => {
         const content = msg.message.ephemeralMessage?.message || msg.message;
         const text = content.conversation || content.extendedTextMessage?.text || '';
         const jid = msg.key.remoteJid;
-        const emojis = ['❤️','🔥','👌','💀','😁','✨','👍','🤨','😎','😂','🤝','💫'];
-        const mode = config.autoReactMode || 'bot';
-
-        if (mode === 'bot') {
-          const prefixList = ['.', '/', '#'];
-          if (prefixList.includes(text?.trim()[0])) {
-            await sock.sendMessage(jid, { react: { text: '⏳', key: msg.key } });
+        const isGroup = jid.endsWith('@g.us');
+        
+        // Check if auto-react should be applied based on chat type
+        let shouldReact = false;
+        
+        if (!isGroup && config.autoReactInPrivate) {
+          // Private chat and auto-react in private is enabled
+          shouldReact = true;
+        } else if (isGroup && config.autoReactInGroups) {
+          // Group chat and auto-react in groups is enabled
+          if (config.autoReactSpecificGroups && config.autoReactSpecificGroups.length > 0) {
+            // Only react in specific groups
+            shouldReact = config.autoReactSpecificGroups.includes(jid);
+          } else {
+            // React in all groups
+            shouldReact = true;
           }
         }
-
-        if (mode === 'all') {
-          const rand = emojis[Math.floor(Math.random() * emojis.length)];
-          await sock.sendMessage(jid, { react: { text: rand, key: msg.key } });
+        
+        if (shouldReact) {
+          const mode = config.autoReactMode || 'bot';
+          
+          if (mode === 'bot') {
+            const prefixList = ['.', '/', '#'];
+            if (prefixList.includes(text?.trim()[0])) {
+              const commandEmoji = config.autoReactCommandEmoji || '⏳';
+              await sock.sendMessage(jid, { react: { text: commandEmoji, key: msg.key } });
+            }
+          }
+          
+          if (mode === 'all') {
+            const emojis = config.autoReactEmojis || ['❤️','🔥','👌','💀','😁','✨','👍','🤨','😎','😂','🤝','💫'];
+            const rand = emojis[Math.floor(Math.random() * emojis.length)];
+            await sock.sendMessage(jid, { react: { text: rand, key: msg.key } });
+          }
         }
       }
     } catch (e) {
