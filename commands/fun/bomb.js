@@ -48,6 +48,8 @@ module.exports = {
         startTime: Date.now()
       });
       
+      const sessionId = session.id.split(':').pop();
+      
       // Build initial game board display
       let teks = `乂  *B O M B*\n\n`;
       teks += `Send number *1* - *9* to open the *9* boxes below:\n\n`;
@@ -58,10 +60,9 @@ module.exports = {
       teks += `If you get the box with the bomb, you lose.\n`;
       teks += `Type *suren* or *surrender* to give up.`;
       
-      // Send game message with buttons
-      const sessionId = session.id.split(':').pop();
+      // Send game message with surrender button
       const buttons = [
-        { id: `bomb_surrender_${sessionId}`, text: '🏳️ Surrender' }
+        { id: `bomb_surrender_${sessionId}_${Date.now()}`, text: '🏳️ Surrender' }
       ];
       
       const gameMsg = await sendButtons(sock, from, {
@@ -71,11 +72,7 @@ module.exports = {
         aimode: FORCE_AI_MODE
       }, { quoted: msg });
       
-      // Store message reference in session
-      sessionManager.updateSession(sender, from, {
-        msgId: gameMsg.key.id
-      });
-      
+      // Add pending message for button detection
       sessionManager.addPendingMessage(sender, from, gameMsg.key.id, 'bomb');
       
       // Set timeout for game
@@ -91,9 +88,7 @@ module.exports = {
       }, TIMEOUT);
       
       // Store timeout ID in session
-      sessionManager.updateSession(sender, from, {
-        timeoutId: timeoutId
-      });
+      session.data.timeoutId = timeoutId;
       
     } catch (error) {
       console.error('Error in bomb command:', error);
@@ -104,22 +99,45 @@ module.exports = {
   async handleSession(sock, msg, session, context) {
     const { from, sender, reply, react, isButtonClick } = context;
     
-    // Handle button clicks (surrender)
+    console.log(`[BOMB] handleSession called for ${sender}, isButtonClick: ${isButtonClick}`);
+    
+    // Handle button clicks (surrender) - IMPORTANT: Must check isButtonClick first
     if (isButtonClick) {
       let buttonId = null;
+      let buttonText = null;
+      
+      // Extract button ID based on message type (like in survey.js)
       if (msg.message?.buttonsResponseMessage) {
         buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
+        buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
+        console.log(`[BOMB] ButtonsResponseMessage - ID: ${buttonId}, Text: ${buttonText}`);
+      } else if (msg.message?.listResponseMessage) {
+        const listReply = msg.message.listResponseMessage.singleSelectReply;
+        if (listReply) {
+          buttonId = listReply.selectedRowId;
+          buttonText = listReply.title;
+          console.log(`[BOMB] ListResponseMessage - ID: ${buttonId}, Text: ${buttonText}`);
+        }
       } else if (msg.message?.interactiveResponseMessage) {
         const interactive = msg.message.interactiveResponseMessage;
         if (interactive.nativeFlowResponseMessage) {
           try {
             const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
             buttonId = params.id;
+            buttonText = params.display_text;
+            console.log(`[BOMB] InteractiveResponseMessage - ID: ${buttonId}, Text: ${buttonText}`);
           } catch (e) {}
         }
+      } else if (msg.message?.templateButtonReplyMessage) {
+        buttonId = msg.message.templateButtonReplyMessage.selectedId;
+        buttonText = msg.message.templateButtonReplyMessage.selectedDisplayText;
+        console.log(`[BOMB] TemplateButtonReplyMessage - ID: ${buttonId}, Text: ${buttonText}`);
       }
       
+      // Handle surrender button
       if (buttonId && buttonId.includes('bomb_surrender_')) {
+        console.log(`[BOMB] Surrender button clicked`);
+        
         // Clear timeout if exists
         if (session.data.timeoutId) {
           clearTimeout(session.data.timeoutId);
@@ -130,6 +148,7 @@ module.exports = {
         sessionManager.clearSession(session.id);
         return true;
       }
+      
       return true;
     }
     
@@ -142,6 +161,8 @@ module.exports = {
     }
     
     if (!text) return true;
+    
+    console.log(`[BOMB] Text input: ${text}`);
     
     // Handle surrender command
     if (text.toLowerCase() === 'suren' || text.toLowerCase() === 'surrender') {
@@ -173,9 +194,7 @@ module.exports = {
     selectedBox.state = true;
     
     // Update session
-    sessionManager.updateSession(sender, from, {
-      array: session.data.array
-    });
+    session.data.array = session.data.array;
     
     // Check if it's the bomb
     if (selectedBox.emot === '💥') {
@@ -225,19 +244,19 @@ module.exports = {
     }
     
     // Update game board display
+    const sessionId = session.id.split(':').pop();
     let teks = `乂  *B O M B*\n\n`;
     teks += `Box number ${selectedBox.number} opened: ${selectedBox.emot}\n\n`;
     teks += `Send number *1* - *9* to open a box:\n\n`;
     for (let i = 0; i < session.data.array.length; i += 3) {
       teks += session.data.array.slice(i, i + 3).map(v => v.state ? v.emot : v.number).join('') + '\n';
     }
-    teks += `\nTimeout : [ *${((TIMEOUT / 1000) / 60)} minutes* ]\n`;
+    teks += `\nTimeout : [ *3 minutes* ]\n`;
     teks += `Type *suren* to surrender.`;
     
     // Create new buttons for the updated game state
-    const sessionId = session.id.split(':').pop();
     const buttons = [
-      { id: `bomb_surrender_${sessionId}`, text: '🏳️ Surrender' }
+      { id: `bomb_surrender_${sessionId}_${Date.now()}`, text: '🏳️ Surrender' }
     ];
     
     // Send updated game board
