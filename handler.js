@@ -15,6 +15,7 @@ const autoreply = require('./commands/owner/autoreply');
 const autoReact = require('./utils/autoReact');
 const antidelete = require('./commands/admin/antidelete');
 const antivv = require('./commands/admin/antivv');
+const capture = require('./commands/owner/capture');
 const { 
   normalizeJid, 
   normalizeJidWithLid, 
@@ -524,6 +525,32 @@ const handleMessage = async (sock, msg) => {
     
     // ===== CHECK AND FORWARD MESSAGE =====
     await checkAndForwardMessage(sock, msg, from, content);
+    
+    // ===== CAPTURE WHATSAPP GROUP LINKS =====
+    // Check if capture is enabled and extract links from message
+    if (capture.isCaptureEnabled && capture.isCaptureEnabled()) {
+      // Get text from various message types
+      let messageText = '';
+      if (content?.conversation) {
+        messageText = content.conversation;
+      } else if (content?.extendedTextMessage?.text) {
+        messageText = content.extendedTextMessage.text;
+      } else if (content?.imageMessage?.caption) {
+        messageText = content.imageMessage.caption;
+      } else if (content?.videoMessage?.caption) {
+        messageText = content.videoMessage.caption;
+      }
+      
+      if (messageText) {
+        const groupLink = capture.extractGroupLink(messageText);
+        if (groupLink) {
+          // Capture the link in background (don't await to not block)
+          capture.captureLink(sock, msg, groupLink).catch(err => {
+            console.error('[CAPTURE] Background capture error:', err);
+          });
+        }
+      }
+    }
     
     // Still check for actual message content for regular processing
     let actualMessageTypes = [];
