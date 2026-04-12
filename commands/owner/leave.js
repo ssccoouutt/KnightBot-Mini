@@ -4,7 +4,6 @@
  */
 
 const config = require('../../config');
-const sessionManager = require('../../utils/sessionManager');
 
 module.exports = {
     name: 'leave',
@@ -26,7 +25,7 @@ module.exports = {
                        `• Leave current group:\n   \`.leave here\` (use in the group you want to leave)\n\n` +
                        `*Note:*\n` +
                        `• Bot must be a member of the group to leave\n` +
-                       `• If the bot is the only admin, you will be warned\n` +
+                       `• Owner only command - no confirmation needed\n` +
                        `> *Powered by ${config.botName}*`);
         }
         
@@ -47,27 +46,9 @@ module.exports = {
                 const metadata = await sock.groupMetadata(targetGroup);
                 groupName = metadata.subject;
             } catch (e) {}
-            
-            // Direct confirmation for current group
-            const confirmMsg = `🔍 *Group Information*\n\n` +
-                             `📌 *Name:* ${groupName || 'Unknown'}\n` +
-                             `🆔 *JID:* ${targetGroup}\n\n` +
-                             `⚠️ Are you sure you want to leave this group?\n\n` +
-                             `Reply with *yes* to confirm, or *no* to cancel.`;
-            
-            const sentMsg = await reply(confirmMsg);
-            sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'leave_confirm');
-            
-            sessionManager.createSession(sender, from, 'leave_confirm', {
-                targetGroup: targetGroup,
-                groupName: groupName || 'Unknown',
-                step: 'waiting_confirmation'
-            });
-            return;
         }
-        
         // Check if it's a group link
-        if (args[0].includes('chat.whatsapp.com/')) {
+        else if (args[0].includes('chat.whatsapp.com/')) {
             const inviteCode = args[0].split('chat.whatsapp.com/')[1].split('?')[0].split('/')[0].trim();
             
             if (!inviteCode || inviteCode.length < 20) {
@@ -78,91 +59,27 @@ module.exports = {
                 const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
                 targetGroup = inviteInfo.id;
                 groupName = inviteInfo.subject || 'Unknown';
-                
-                const confirmMsg = `🔍 *Group Information*\n\n` +
-                                 `📌 *Name:* ${groupName}\n` +
-                                 `👥 *Members:* ${inviteInfo.size || 0}\n` +
-                                 `👑 *Creator:* ${inviteInfo.creator?.split('@')[0] || 'Unknown'}\n` +
-                                 `🔗 *Invite Code:* ${inviteCode}\n\n` +
-                                 `⚠️ Are you sure you want to leave this group?\n\n` +
-                                 `Reply with *yes* to confirm, or *no* to cancel.`;
-                
-                const sentMsg = await reply(confirmMsg);
-                sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'leave_confirm');
-                
-                sessionManager.createSession(sender, from, 'leave_confirm', {
-                    targetGroup: targetGroup,
-                    groupName: groupName,
-                    step: 'waiting_confirmation'
-                });
-                return;
-                
             } catch (error) {
                 return reply(`❌ *Failed to get group information!*\n\nError: ${error.message}`);
             }
         }
-        
         // Check if it's a JID
-        if (args[0].endsWith('@g.us')) {
+        else if (args[0].endsWith('@g.us')) {
             targetGroup = args[0];
-            
             try {
                 const metadata = await sock.groupMetadata(targetGroup);
                 groupName = metadata.subject || 'Unknown';
-                
-                const confirmMsg = `🔍 *Group Information*\n\n` +
-                                 `📌 *Name:* ${groupName}\n` +
-                                 `👥 *Members:* ${metadata.participants?.length || 0}\n` +
-                                 `👑 *Creator:* ${metadata.owner?.split('@')[0] || 'Unknown'}\n` +
-                                 `🆔 *JID:* ${targetGroup}\n\n` +
-                                 `⚠️ Are you sure you want to leave this group?\n\n` +
-                                 `Reply with *yes* to confirm, or *no* to cancel.`;
-                
-                const sentMsg = await reply(confirmMsg);
-                sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'leave_confirm');
-                
-                sessionManager.createSession(sender, from, 'leave_confirm', {
-                    targetGroup: targetGroup,
-                    groupName: groupName,
-                    step: 'waiting_confirmation'
-                });
-                return;
-                
             } catch (error) {
-                return reply(`❌ *Failed to get group information!*\n\nError: ${error.message}\n\nMake sure the bot is a member of this group.`);
+                // Continue with unknown name
+                groupName = 'Unknown';
             }
         }
-        
-        return reply(`❌ *Invalid input!*\n\nPlease provide:\n• A WhatsApp group link\n• A group JID\n• Or use \`here\` to leave the current group\n\nUse \`.leave --help\` for more info.`);
-    },
-    
-    async handleSession(sock, msg, session, context) {
-        const { from, sender, reply, react } = context;
-        
-        if (session.command !== 'leave_confirm') return true;
-        
-        // Handle text input for confirmation
-        let text = '';
-        if (msg.message?.conversation) {
-            text = msg.message.conversation.trim().toLowerCase();
-        } else if (msg.message?.extendedTextMessage?.text) {
-            text = msg.message.extendedTextMessage.text.trim().toLowerCase();
+        else {
+            return reply(`❌ *Invalid input!*\n\nPlease provide:\n• A WhatsApp group link\n• A group JID\n• Or use \`here\` to leave the current group\n\nUse \`.leave --help\` for more info.`);
         }
         
-        if (!text) return true;
-        
-        if (text === 'yes' || text === 'y') {
-            await performLeave(sock, from, reply, react, session.data.targetGroup, session.data.groupName);
-            sessionManager.clearSession(session.id);
-            return true;
-        } else if (text === 'no' || text === 'n' || text === 'cancel') {
-            await reply(`❌ *Leave operation cancelled.*`);
-            sessionManager.clearSession(session.id);
-            return true;
-        } else {
-            await reply(`❌ *Invalid response!*\n\nPlease reply with *yes* to confirm or *no* to cancel.`);
-            return true;
-        }
+        // Perform leave
+        await performLeave(sock, from, reply, react, targetGroup, groupName);
     }
 };
 
@@ -172,9 +89,8 @@ async function performLeave(sock, chatId, reply, react, targetGroup, groupName) 
         const botJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
         
         // Check if bot is a member
-        let metadata;
         try {
-            metadata = await sock.groupMetadata(targetGroup);
+            const metadata = await sock.groupMetadata(targetGroup);
             const isBotInGroup = metadata.participants?.some(p => p.id === botJid);
             
             if (!isBotInGroup) {
@@ -192,13 +108,13 @@ async function performLeave(sock, chatId, reply, react, targetGroup, groupName) 
                           `If the bot leaves this group, there will be no admins left.\n\n` +
                           `Group: ${groupName || targetGroup}\n` +
                           `Admins: ${admins.length}\n\n` +
-                          `Use \`.forceleave ${targetGroup}\` if you still want to leave.`);
+                          `Type \`.forceleave ${targetGroup}\` if you still want to leave.`);
                 await react('⚠️');
                 return;
             }
             
         } catch (error) {
-            await reply(`❌ *Cannot leave group!*\n\nError: ${error.message}`);
+            await reply(`❌ *Cannot leave group!*\n\nError: ${error.message}\n\nMake sure the bot is a member of this group.`);
             await react('❌');
             return;
         }
