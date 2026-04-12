@@ -111,7 +111,7 @@ module.exports = {
             }
             
             // Handle Broadcast (from main menu)
-            if (buttonId?.includes('broadcast')) {
+            if (buttonId?.includes('broadcast') && !buttonId?.includes('test')) {
                 await showBroadcastInput(sock, from, sender, session, reply);
                 return true;
             }
@@ -136,7 +136,9 @@ module.exports = {
             
             // Handle Cancel Broadcast
             if (buttonId?.includes('cancel_broadcast')) {
-                sessionManager.updateSession(sender, from, { type: 'main_menu' });
+                session.data.broadcastMessage = null;
+                session.data.isTest = false;
+                session.data.type = 'main_menu';
                 await showMainMenu(sock, from, sender, session, reply);
                 return true;
             }
@@ -149,6 +151,7 @@ module.exports = {
             
             // Handle Cancel Leave
             if (buttonId?.includes('cancel_leave')) {
+                session.data.type = 'main_menu';
                 await showMainMenu(sock, from, sender, session, reply);
                 return true;
             }
@@ -250,6 +253,7 @@ async function showBroadcastInput(sock, chatId, sender, session, reply) {
     const totalOpen = openGroups.length;
     
     session.data.type = 'waiting_broadcast_message';
+    session.data.isTest = false;
     
     const message = `📢 *Broadcast to ${totalOpen} Open Chat Groups*\n\n` +
                    `Send me the message you want to broadcast.\n\n` +
@@ -267,8 +271,8 @@ async function showTestBroadcastInput(sock, chatId, sender, session, reply) {
     session.data.type = 'waiting_broadcast_message';
     session.data.isTest = true;
     
-    const message = `🧪 *Test Broadcast*\n\n` +
-                   `This will send a test message ONLY to:\n` +
+    const message = `🧪 *TEST BROADCAST*\n\n` +
+                   `⚠️ This will ONLY send to test group:\n` +
                    `\`${TEST_GROUP_JID}\`\n\n` +
                    `Send me the message you want to test.\n\n` +
                    `*Important:*\n` +
@@ -287,17 +291,18 @@ async function showBroadcastConfirm(sock, chatId, sender, session, reply, messag
     const isTest = session.data.isTest || false;
     const sessionId = session.id.split(':').pop();
     
-    let previewMessage = `📢 *Broadcast Confirmation*\n\n`;
+    let previewMessage = '';
     
     if (isTest) {
-        previewMessage = `🧪 *Test Broadcast Confirmation*\n\n` +
-                        `Target: \`${TEST_GROUP_JID}\`\n\n`;
+        previewMessage = `🧪 *TEST BROADCAST CONFIRMATION*\n\n` +
+                        `⚠️ This will ONLY send to:\n` +
+                        `\`${TEST_GROUP_JID}\`\n\n`;
     } else {
         previewMessage = `📢 *Broadcast to ${totalOpen} Open Chat Groups*\n\n`;
     }
     
     previewMessage += `*Message Preview:*\n━━━━━━━━━━━━━━━━━━\n${messageText}\n━━━━━━━━━━━━━━━━━━\n\n`;
-    previewMessage += `⚠️ Send this EXACT message to ${isTest ? '1 group' : totalOpen + ' groups'}?\n\n`;
+    previewMessage += `⚠️ Send this EXACT message to ${isTest ? '1 test group' : totalOpen + ' groups'}?\n\n`;
     previewMessage += `The message will be sent WITHOUT any additional text.`;
     
     const confirmId = `confirm_broadcast_${sessionId}_${Date.now()}`;
@@ -329,6 +334,7 @@ async function performBroadcast(sock, chatId, sender, session, reply, react) {
     
     if (!messageText || openGroups.length === 0) {
         await reply(`❌ No message or no groups to broadcast to.`);
+        session.data.type = 'main_menu';
         await showMainMenu(sock, chatId, sender, session, reply);
         return;
     }
@@ -345,14 +351,12 @@ async function performBroadcast(sock, chatId, sender, session, reply, react) {
         const group = openGroups[i];
         
         try {
-            // Send message EXACTLY as is - NO extra text, NO footers
             await sock.sendMessage(group.id, { 
                 text: messageText,
-                linkPreview: true  // This ensures links show full preview
+                linkPreview: true
             });
             successCount++;
             
-            // Update progress every 5 groups
             if ((i + 1) % 5 === 0 || i === openGroups.length - 1) {
                 await sock.sendMessage(chatId, {
                     text: `📢 *Broadcasting...*\n\n✅ ${successCount}/${totalOpen} sent\n❌ Failed: ${failCount}`,
@@ -360,30 +364,23 @@ async function performBroadcast(sock, chatId, sender, session, reply, react) {
                 });
             }
             
-            // Small delay to avoid rate limiting
             await new Promise(resolve => setTimeout(resolve, 1000));
             
         } catch (error) {
             failCount++;
             failedGroups.push({ name: group.subject, error: error.message });
-            console.error(`[GROUPS] Failed to send to ${group.subject}:`, error.message);
         }
     }
     
-    // Build result message
     let resultMsg = `✅ *Broadcast Completed!*\n\n` +
-                   `📢 Message sent to:\n` +
                    `✅ Success: ${successCount}\n` +
-                   `❌ Failed: ${failCount}\n\n` +
-                   `*Message:*\n${messageText.substring(0, 100)}${messageText.length > 100 ? '...' : ''}`;
+                   `❌ Failed: ${failCount}`;
     
     if (failedGroups.length > 0 && failedGroups.length <= 5) {
         resultMsg += `\n\n❌ *Failed groups:*\n`;
         for (const failed of failedGroups) {
             resultMsg += `• ${failed.name}\n`;
         }
-    } else if (failedGroups.length > 5) {
-        resultMsg += `\n\n❌ *Failed: ${failedGroups.length} groups*`;
     }
     
     await sock.sendMessage(chatId, {
@@ -393,7 +390,7 @@ async function performBroadcast(sock, chatId, sender, session, reply, react) {
     
     await react('✅');
     
-    // Clear broadcast data and show main menu
+    // Clear broadcast data and return to main menu
     session.data.broadcastMessage = null;
     session.data.isTest = false;
     session.data.type = 'main_menu';
@@ -406,6 +403,7 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react)
     
     if (!messageText) {
         await reply(`❌ No message to send.`);
+        session.data.type = 'main_menu';
         await showMainMenu(sock, chatId, sender, session, reply);
         return;
     }
@@ -415,10 +413,9 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react)
     const statusMsg = await reply(`🧪 *Sending test message...*\n\nTarget: ${TEST_GROUP_JID}`);
     
     try {
-        // Send message EXACTLY as is - NO extra text, NO footers
         await sock.sendMessage(TEST_GROUP_JID, { 
             text: messageText,
-            linkPreview: true  // This ensures links show full preview
+            linkPreview: true
         });
         
         await sock.sendMessage(chatId, {
@@ -440,7 +437,7 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react)
         await react('❌');
     }
     
-    // Clear broadcast data and show main menu
+    // Clear broadcast data and return to main menu
     session.data.broadcastMessage = null;
     session.data.isTest = false;
     session.data.type = 'main_menu';
@@ -539,6 +536,7 @@ async function performLeave(sock, chatId, sender, session, reply, react) {
     
     await react('✅');
     
+    // Clear session and show fresh menu
     sessionManager.clearSession(session.id);
     
     const newSession = sessionManager.createSession(sender, chatId, 'groups', {
