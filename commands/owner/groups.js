@@ -50,10 +50,8 @@ module.exports = {
             
             for (const group of groupList) {
                 if (group.announce === true) {
-                    // Announcement-only group (only admins can send)
                     announcementGroups.push(group);
                 } else {
-                    // Open chat group (everyone can send)
                     openGroups.push(group);
                 }
             }
@@ -62,15 +60,15 @@ module.exports = {
             const totalAnnouncement = announcementGroups.length;
             const totalOpen = openGroups.length;
             
-            // Build status message
-            const statusMessage = `📊 *GROUP STATISTICS*\n\n` +
-                                 `━━━━━━━━━━━━━━━━━━\n` +
-                                 `📁 *Total Groups:* ${totalGroups}\n` +
-                                 `🔇 *Announcement-Only:* ${totalAnnouncement}\n` +
-                                 `💬 *Open Chat:* ${totalOpen}\n` +
-                                 `━━━━━━━━━━━━━━━━━━\n\n`;
+            // Build status message (using let, not const)
+            let statusMessage = `📊 *GROUP STATISTICS*\n\n` +
+                               `━━━━━━━━━━━━━━━━━━\n` +
+                               `📁 *Total Groups:* ${totalGroups}\n` +
+                               `🔇 *Announcement-Only:* ${totalAnnouncement}\n` +
+                               `💬 *Open Chat:* ${totalOpen}\n` +
+                               `━━━━━━━━━━━━━━━━━━\n\n`;
             
-            // Show announcement-only groups (first 20)
+            // Show announcement-only groups
             if (announcementGroups.length > 0) {
                 statusMessage += `🔇 *ANNOUNCEMENT-ONLY GROUPS (${announcementGroups.length}):*\n`;
                 statusMessage += `━━━━━━━━━━━━━━━━━━\n`;
@@ -78,7 +76,7 @@ module.exports = {
                     const group = announcementGroups[i];
                     const memberCount = group.participants?.length || 0;
                     statusMessage += `${i + 1}. ${group.subject}\n`;
-                    statusMessage += `   👥 ${memberCount} members | 🆔 ${group.id}\n\n`;
+                    statusMessage += `   👥 ${memberCount} members\n\n`;
                 }
                 if (announcementGroups.length > 20) {
                     statusMessage += `... and ${announcementGroups.length - 20} more\n`;
@@ -88,7 +86,7 @@ module.exports = {
                 statusMessage += `🔇 *No announcement-only groups*\n━━━━━━━━━━━━━━━━━━\n\n`;
             }
             
-            // Show open chat groups (first 20)
+            // Show open chat groups
             if (openGroups.length > 0) {
                 statusMessage += `💬 *OPEN CHAT GROUPS (${openGroups.length}):*\n`;
                 statusMessage += `━━━━━━━━━━━━━━━━━━\n`;
@@ -96,7 +94,7 @@ module.exports = {
                     const group = openGroups[i];
                     const memberCount = group.participants?.length || 0;
                     statusMessage += `${i + 1}. ${group.subject}\n`;
-                    statusMessage += `   👥 ${memberCount} members | 🆔 ${group.id}\n\n`;
+                    statusMessage += `   👥 ${memberCount} members\n\n`;
                 }
                 if (openGroups.length > 20) {
                     statusMessage += `... and ${openGroups.length - 20} more\n`;
@@ -189,7 +187,7 @@ module.exports = {
             
             // Handle Leave Announcement Groups
             if (buttonId.includes('groups_leave_announcement_')) {
-                await confirmLeaveAnnouncementGroups(sock, from, sender, session, reply, react);
+                await confirmLeaveAnnouncementGroups(sock, from, sender, session, reply);
                 return true;
             }
             
@@ -249,7 +247,7 @@ async function refreshGroupList(sock, chatId, sender, session, reply) {
                 const group = announcementGroups[i];
                 const memberCount = group.participants?.length || 0;
                 statusMessage += `${i + 1}. ${group.subject}\n`;
-                statusMessage += `   👥 ${memberCount} members | 🆔 ${group.id}\n\n`;
+                statusMessage += `   👥 ${memberCount} members\n\n`;
             }
             if (announcementGroups.length > 20) {
                 statusMessage += `... and ${announcementGroups.length - 20} more\n`;
@@ -266,7 +264,7 @@ async function refreshGroupList(sock, chatId, sender, session, reply) {
                 const group = openGroups[i];
                 const memberCount = group.participants?.length || 0;
                 statusMessage += `${i + 1}. ${group.subject}\n`;
-                statusMessage += `   👥 ${memberCount} members | 🆔 ${group.id}\n\n`;
+                statusMessage += `   👥 ${memberCount} members\n\n`;
             }
             if (openGroups.length > 20) {
                 statusMessage += `... and ${openGroups.length - 20} more\n`;
@@ -295,17 +293,12 @@ async function refreshGroupList(sock, chatId, sender, session, reply) {
         buttons.push({ id: `groups_refresh_${sessionId}`, text: '🔄 Refresh' });
         buttons.push({ id: `groups_cancel_${sessionId}`, text: '❌ Close' });
         
-        await sock.sendMessage(chatId, {
-            text: statusMessage,
-            edit: processingMsg.key
-        });
-        
         const sentMsg = await sendButtons(sock, chatId, {
             text: statusMessage,
             footer: 'Group Manager',
             buttons: buttons,
             aimode: FORCE_AI_MODE
-        }, {});
+        }, { edit: processingMsg.key });
         
         sessionManager.addPendingMessage(sender, chatId, sentMsg.key.id, 'groups');
         
@@ -315,7 +308,7 @@ async function refreshGroupList(sock, chatId, sender, session, reply) {
     }
 }
 
-async function confirmLeaveAnnouncementGroups(sock, chatId, sender, session, reply, react) {
+async function confirmLeaveAnnouncementGroups(sock, chatId, sender, session, reply) {
     const announcementGroups = session.data.announcementGroups;
     const totalAnnouncement = announcementGroups.length;
     
