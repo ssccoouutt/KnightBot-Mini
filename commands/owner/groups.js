@@ -1,406 +1,626 @@
-/**
- * Groups Command - Show group statistics and manage announcement-only groups
- */
+// groups.js
+const fs = require('fs-extra');
+const path = require('path');
 
-const config = require('../../config');
-const sessionManager = require('../../utils/sessionManager');
-const giftedBtns = require('gifted-btns');
-const { sendButtons } = giftedBtns;
+// Helper function for delay
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-const FORCE_AI_MODE = true;
+// Function to extract invite code from WhatsApp link
+function extractInviteCode(link) {
+    const patterns = [
+        /chat\.whatsapp\.com\/([A-Za-z0-9]{22})/,
+        /whatsapp\.com\/invite\/([A-Za-z0-9]{22})/,
+        /invite\/([A-Za-z0-9]{22})/
+    ];
+    
+    for (const pattern of patterns) {
+        const match = link.match(pattern);
+        if (match) return match[1];
+    }
+    return null;
+}
 
-// Test group JID for testing broadcast
-const TEST_GROUP_JID = '120363408035540146@g.us';
-
-module.exports = {
-    name: 'groups',
-    aliases: ['grouplist', 'groupsinfo', 'mygroups'],
-    category: 'owner',
-    description: 'Show group statistics and manage announcement-only groups',
-    usage: '.groups\n.groups --help',
-    ownerOnly: true,
-
-    async execute(sock, msg, args, context) {
-        const { from, sender, reply, react } = context;
-        
-        if (args[0] === '--help') {
-            return reply(`📊 *GROUPS COMMAND*\n\n` +
-                       `*Usage:*\n` +
-                       `• \`.groups\` - Show all groups the bot is in\n` +
-                       `• \`.groups --help\` - Show this help\n\n` +
-                       `> *Powered by ${config.botName}*`);
-        }
-        
-        await react('📊');
-        
-        // Clear any existing sessions
-        const existingSessions = sessionManager.getUserSessions(sender, from);
-        for (const sess of existingSessions) {
-            if (sess.command === 'groups') {
-                sessionManager.clearSession(sess.id);
-            }
-        }
-        
-        // Create session
-        const session = sessionManager.createSession(sender, from, this.name, {
-            type: 'main_menu'
+// Function to generate detailed report
+function generateBulkJoinReport(results) {
+    let report = '=====================================\n';
+    report += '    BULK JOIN OPERATION REPORT    \n';
+    report += `    Generated: ${new Date().toLocaleString()}    \n`;
+    report += '=====================================\n\n\n';
+    
+    // Failed groups section
+    report += '═══════════════════════════════════\n';
+    report += '    FAILED GROUP LINKS\n';
+    report += '    (Bad Request / Cannot Join)\n';
+    report += '═══════════════════════════════════\n\n';
+    
+    if (results.failed.length > 0) {
+        results.failed.forEach((item, idx) => {
+            report += `[${idx + 1}] Link: ${item.link}\n`;
+            report += `    Reason: ${item.reason}\n`;
+            if (item.groupName) report += `    Group: ${item.groupName}\n`;
+            report += `    Status: FAILED ❌\n\n`;
         });
-        
-        await showMainMenu(sock, from, sender, session, reply);
-    },
-    
-    async handleSession(sock, msg, session, context) {
-        const { from, sender, reply, react, isButtonClick } = context;
-        
-        if (session.command !== 'groups') return true;
-        
-        // Handle text input for broadcast message
-        if (session.data.type === 'waiting_broadcast_message') {
-            let messageText = '';
-            if (msg.message?.conversation) {
-                messageText = msg.message.conversation;
-            } else if (msg.message?.extendedTextMessage?.text) {
-                messageText = msg.message.extendedTextMessage.text;
-            }
-            
-            if (!messageText) return true;
-            
-            if (messageText.toLowerCase() === 'cancel') {
-                sessionManager.updateSession(sender, from, { type: 'main_menu' });
-                await showMainMenu(sock, from, sender, session, reply);
-                return true;
-            }
-            
-            // Send immediately
-            if (session.data.isTest) {
-                await performTestBroadcast(sock, from, sender, session, reply, react, messageText);
-            } else {
-                await performBroadcast(sock, from, sender, session, reply, react, messageText);
-            }
-            return true;
-        }
-        
-        // Handle button clicks
-        if (isButtonClick) {
-            let buttonId = null;
-            
-            if (msg.message?.buttonsResponseMessage) {
-                buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
-            } else if (msg.message?.templateButtonReplyMessage) {
-                buttonId = msg.message.templateButtonReplyMessage.selectedId;
-            }
-            
-            console.log(`[GROUPS] Button clicked: ${buttonId}`);
-            
-            // Handle Cancel
-            if (buttonId?.includes('cancel')) {
-                sessionManager.clearSession(session.id);
-                await reply('❌ Closed.');
-                return true;
-            }
-            
-            // Handle Refresh
-            if (buttonId?.includes('refresh')) {
-                await refreshGroups(sock, from, sender, session, reply);
-                return true;
-            }
-            
-            // Handle Leave
-            if (buttonId?.includes('leave')) {
-                await performLeave(sock, from, sender, session, reply, react);
-                return true;
-            }
-            
-            // Handle Broadcast
-            if (buttonId?.includes('broadcast') && !buttonId?.includes('test')) {
-                session.data.isTest = false;
-                session.data.type = 'waiting_broadcast_message';
-                const totalOpen = session.data.openGroups.length;
-                const sentMsg = await reply(`📢 *Send message to ${totalOpen} groups*\n\nType your message below (or "cancel" to abort):\n\n*Note:* WhatsApp group links will show a join button preview.`);
-                sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'groups');
-                return true;
-            }
-            
-            // Handle Test Broadcast
-            if (buttonId?.includes('test_broadcast')) {
-                session.data.isTest = true;
-                session.data.type = 'waiting_broadcast_message';
-                const sentMsg = await reply(`🧪 *TEST MODE*\n\n⚠️ This will ONLY send to:\n${TEST_GROUP_JID}\n\nType your test message below (or "cancel" to abort):\n\n*Note:* WhatsApp group links will show a join button preview.`);
-                sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'groups');
-                return true;
-            }
-        }
-        
-        return true;
-    }
-};
-
-async function showMainMenu(sock, chatId, sender, session, reply) {
-    // Get fresh group data
-    const groups = await sock.groupFetchAllParticipating();
-    const groupList = Object.values(groups);
-    
-    const announcementGroups = [];
-    const openGroups = [];
-    
-    for (const group of groupList) {
-        if (group.announce === true) {
-            announcementGroups.push({ id: group.id, subject: group.subject });
-        } else {
-            openGroups.push({ id: group.id, subject: group.subject });
-        }
+    } else {
+        report += 'No failed groups.\n\n';
     }
     
-    const totalAnnouncement = announcementGroups.length;
-    const totalOpen = openGroups.length;
-    const totalGroups = groupList.length;
+    report += '\n\n\n'; // 3 empty lines
     
-    // Store in session
-    session.data.announcementGroups = announcementGroups;
-    session.data.openGroups = openGroups;
-    session.data.totalAnnouncement = totalAnnouncement;
-    session.data.totalOpen = totalOpen;
-    session.data.totalGroups = totalGroups;
-    session.data.type = 'main_menu';
+    // Announcement only groups section
+    report += '═══════════════════════════════════\n';
+    report += '    ANNOUNCEMENT ONLY GROUPS\n';
+    report += '    (Admin only messaging)\n';
+    report += '═══════════════════════════════════\n\n';
     
-    // Build message
-    let statusMessage = `📊 *GROUP STATISTICS*\n\n` +
-                       `📁 Total Groups: ${totalGroups}\n` +
-                       `🔇 Announcement-Only: ${totalAnnouncement}\n` +
-                       `💬 Open Chat: ${totalOpen}\n\n`;
-    
-    if (announcementGroups.length > 0) {
-        statusMessage += `🔇 *Announcement-Only Groups:*\n`;
-        for (let i = 0; i < Math.min(announcementGroups.length, 10); i++) {
-            statusMessage += `${i + 1}. ${announcementGroups[i].subject}\n`;
-        }
-        if (announcementGroups.length > 10) {
-            statusMessage += `... and ${announcementGroups.length - 10} more\n`;
-        }
-        statusMessage += `\n`;
+    if (results.announcementOnly.length > 0) {
+        results.announcementOnly.forEach((item, idx) => {
+            report += `[${idx + 1}] Group: ${item.groupName}\n`;
+            report += `    Link: ${item.link}\n`;
+            report += `    Members: ${item.participantCount}\n`;
+            report += `    Type: ANNOUNCEMENT ONLY 📢\n\n`;
+        });
+    } else {
+        report += 'No announcement-only groups found.\n\n';
     }
     
-    if (openGroups.length > 0) {
-        statusMessage += `💬 *Open Chat Groups:*\n`;
-        for (let i = 0; i < Math.min(openGroups.length, 10); i++) {
-            statusMessage += `${i + 1}. ${openGroups[i].subject}\n`;
-        }
-        if (openGroups.length > 10) {
-            statusMessage += `... and ${openGroups.length - 10} more\n`;
-        }
+    report += '\n\n\n'; // 3 empty lines
+    
+    // Open groups section
+    report += '═══════════════════════════════════\n';
+    report += '    SUCCESSFULLY JOINED GROUPS\n';
+    report += '    (Open Messaging)\n';
+    report += '═══════════════════════════════════\n\n';
+    
+    if (results.openGroups.length > 0) {
+        results.openGroups.forEach((item, idx) => {
+            report += `[${idx + 1}] Group: ${item.groupName}\n`;
+            report += `    Link: ${item.link}\n`;
+            report += `    Members: ${item.participantCount}\n`;
+            report += `    Status: JOINED ✅\n\n`;
+        });
+    } else {
+        report += 'No groups successfully joined.\n\n';
     }
     
-    const sessionId = session.id.split(':').pop();
-    const leaveId = `leave_${sessionId}_${Date.now()}`;
-    const broadcastId = `broadcast_${sessionId}_${Date.now()}`;
-    const testBroadcastId = `test_broadcast_${sessionId}_${Date.now()}`;
-    const refreshId = `refresh_${sessionId}_${Date.now()}`;
-    const cancelId = `cancel_${sessionId}_${Date.now()}`;
+    report += '\n\n\n'; // 3 empty lines
     
-    const buttons = [];
-    if (announcementGroups.length > 0) {
-        buttons.push({ id: leaveId, text: `🔇 Leave Announcement Groups (${totalAnnouncement})` });
+    // Unknown section
+    report += '═══════════════════════════════════\n';
+    report += '    COULD NOT DETERMINE TYPE\n';
+    report += '    (Requires Manual Check)\n';
+    report += '═══════════════════════════════════\n\n';
+    
+    if (results.unknown.length > 0) {
+        results.unknown.forEach((item, idx) => {
+            report += `[${idx + 1}] Group: ${item.groupName || 'Unknown'}\n`;
+            report += `    Link: ${item.link}\n`;
+            report += `    Reason: ${item.reason}\n`;
+            report += `    Status: UNKNOWN ❓\n\n`;
+        });
+    } else {
+        report += 'No undetermined groups.\n\n';
     }
-    if (openGroups.length > 0) {
-        buttons.push({ id: broadcastId, text: `📢 Broadcast to Open Chats (${totalOpen})` });
-        buttons.push({ id: testBroadcastId, text: `🧪 Test Broadcast` });
-    }
-    buttons.push({ id: refreshId, text: '🔄 Refresh' });
-    buttons.push({ id: cancelId, text: '❌ Close' });
     
-    const sentMsg = await sendButtons(sock, chatId, {
-        text: statusMessage,
-        footer: 'Group Manager',
-        buttons: buttons,
-        aimode: FORCE_AI_MODE
-    }, {});
+    report += '\n\n\n';
+    report += '=====================================\n';
+    report += '         END OF REPORT\n';
+    report += '=====================================\n';
     
-    sessionManager.addPendingMessage(sender, chatId, sentMsg.key.id, 'groups');
+    return report;
 }
 
-async function refreshGroups(sock, chatId, sender, session, reply) {
-    await showMainMenu(sock, chatId, sender, session, reply);
-}
+// Main enhanced bulk join function
+async function enhancedBulkJoin(sock, chatId, groupLinks, msg, sendStatusUpdate = true) {
+    const results = {
+        failed: [],      // Bad request/failed to join
+        announcementOnly: [], // Announcement only groups
+        openGroups: [],  // Successfully joined open groups
+        unknown: []      // Could not determine type
+    };
 
-async function performBroadcast(sock, chatId, sender, session, reply, react, messageText) {
-    const openGroups = session.data.openGroups;
-    const totalOpen = openGroups.length;
-    
-    if (!messageText || openGroups.length === 0) {
-        await reply(`❌ No message or no groups to broadcast to.`);
-        session.data.type = 'main_menu';
-        await showMainMenu(sock, chatId, sender, session, reply);
-        return;
+    if (sendStatusUpdate) {
+        await sock.sendMessage(chatId, { text: `🔄 Processing ${groupLinks.length} group link(s)...\nThis may take a moment.` });
     }
-    
-    await react('📢');
-    
-    const statusMsg = await reply(`📢 *Broadcasting to ${totalOpen} groups...*\n\n0/${totalOpen} sent`);
-    
-    let successCount = 0;
-    let failCount = 0;
-    
-    // Check if message contains WhatsApp group links
-    const groupLinkMatch = messageText.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/);
-    
-    for (let i = 0; i < openGroups.length; i++) {
-        const group = openGroups[i];
+
+    for (let i = 0; i < groupLinks.length; i++) {
+        const link = groupLinks[i].trim();
         
         try {
-            if (groupLinkMatch) {
-                const inviteCode = groupLinkMatch[1];
-                try {
-                    // Get group invite info for rich preview
-                    const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
-                    
-                    // Send with rich preview using externalAdReply (like bomb.js)
-                    await sock.sendMessage(group.id, {
-                        text: messageText,
-                        contextInfo: {
-                            externalAdReply: {
-                                title: inviteInfo.subject || 'WhatsApp Group',
-                                body: `👥 ${inviteInfo.size || 0} members • Click to join`,
-                                thumbnailUrl: "https://drive.usercontent.google.com/download?id=1V1h-ncE4v12Bkvkz4yBd4_k13RffEABC&export=download&confirm=t",
-                                sourceUrl: messageText.match(/https?:\/\/[^\s]+/)[0],
-                                mediaType: 1,
-                                renderLargerThumbnail: true
-                            }
-                        }
-                    });
-                } catch (e) {
-                    // Fallback to normal message
-                    await sock.sendMessage(group.id, { text: messageText });
-                }
-            } else {
-                // Normal message without group link
-                await sock.sendMessage(group.id, { text: messageText });
-            }
-            successCount++;
-            
-            if ((i + 1) % 5 === 0 || i === openGroups.length - 1) {
-                await sock.sendMessage(chatId, {
-                    text: `📢 *Broadcasting...*\n\n✅ ${successCount}/${totalOpen} sent\n❌ Failed: ${failCount}`,
-                    edit: statusMsg.key
+            // Extract invite code
+            const inviteCode = extractInviteCode(link);
+            if (!inviteCode) {
+                results.failed.push({ 
+                    link, 
+                    reason: 'Invalid invite link format' 
                 });
+                continue;
             }
+
+            // Try to get invite info first
+            const inviteInfo = await sock.groupGetInviteInfo(inviteCode).catch(e => null);
             
-            await new Promise(resolve => setTimeout(resolve, 800));
-            
+            if (!inviteInfo) {
+                results.failed.push({ 
+                    link, 
+                    reason: 'Could not fetch invite info - link may be expired or invalid' 
+                });
+                continue;
+            }
+
+            // Check group type based on invite settings
+            if (inviteInfo.announce) {
+                // Announcement only group
+                results.announcementOnly.push({
+                    link,
+                    groupName: inviteInfo.subject || 'Unknown',
+                    participantCount: inviteInfo.size || inviteInfo.participants?.length || 0
+                });
+            } else {
+                // Try to join if it's an open group
+                try {
+                    await sock.groupAcceptInvite(inviteCode);
+                    results.openGroups.push({
+                        link,
+                        groupName: inviteInfo.subject || 'Unknown',
+                        participantCount: inviteInfo.size || inviteInfo.participants?.length || 0
+                    });
+                    await delay(2000); // Delay to avoid rate limits
+                } catch (joinError) {
+                    // Could not determine or join failed
+                    results.unknown.push({
+                        link,
+                        groupName: inviteInfo.subject || 'Unknown',
+                        reason: joinError.message || 'Join attempt failed - possibly requires admin approval'
+                    });
+                }
+            }
         } catch (error) {
-            failCount++;
-            console.error(`[GROUPS] Failed to send to ${group.subject}:`, error.message);
+            results.failed.push({
+                link,
+                reason: error.message || 'Unknown error occurred'
+            });
+        }
+        
+        // Send progress update every 5 links
+        if (sendStatusUpdate && (i + 1) % 5 === 0) {
+            await sock.sendMessage(chatId, { 
+                text: `📊 Progress: ${i + 1}/${groupLinks.length}\n✅ Joined: ${results.openGroups.length}\n📢 Announcement: ${results.announcementOnly.length}\n❌ Failed: ${results.failed.length}` 
+            });
         }
     }
+
+    // Generate report
+    const report = generateBulkJoinReport(results);
+    const reportPath = path.join(__dirname, `bulk_join_report_${Date.now()}.txt`);
+    await fs.writeFile(reportPath, report);
     
+    // Send summary
     await sock.sendMessage(chatId, {
-        text: `✅ *Broadcast Complete!*\n\n✅ Sent: ${successCount}\n❌ Failed: ${failCount}`,
-        edit: statusMsg.key
+        text: `✅ *Bulk Join Completed!*\n\n📊 *Summary:*\n• ✅ Joined: ${results.openGroups.length}\n• 📢 Announcement Only: ${results.announcementOnly.length}\n• ❌ Failed: ${results.failed.length}\n• ❓ Unknown: ${results.unknown.length}\n\n📄 Detailed report attached below.`
     });
     
-    await react('✅');
+    // Send the report file
+    await sock.sendMessage(chatId, {
+        text: `📄 *Report File:* ${path.basename(reportPath)}\n\n${report.substring(0, 40000)}` // Truncate if too long for WhatsApp
+    });
     
-    session.data.type = 'main_menu';
-    await showMainMenu(sock, chatId, sender, session, reply);
+    return results;
 }
 
-async function performTestBroadcast(sock, chatId, sender, session, reply, react, messageText) {
-    await react('🧪');
+// Main groups command handler
+async function handleGroupsCommand(sock, chatId, author, command, args, msg, userStates) {
     
-    const statusMsg = await reply(`🧪 *Sending test message...*`);
-    
-    try {
-        // Check if message contains WhatsApp group links
-        const groupLinkMatch = messageText.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/);
-        
-        if (groupLinkMatch) {
-            const inviteCode = groupLinkMatch[1];
-            try {
-                // Get group invite info for rich preview
-                const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
-                
-                // Send with rich preview using externalAdReply (like bomb.js)
-                await sock.sendMessage(TEST_GROUP_JID, {
-                    text: messageText,
-                    contextInfo: {
-                        externalAdReply: {
-                            title: inviteInfo.subject || 'WhatsApp Group',
-                            body: `👥 ${inviteInfo.size || 0} members • Click to join`,
-                            thumbnailUrl: "https://drive.usercontent.google.com/download?id=1V1h-ncE4v12Bkvkz4yBd4_k13RffEABC&export=download&confirm=t",
-                            sourceUrl: messageText.match(/https?:\/\/[^\s]+/)[0],
-                            mediaType: 1,
-                            renderLargerThumbnail: true
-                        }
-                    }
+    // ========== BULK JOIN BUTTON HANDLER ==========
+    if (command === 'bulkjoin' || (msg.message?.buttonsResponseMessage?.selectedButtonId === 'bulkjoin')) {
+        // Check if user is in waiting state for links
+        if (userStates[author]?.waitingFor === 'bulkjoin_links') {
+            // User is sending links
+            const messageText = msg.message?.conversation || 
+                               msg.message?.extendedTextMessage?.text || 
+                               '';
+            
+            const links = messageText.split(/\s+/).filter(link => link.includes('chat.whatsapp.com') || link.includes('whatsapp.com'));
+            
+            if (links.length === 0) {
+                await sock.sendMessage(chatId, { 
+                    text: '❌ No valid WhatsApp group links found.\n\nPlease send links in format:\nhttps://chat.whatsapp.com/xxxxx' 
                 });
-            } catch (e) {
-                await sock.sendMessage(TEST_GROUP_JID, { text: messageText });
+                delete userStates[author];
+                return;
             }
-        } else {
-            await sock.sendMessage(TEST_GROUP_JID, { text: messageText });
+            
+            await enhancedBulkJoin(sock, chatId, links, msg, true);
+            delete userStates[author];
+            return;
         }
         
+        // Ask user to provide links
         await sock.sendMessage(chatId, {
-            text: `✅ *Test sent successfully!*\n\n📤 To: ${TEST_GROUP_JID}\n\n📝 Message: ${messageText}`,
-            edit: statusMsg.key
+            text: '📎 *Bulk Join Groups*\n\nPlease send the WhatsApp group links you want to join.\n\n*Format:*\n• One link per line\n• Or space-separated\n\n*Example:*\nhttps://chat.whatsapp.com/xxxxx https://chat.whatsapp.com/yyyyy\n\n⚠️ *Note:* You can only join open groups. Announcement-only groups will be reported but not joined.\n\nType *cancel* to abort.',
+            buttons: [
+                { buttonId: 'cancel_bulk', buttonText: { displayText: '❌ Cancel' }, type: 1 }
+            ]
         });
         
-        await react('✅');
-        
-    } catch (error) {
-        await sock.sendMessage(chatId, {
-            text: `❌ *Test failed!*\n\nError: ${error.message}`,
-            edit: statusMsg.key
-        });
-        await react('❌');
-    }
-    
-    session.data.type = 'main_menu';
-    await showMainMenu(sock, chatId, sender, session, reply);
-}
-
-async function performLeave(sock, chatId, sender, session, reply, react) {
-    const announcementGroups = session.data.announcementGroups;
-    const totalAnnouncement = announcementGroups.length;
-    
-    if (totalAnnouncement === 0) {
-        await reply(`❌ No announcement-only groups to leave.`);
+        // Set waiting state
+        userStates[author] = { waitingFor: 'bulkjoin_links', timestamp: Date.now() };
         return;
     }
     
-    await react('🚪');
+    // ========== CANCEL BULK JOIN ==========
+    if (command === 'cancel_bulk' || (msg.message?.buttonsResponseMessage?.selectedButtonId === 'cancel_bulk')) {
+        if (userStates[author]?.waitingFor === 'bulkjoin_links') {
+            delete userStates[author];
+            await sock.sendMessage(chatId, { text: '❌ Bulk join operation cancelled.' });
+        } else {
+            await sock.sendMessage(chatId, { text: 'ℹ️ No active bulk join operation.' });
+        }
+        return;
+    }
     
-    const statusMsg = await reply(`🚪 *Leaving ${totalAnnouncement} groups...*\n\n0/${totalAnnouncement} left`);
+    // ========== REGULAR GROUP COMMANDS ==========
     
-    let successCount = 0;
-    let failCount = 0;
-    
-    for (let i = 0; i < announcementGroups.length; i++) {
-        const group = announcementGroups[i];
+    // Get group invite link
+    if (command === 'getlink' || command === 'grouplink') {
+        if (!msg.key.remoteJid.endsWith('@g.us')) {
+            await sock.sendMessage(chatId, { text: '❌ This command can only be used in groups!' });
+            return;
+        }
         
         try {
-            await sock.groupLeave(group.id);
-            successCount++;
+            const groupMetadata = await sock.groupMetadata(chatId);
+            const isAdmin = groupMetadata.participants.some(p => p.id === author && (p.admin === 'admin' || p.admin === 'superadmin'));
+            
+            if (!isAdmin) {
+                await sock.sendMessage(chatId, { text: '❌ Only group admins can get the invite link!' });
+                return;
+            }
+            
+            const inviteCode = await sock.groupInviteCode(chatId);
+            const inviteLink = `https://chat.whatsapp.com/${inviteCode}`;
             
             await sock.sendMessage(chatId, {
-                text: `🚪 *Leaving...*\n\n✅ ${successCount}/${totalAnnouncement} left\n❌ Failed: ${failCount}`,
-                edit: statusMsg.key
+                text: `🔗 *Group Invite Link*\n\n${inviteLink}\n\n⚠️ Share this link only with trusted people!`
             });
-            
-            await new Promise(resolve => setTimeout(resolve, 800));
-            
         } catch (error) {
-            failCount++;
-            console.error(`[GROUPS] Failed to leave ${group.subject}:`, error.message);
+            console.error('Error getting group link:', error);
+            await sock.sendMessage(chatId, { text: '❌ Failed to get group invite link. Make sure I have admin rights!' });
         }
+        return;
     }
     
-    await sock.sendMessage(chatId, {
-        text: `✅ *Leave Complete!*\n\n✅ Left: ${successCount}\n❌ Failed: ${failCount}`,
-        edit: statusMsg.key
-    });
+    // Revoke group link
+    if (command === 'revoke' || command === 'resetlink') {
+        if (!msg.key.remoteJid.endsWith('@g.us')) {
+            await sock.sendMessage(chatId, { text: '❌ This command can only be used in groups!' });
+            return;
+        }
+        
+        try {
+            const groupMetadata = await sock.groupMetadata(chatId);
+            const isAdmin = groupMetadata.participants.some(p => p.id === author && (p.admin === 'admin' || p.admin === 'superadmin'));
+            
+            if (!isAdmin) {
+                await sock.sendMessage(chatId, { text: '❌ Only group admins can revoke the invite link!' });
+                return;
+            }
+            
+            await sock.groupRevokeInvite(chatId);
+            const newInviteCode = await sock.groupInviteCode(chatId);
+            const newInviteLink = `https://chat.whatsapp.com/${newInviteCode}`;
+            
+            await sock.sendMessage(chatId, {
+                text: `🔄 *Group Invite Link Reset!*\n\nNew link: ${newInviteLink}\n\nOld link is now invalid.`
+            });
+        } catch (error) {
+            console.error('Error revoking group link:', error);
+            await sock.sendMessage(chatId, { text: '❌ Failed to revoke group link. Make sure I have admin rights!' });
+        }
+        return;
+    }
     
-    await react('✅');
+    // Leave group
+    if (command === 'leave' || command === 'leavegroup') {
+        if (!msg.key.remoteJid.endsWith('@g.us')) {
+            await sock.sendMessage(chatId, { text: '❌ This command can only be used in groups!' });
+            return;
+        }
+        
+        await sock.sendMessage(chatId, {
+            text: '⚠️ *Warning!*\n\nAre you sure you want me to leave this group?\n\nThis action cannot be undone!',
+            buttons: [
+                { buttonId: 'confirm_leave', buttonText: { displayText: '✅ Yes, Leave' }, type: 1 },
+                { buttonId: 'cancel_leave', buttonText: { displayText: '❌ No, Cancel' }, type: 1 }
+            ]
+        });
+        return;
+    }
     
-    // Refresh the menu
-    await refreshGroups(sock, chatId, sender, session, reply);
+    if (command === 'confirm_leave') {
+        if (!msg.key.remoteJid.endsWith('@g.us')) return;
+        
+        await sock.sendMessage(chatId, { text: '👋 Goodbye everyone! Leaving the group...' });
+        await delay(1000);
+        await sock.groupLeave(chatId);
+        return;
+    }
+    
+    if (command === 'cancel_leave') {
+        if (!msg.key.remoteJid.endsWith('@g.us')) return;
+        
+        await sock.sendMessage(chatId, { text: '✅ Leave operation cancelled. I\'ll stay in the group!' });
+        return;
+    }
+    
+    // Group info
+    if (command === 'groupinfo' || command === 'ginfo') {
+        if (!msg.key.remoteJid.endsWith('@g.us')) {
+            await sock.sendMessage(chatId, { text: '❌ This command can only be used in groups!' });
+            return;
+        }
+        
+        try {
+            const groupMetadata = await sock.groupMetadata(chatId);
+            const participants = groupMetadata.participants;
+            const admins = participants.filter(p => p.admin === 'admin' || p.admin === 'superadmin');
+            const totalMembers = participants.length;
+            const botNumber = sock.user.id.split(':')[0];
+            const isBotAdmin = participants.some(p => p.id === botNumber && (p.admin === 'admin' || p.admin === 'superadmin'));
+            
+            let info = `📊 *GROUP INFORMATION*\n\n`;
+            info += `📛 *Name:* ${groupMetadata.subject}\n`;
+            info += `🆔 *ID:* ${groupMetadata.id}\n`;
+            info += `👥 *Members:* ${totalMembers}\n`;
+            info += `👑 *Admins:* ${admins.length}\n`;
+            info += `📅 *Created:* ${new Date(groupMetadata.creation * 1000).toLocaleDateString()}\n`;
+            info += `🔊 *Announcement Mode:* ${groupMetadata.announce ? 'Yes (Admin only)' : 'No (All members)'}\n`;
+            info += `🤫 *Restrict Mode:* ${groupMetadata.restrict ? 'Yes' : 'No'}\n`;
+            info += `🤖 *Bot Admin:* ${isBotAdmin ? '✅ Yes' : '❌ No'}\n`;
+            info += `🔗 *Invite Link:* ${groupMetadata.inviteCode ? `chat.whatsapp.com/${groupMetadata.inviteCode}` : 'Not set'}\n`;
+            
+            await sock.sendMessage(chatId, { text: info });
+        } catch (error) {
+            console.error('Error getting group info:', error);
+            await sock.sendMessage(chatId, { text: '❌ Failed to get group information!' });
+        }
+        return;
+    }
+    
+    // Promote to admin
+    if (command === 'promote') {
+        if (!msg.key.remoteJid.endsWith('@g.us')) {
+            await sock.sendMessage(chatId, { text: '❌ This command can only be used in groups!' });
+            return;
+        }
+        
+        const mentionedUser = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+        if (!mentionedUser) {
+            await sock.sendMessage(chatId, { text: '❌ Please tag the user you want to promote!\n\nExample: .promote @user' });
+            return;
+        }
+        
+        try {
+            await sock.groupParticipantsUpdate(chatId, [mentionedUser], 'promote');
+            await sock.sendMessage(chatId, { text: `✅ Successfully promoted @${mentionedUser.split('@')[0]} to admin!`, mentions: [mentionedUser] });
+        } catch (error) {
+            console.error('Error promoting user:', error);
+            await sock.sendMessage(chatId, { text: '❌ Failed to promote user. Make sure I am an admin!' });
+        }
+        return;
+    }
+    
+    // Demote admin
+    if (command === 'demote') {
+        if (!msg.key.remoteJid.endsWith('@g.us')) {
+            await sock.sendMessage(chatId, { text: '❌ This command can only be used in groups!' });
+            return;
+        }
+        
+        const mentionedUser = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+        if (!mentionedUser) {
+            await sock.sendMessage(chatId, { text: '❌ Please tag the user you want to demote!\n\nExample: .demote @user' });
+            return;
+        }
+        
+        try {
+            await sock.groupParticipantsUpdate(chatId, [mentionedUser], 'demote');
+            await sock.sendMessage(chatId, { text: `✅ Successfully demoted @${mentionedUser.split('@')[0]} from admin!`, mentions: [mentionedUser] });
+        } catch (error) {
+            console.error('Error demoting user:', error);
+            await sock.sendMessage(chatId, { text: '❌ Failed to demote user. Make sure I am an admin!' });
+        }
+        return;
+    }
+    
+    // Remove user from group
+    if (command === 'kick' || command === 'remove') {
+        if (!msg.key.remoteJid.endsWith('@g.us')) {
+            await sock.sendMessage(chatId, { text: '❌ This command can only be used in groups!' });
+            return;
+        }
+        
+        const mentionedUser = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
+        if (!mentionedUser) {
+            await sock.sendMessage(chatId, { text: '❌ Please tag the user you want to remove!\n\nExample: .kick @user' });
+            return;
+        }
+        
+        try {
+            await sock.groupParticipantsUpdate(chatId, [mentionedUser], 'remove');
+            await sock.sendMessage(chatId, { text: `✅ Successfully removed @${mentionedUser.split('@')[0]} from the group!`, mentions: [mentionedUser] });
+        } catch (error) {
+            console.error('Error removing user:', error);
+            await sock.sendMessage(chatId, { text: '❌ Failed to remove user. Make sure I am an admin!' });
+        }
+        return;
+    }
+    
+    // Add user to group
+    if (command === 'add') {
+        if (!msg.key.remoteJid.endsWith('@g.us')) {
+            await sock.sendMessage(chatId, { text: '❌ This command can only be used in groups!' });
+            return;
+        }
+        
+        const phoneNumber = args[0];
+        if (!phoneNumber) {
+            await sock.sendMessage(chatId, { text: '❌ Please provide the phone number to add!\n\nExample: .add 1234567890' });
+            return;
+        }
+        
+        let cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
+        if (!cleanNumber.endsWith('@s.whatsapp.net')) {
+            cleanNumber = `${cleanNumber}@s.whatsapp.net`;
+        }
+        
+        try {
+            await sock.groupParticipantsUpdate(chatId, [cleanNumber], 'add');
+            await sock.sendMessage(chatId, { text: `✅ Successfully added @${cleanNumber.split('@')[0]} to the group!`, mentions: [cleanNumber] });
+        } catch (error) {
+            console.error('Error adding user:', error);
+            await sock.sendMessage(chatId, { text: '❌ Failed to add user. Make sure I am an admin and the number is valid!' });
+        }
+        return;
+    }
+    
+    // Close group (announcement mode)
+    if (command === 'close' || command === 'announceon') {
+        if (!msg.key.remoteJid.endsWith('@g.us')) {
+            await sock.sendMessage(chatId, { text: '❌ This command can only be used in groups!' });
+            return;
+        }
+        
+        try {
+            await sock.groupSettingUpdate(chatId, 'announcement');
+            await sock.sendMessage(chatId, { text: '🔒 Group closed! Only admins can send messages now.' });
+        } catch (error) {
+            console.error('Error closing group:', error);
+            await sock.sendMessage(chatId, { text: '❌ Failed to close group. Make sure I am an admin!' });
+        }
+        return;
+    }
+    
+    // Open group (all members can send)
+    if (command === 'open' || command === 'announceoff') {
+        if (!msg.key.remoteJid.endsWith('@g.us')) {
+            await sock.sendMessage(chatId, { text: '❌ This command can only be used in groups!' });
+            return;
+        }
+        
+        try {
+            await sock.groupSettingUpdate(chatId, 'not_announcement');
+            await sock.sendMessage(chatId, { text: '🔓 Group opened! All members can send messages now.' });
+        } catch (error) {
+            console.error('Error opening group:', error);
+            await sock.sendMessage(chatId, { text: '❌ Failed to open group. Make sure I am an admin!' });
+        }
+        return;
+    }
+    
+    // Set group name
+    if (command === 'setname' || command === 'groupname') {
+        if (!msg.key.remoteJid.endsWith('@g.us')) {
+            await sock.sendMessage(chatId, { text: '❌ This command can only be used in groups!' });
+            return;
+        }
+        
+        const newName = args.join(' ');
+        if (!newName) {
+            await sock.sendMessage(chatId, { text: '❌ Please provide the new group name!\n\nExample: .setname My Awesome Group' });
+            return;
+        }
+        
+        try {
+            await sock.groupUpdateSubject(chatId, newName);
+            await sock.sendMessage(chatId, { text: `✅ Group name changed to: *${newName}*` });
+        } catch (error) {
+            console.error('Error setting group name:', error);
+            await sock.sendMessage(chatId, { text: '❌ Failed to change group name. Make sure I am an admin!' });
+        }
+        return;
+    }
+    
+    // Set group description
+    if (command === 'setdesc' || command === 'groupdesc') {
+        if (!msg.key.remoteJid.endsWith('@g.us')) {
+            await sock.sendMessage(chatId, { text: '❌ This command can only be used in groups!' });
+            return;
+        }
+        
+        const newDesc = args.join(' ');
+        if (!newDesc) {
+            await sock.sendMessage(chatId, { text: '❌ Please provide the new group description!\n\nExample: .setdesc Welcome to our group!' });
+            return;
+        }
+        
+        try {
+            await sock.groupUpdateDescription(chatId, newDesc);
+            await sock.sendMessage(chatId, { text: `✅ Group description updated!\n\n*New description:*\n${newDesc}` });
+        } catch (error) {
+            console.error('Error setting group description:', error);
+            await sock.sendMessage(chatId, { text: '❌ Failed to change group description. Make sure I am an admin!' });
+        }
+        return;
+    }
+    
+    // Tag all members
+    if (command === 'tagall') {
+        if (!msg.key.remoteJid.endsWith('@g.us')) {
+            await sock.sendMessage(chatId, { text: '❌ This command can only be used in groups!' });
+            return;
+        }
+        
+        try {
+            const groupMetadata = await sock.groupMetadata(chatId);
+            const participants = groupMetadata.participants;
+            const mentions = participants.map(p => p.id);
+            
+            let message = '📢 *ANNOUNCEMENT*\n\n';
+            message += `Total members: ${participants.length}\n\n`;
+            message += mentions.map(m => `@${m.split('@')[0]}`).join(' ');
+            
+            await sock.sendMessage(chatId, { text: message, mentions: mentions });
+        } catch (error) {
+            console.error('Error tagging all:', error);
+            await sock.sendMessage(chatId, { text: '❌ Failed to tag all members!' });
+        }
+        return;
+    }
+    
+    // Help menu for group commands
+    if (command === 'grouphelp' || command === 'ghelp') {
+        const helpText = `*🤖 GROUP COMMANDS*\n\n` +
+                        `*Admin Commands:*\n` +
+                        `• .getlink - Get group invite link\n` +
+                        `• .revoke - Reset group invite link\n` +
+                        `• .promote @user - Make user admin\n` +
+                        `• .demote @user - Remove admin rights\n` +
+                        `• .kick/@user - Remove user from group\n` +
+                        `• .add 1234567890 - Add user to group\n` +
+                        `• .close - Enable announcement mode\n` +
+                        `• .open - Disable announcement mode\n` +
+                        `• .setname <name> - Change group name\n` +
+                        `• .setdesc <desc> - Change group description\n` +
+                        `• .tagall - Mention all members\n` +
+                        `*Info Commands:*\n` +
+                        `• .groupinfo - Show group details\n` +
+                        `• .bulkjoin - Join multiple groups at once\n` +
+                        `*Other:*\n` +
+                        `• .leave - Bot leaves the group\n` +
+                        `• .grouphelp - Show this menu\n\n` +
+                        `*Bulk Join Feature:*\n` +
+                        `Use .bulkjoin and send multiple WhatsApp group links to join them automatically with a detailed report!`;
+        
+        await sock.sendMessage(chatId, { text: helpText });
+        return;
+    }
+    
+    // If no command matched
+    if (command && !command.startsWith('cancel')) {
+        await sock.sendMessage(chatId, { text: '❌ Unknown group command. Use .grouphelp to see available commands!' });
+    }
 }
+
+module.exports = { handleGroupsCommand, enhancedBulkJoin };
