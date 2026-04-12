@@ -135,7 +135,7 @@ module.exports = {
     },
     
     async handleSession(sock, msg, session, context) {
-        const { from, sender, reply, react, isButtonClick } = context;
+        const { from, sender, reply, react } = context;
         
         if (session.command !== 'leave_confirm') return true;
         
@@ -172,8 +172,8 @@ async function performLeave(sock, chatId, reply, react, targetGroup, groupName) 
             metadata = await sock.groupMetadata(targetGroup);
             
             // Check if bot is in the group
-            const botId = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-            const isBotInGroup = metadata.participants?.some(p => p.id === botId);
+            const botJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+            const isBotInGroup = metadata.participants?.some(p => p.id === botJid);
             
             if (!isBotInGroup) {
                 await reply(`❌ *Cannot leave group!*\n\nBot is not a member of this group.\n\nGroup: ${groupName || targetGroup}`);
@@ -182,8 +182,8 @@ async function performLeave(sock, chatId, reply, react, targetGroup, groupName) 
             }
             
             // Check if bot is the only admin (cannot leave if it's the only admin)
-            const botId = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-            const botParticipant = metadata.participants?.find(p => p.id === botId);
+            const botJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+            const botParticipant = metadata.participants?.find(p => p.id === botJid);
             const admins = metadata.participants?.filter(p => p.admin === 'admin' || p.admin === 'superadmin') || [];
             
             if (botParticipant?.admin && admins.length === 1) {
@@ -241,37 +241,5 @@ async function performLeave(sock, chatId, reply, react, targetGroup, groupName) 
         
         await reply(errorMsg);
         await react('❌');
-    }
-}
-
-// Handle force confirmation for when bot is the only admin
-async function handleForceConfirm(sock, msg, session, context) {
-    const { from, sender, reply, react } = context;
-    
-    let text = '';
-    if (msg.message?.conversation) {
-        text = msg.message.conversation.trim().toLowerCase();
-    } else if (msg.message?.extendedTextMessage?.text) {
-        text = msg.message.extendedTextMessage.text.trim().toLowerCase();
-    }
-    
-    if (text === 'confirm') {
-        try {
-            await sock.groupLeave(session.data.targetGroup);
-            await reply(`✅ *Successfully left group!*\n\n📌 *Group:* ${session.data.groupName}\n⚠️ Note: The group now has no admins!`);
-            await react('✅');
-        } catch (error) {
-            await reply(`❌ *Failed to leave group!*\n\nError: ${error.message}`);
-            await react('❌');
-        }
-        sessionManager.clearSession(session.id);
-        return true;
-    } else if (text === 'cancel') {
-        await reply(`❌ *Leave operation cancelled.*\n\nBot will remain in the group as admin.`);
-        sessionManager.clearSession(session.id);
-        return true;
-    } else {
-        await reply(`❌ *Invalid response!*\n\nPlease reply with *confirm* to leave or *cancel* to abort.`);
-        return true;
     }
 }
