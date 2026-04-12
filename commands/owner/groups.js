@@ -116,7 +116,7 @@ module.exports = {
                 session.data.isTest = false;
                 session.data.type = 'waiting_broadcast_message';
                 const totalOpen = session.data.openGroups.length;
-                const sentMsg = await reply(`📢 *Send message to ${totalOpen} groups*\n\nType your message below (or "cancel" to abort):`);
+                const sentMsg = await reply(`📢 *Send message to ${totalOpen} groups*\n\nType your message below (or "cancel" to abort):\n\n*Note:* Links will show preview automatically.`);
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'groups');
                 return true;
             }
@@ -125,7 +125,7 @@ module.exports = {
             if (buttonId?.includes('test_broadcast')) {
                 session.data.isTest = true;
                 session.data.type = 'waiting_broadcast_message';
-                const sentMsg = await reply(`🧪 *TEST MODE*\n\n⚠️ This will ONLY send to:\n${TEST_GROUP_JID}\n\nType your test message below (or "cancel" to abort):`);
+                const sentMsg = await reply(`🧪 *TEST MODE*\n\n⚠️ This will ONLY send to:\n${TEST_GROUP_JID}\n\nType your test message below (or "cancel" to abort):\n\n*Note:* Links will show preview automatically.`);
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'groups');
                 return true;
             }
@@ -244,6 +244,7 @@ async function performBroadcast(sock, chatId, sender, session, reply, react, mes
         const group = openGroups[i];
         
         try {
+            // Send with link preview enabled
             await sock.sendMessage(group.id, { 
                 text: messageText,
                 linkPreview: true
@@ -260,7 +261,14 @@ async function performBroadcast(sock, chatId, sender, session, reply, react, mes
             await new Promise(resolve => setTimeout(resolve, 800));
             
         } catch (error) {
-            failCount++;
+            // If link preview fails, try without it
+            try {
+                await sock.sendMessage(group.id, { text: messageText });
+                successCount++;
+            } catch (e) {
+                failCount++;
+                console.error(`[GROUPS] Failed to send to ${group.subject}:`, e.message);
+            }
         }
     }
     
@@ -281,6 +289,7 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react,
     const statusMsg = await reply(`🧪 *Sending test message...*`);
     
     try {
+        // Try with link preview
         await sock.sendMessage(TEST_GROUP_JID, { 
             text: messageText,
             linkPreview: true
@@ -294,11 +303,24 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react,
         await react('✅');
         
     } catch (error) {
-        await sock.sendMessage(chatId, {
-            text: `❌ *Test failed!*\n\nError: ${error.message}`,
-            edit: statusMsg.key
-        });
-        await react('❌');
+        // If link preview fails, try without it
+        try {
+            await sock.sendMessage(TEST_GROUP_JID, { text: messageText });
+            
+            await sock.sendMessage(chatId, {
+                text: `✅ *Test sent successfully!*\n\n📤 To: ${TEST_GROUP_JID}\n\n📝 Message: ${messageText}`,
+                edit: statusMsg.key
+            });
+            
+            await react('✅');
+            
+        } catch (e) {
+            await sock.sendMessage(chatId, {
+                text: `❌ *Test failed!*\n\nError: ${e.message}`,
+                edit: statusMsg.key
+            });
+            await react('❌');
+        }
     }
     
     session.data.type = 'main_menu';
@@ -337,6 +359,7 @@ async function performLeave(sock, chatId, sender, session, reply, react) {
             
         } catch (error) {
             failCount++;
+            console.error(`[GROUPS] Failed to leave ${group.subject}:`, error.message);
         }
     }
     
