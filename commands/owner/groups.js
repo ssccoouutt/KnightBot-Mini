@@ -260,7 +260,7 @@ async function performBroadcast(sock, chatId, sender, session, reply, react, mes
                             externalAdReply: {
                                 title: inviteInfo.subject || 'WhatsApp Group',
                                 body: `👥 ${inviteInfo.size || 0} members • Click to join`,
-                                thumbnailUrl: "https://cdn-icons-png.flaticon.com/512/5968/5968841.png",
+                                thumbnailUrl: "https://drive.usercontent.google.com/download?id=1Y4L4BDfodWTDGwsGw8Pmj0lu9qao8FJ8&export=download&confirm=t",
                                 sourceUrl: messageText.match(/https?:\/\/[^\s]+/)[0],
                                 mediaType: 1,
                                 renderLargerThumbnail: true
@@ -325,7 +325,7 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react,
                         externalAdReply: {
                             title: inviteInfo.subject || 'WhatsApp Group',
                             body: `👥 ${inviteInfo.size || 0} members • Click to join`,
-                            thumbnailUrl: "https://drive.usercontent.google.com/download?id=1meuD-0NWOwitjM61G8RBPNQJ8tq2nC2U&export=download&confirm=t",
+                            thumbnailUrl: "https://drive.usercontent.google.com/download?id=1Y4L4BDfodWTDGwsGw8Pmj0lu9qao8FJ8&export=download&confirm=t",
                             sourceUrl: messageText.match(/https?:\/\/[^\s]+/)[0],
                             mediaType: 1,
                             renderLargerThumbnail: true
