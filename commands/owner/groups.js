@@ -71,7 +71,7 @@ module.exports = {
                 return true;
             }
             
-            // Send immediately - NO CONFIRMATION
+            // Send immediately
             if (session.data.isTest) {
                 await performTestBroadcast(sock, from, sender, session, reply, react, messageText);
             } else {
@@ -116,7 +116,7 @@ module.exports = {
                 session.data.isTest = false;
                 session.data.type = 'waiting_broadcast_message';
                 const totalOpen = session.data.openGroups.length;
-                const sentMsg = await reply(`📢 *Send message to ${totalOpen} groups*\n\nType your message below (or "cancel" to abort):\n\n*Note:* Links will show preview automatically.`);
+                const sentMsg = await reply(`📢 *Send message to ${totalOpen} groups*\n\nType your message below (or "cancel" to abort):\n\n*Note:* WhatsApp group links will show a join button preview.`);
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'groups');
                 return true;
             }
@@ -125,7 +125,7 @@ module.exports = {
             if (buttonId?.includes('test_broadcast')) {
                 session.data.isTest = true;
                 session.data.type = 'waiting_broadcast_message';
-                const sentMsg = await reply(`🧪 *TEST MODE*\n\n⚠️ This will ONLY send to:\n${TEST_GROUP_JID}\n\nType your test message below (or "cancel" to abort):\n\n*Note:* Links will show preview automatically.`);
+                const sentMsg = await reply(`🧪 *TEST MODE*\n\n⚠️ This will ONLY send to:\n${TEST_GROUP_JID}\n\nType your test message below (or "cancel" to abort):\n\n*Note:* WhatsApp group links will show a join button preview.`);
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'groups');
                 return true;
             }
@@ -240,15 +240,41 @@ async function performBroadcast(sock, chatId, sender, session, reply, react, mes
     let successCount = 0;
     let failCount = 0;
     
+    // Check if message contains WhatsApp group links
+    const groupLinkMatch = messageText.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/);
+    
     for (let i = 0; i < openGroups.length; i++) {
         const group = openGroups[i];
         
         try {
-            // Send with link preview enabled
-            await sock.sendMessage(group.id, { 
-                text: messageText,
-                linkPreview: true
-            });
+            if (groupLinkMatch) {
+                const inviteCode = groupLinkMatch[1];
+                try {
+                    // Get group invite info for rich preview
+                    const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
+                    
+                    // Send with rich preview using externalAdReply (like bomb.js)
+                    await sock.sendMessage(group.id, {
+                        text: messageText,
+                        contextInfo: {
+                            externalAdReply: {
+                                title: inviteInfo.subject || 'WhatsApp Group',
+                                body: `👥 ${inviteInfo.size || 0} members • Click to join`,
+                                thumbnailUrl: "https://cdn-icons-png.flaticon.com/512/5968/5968841.png",
+                                sourceUrl: messageText.match(/https?:\/\/[^\s]+/)[0],
+                                mediaType: 1,
+                                renderLargerThumbnail: true
+                            }
+                        }
+                    });
+                } catch (e) {
+                    // Fallback to normal message
+                    await sock.sendMessage(group.id, { text: messageText });
+                }
+            } else {
+                // Normal message without group link
+                await sock.sendMessage(group.id, { text: messageText });
+            }
             successCount++;
             
             if ((i + 1) % 5 === 0 || i === openGroups.length - 1) {
@@ -261,14 +287,8 @@ async function performBroadcast(sock, chatId, sender, session, reply, react, mes
             await new Promise(resolve => setTimeout(resolve, 800));
             
         } catch (error) {
-            // If link preview fails, try without it
-            try {
-                await sock.sendMessage(group.id, { text: messageText });
-                successCount++;
-            } catch (e) {
-                failCount++;
-                console.error(`[GROUPS] Failed to send to ${group.subject}:`, e.message);
-            }
+            failCount++;
+            console.error(`[GROUPS] Failed to send to ${group.subject}:`, error.message);
         }
     }
     
@@ -289,11 +309,35 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react,
     const statusMsg = await reply(`🧪 *Sending test message...*`);
     
     try {
-        // Try with link preview
-        await sock.sendMessage(TEST_GROUP_JID, { 
-            text: messageText,
-            linkPreview: true
-        });
+        // Check if message contains WhatsApp group links
+        const groupLinkMatch = messageText.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/);
+        
+        if (groupLinkMatch) {
+            const inviteCode = groupLinkMatch[1];
+            try {
+                // Get group invite info for rich preview
+                const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
+                
+                // Send with rich preview using externalAdReply (like bomb.js)
+                await sock.sendMessage(TEST_GROUP_JID, {
+                    text: messageText,
+                    contextInfo: {
+                        externalAdReply: {
+                            title: inviteInfo.subject || 'WhatsApp Group',
+                            body: `👥 ${inviteInfo.size || 0} members • Click to join`,
+                            thumbnailUrl: "https://cdn-icons-png.flaticon.com/512/5968/5968841.png",
+                            sourceUrl: messageText.match(/https?:\/\/[^\s]+/)[0],
+                            mediaType: 1,
+                            renderLargerThumbnail: true
+                        }
+                    }
+                });
+            } catch (e) {
+                await sock.sendMessage(TEST_GROUP_JID, { text: messageText });
+            }
+        } else {
+            await sock.sendMessage(TEST_GROUP_JID, { text: messageText });
+        }
         
         await sock.sendMessage(chatId, {
             text: `✅ *Test sent successfully!*\n\n📤 To: ${TEST_GROUP_JID}\n\n📝 Message: ${messageText}`,
@@ -303,24 +347,11 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react,
         await react('✅');
         
     } catch (error) {
-        // If link preview fails, try without it
-        try {
-            await sock.sendMessage(TEST_GROUP_JID, { text: messageText });
-            
-            await sock.sendMessage(chatId, {
-                text: `✅ *Test sent successfully!*\n\n📤 To: ${TEST_GROUP_JID}\n\n📝 Message: ${messageText}`,
-                edit: statusMsg.key
-            });
-            
-            await react('✅');
-            
-        } catch (e) {
-            await sock.sendMessage(chatId, {
-                text: `❌ *Test failed!*\n\nError: ${e.message}`,
-                edit: statusMsg.key
-            });
-            await react('❌');
-        }
+        await sock.sendMessage(chatId, {
+            text: `❌ *Test failed!*\n\nError: ${error.message}`,
+            edit: statusMsg.key
+        });
+        await react('❌');
     }
     
     session.data.type = 'main_menu';
