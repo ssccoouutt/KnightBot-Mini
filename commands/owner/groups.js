@@ -25,99 +25,33 @@ module.exports = {
                        `*Usage:*\n` +
                        `• \`.groups\` - Show all groups the bot is in\n` +
                        `• \`.groups --help\` - Show this help\n\n` +
-                       `*Features:*\n` +
-                       `• Shows total number of groups\n` +
-                       `• Shows announcement-only groups\n` +
-                       `• Shows open chat groups\n` +
-                       `• Option to leave all announcement-only groups\n\n` +
                        `> *Powered by ${config.botName}*`);
         }
         
         await react('📊');
+        
+        // Clear any existing sessions
+        const existingSessions = sessionManager.getUserSessions(sender, from);
+        for (const sess of existingSessions) {
+            if (sess.command === 'groups') {
+                sessionManager.clearSession(sess.id);
+            }
+        }
         
         // Create session
         const session = sessionManager.createSession(sender, from, this.name, {
             type: 'main_menu'
         });
         
-        const sessionId = session.id.split(':').pop();
-        
-        // Get all groups
-        const groups = await sock.groupFetchAllParticipating();
-        const groupList = Object.values(groups);
-        
-        // Categorize groups
-        const announcementGroups = [];
-        const openGroups = [];
-        
-        for (const group of groupList) {
-            if (group.announce === true) {
-                announcementGroups.push({ id: group.id, subject: group.subject, participants: group.participants });
-            } else {
-                openGroups.push({ id: group.id, subject: group.subject, participants: group.participants });
-            }
-        }
-        
-        const totalAnnouncement = announcementGroups.length;
-        const totalOpen = openGroups.length;
-        const totalGroups = groupList.length;
-        
-        // Store data in session
-        sessionManager.updateSession(sender, from, {
-            announcementGroups: announcementGroups,
-            openGroups: openGroups,
-            totalAnnouncement: totalAnnouncement,
-            totalOpen: totalOpen,
-            totalGroups: totalGroups
-        });
-        
-        // Build status message
-        let statusMessage = `📊 *GROUP STATISTICS*\n\n` +
-                           `━━━━━━━━━━━━━━━━━━\n` +
-                           `📁 *Total Groups:* ${totalGroups}\n` +
-                           `🔇 *Announcement-Only:* ${totalAnnouncement}\n` +
-                           `💬 *Open Chat:* ${totalOpen}\n` +
-                           `━━━━━━━━━━━━━━━━━━\n\n`;
-        
-        if (announcementGroups.length > 0) {
-            statusMessage += `🔇 *ANNOUNCEMENT-ONLY GROUPS:*\n`;
-            for (let i = 0; i < Math.min(announcementGroups.length, 10); i++) {
-                statusMessage += `${i + 1}. ${announcementGroups[i].subject}\n`;
-            }
-            if (announcementGroups.length > 10) {
-                statusMessage += `... and ${announcementGroups.length - 10} more\n`;
-            }
-            statusMessage += `\n`;
-        }
-        
-        // Create buttons (simple IDs like drive.js)
-        const leaveId = `leave_${sessionId}_${Date.now()}`;
-        const refreshId = `refresh_${sessionId}_${Date.now()}`;
-        const cancelId = `cancel_${sessionId}_${Date.now()}`;
-        
-        const buttons = [];
-        
-        if (announcementGroups.length > 0) {
-            buttons.push({ id: leaveId, text: `🔇 Leave Announcement Groups (${totalAnnouncement})` });
-        }
-        buttons.push({ id: refreshId, text: '🔄 Refresh' });
-        buttons.push({ id: cancelId, text: '❌ Close' });
-        
-        const sentMsg = await sendButtons(sock, from, {
-            text: statusMessage,
-            footer: 'Group Manager',
-            buttons: buttons,
-            aimode: FORCE_AI_MODE
-        }, { quoted: msg });
-        
-        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
-        console.log(`✅ Groups session created: ${session.id}`);
+        await showMainMenu(sock, from, sender, session, reply);
     },
     
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, react, isButtonClick } = context;
         
-        // Handle button clicks (like drive.js)
+        if (session.command !== 'groups') return true;
+        
+        // Handle button clicks
         if (isButtonClick) {
             let buttonId = null;
             
@@ -130,7 +64,7 @@ module.exports = {
             console.log(`[GROUPS] Button clicked: ${buttonId}`);
             
             // Handle Cancel
-            if (buttonId?.includes('cancel')) {
+            if (buttonId?.includes('cancel') && !buttonId?.includes('cancel_leave')) {
                 sessionManager.clearSession(session.id);
                 await reply('❌ Closed.');
                 return true;
@@ -142,9 +76,9 @@ module.exports = {
                 return true;
             }
             
-            // Handle Leave
-            if (buttonId?.includes('leave')) {
-                await confirmLeave(sock, from, sender, session, reply);
+            // Handle Leave (from main menu)
+            if (buttonId?.includes('leave') && !buttonId?.includes('confirm') && !buttonId?.includes('cancel')) {
+                await showConfirmLeave(sock, from, sender, session, reply);
                 return true;
             }
             
@@ -166,32 +100,50 @@ module.exports = {
 };
 
 async function showMainMenu(sock, chatId, sender, session, reply) {
-    const announcementGroups = session.data.announcementGroups;
-    const openGroups = session.data.openGroups;
-    const totalAnnouncement = session.data.totalAnnouncement;
-    const totalOpen = session.data.totalOpen;
-    const totalGroups = session.data.totalGroups;
-    const sessionId = session.id.split(':').pop();
+    // Get fresh group data
+    const groups = await sock.groupFetchAllParticipating();
+    const groupList = Object.values(groups);
     
-    // Build status message
+    const announcementGroups = [];
+    const openGroups = [];
+    
+    for (const group of groupList) {
+        if (group.announce === true) {
+            announcementGroups.push({ id: group.id, subject: group.subject });
+        } else {
+            openGroups.push({ id: group.id, subject: group.subject });
+        }
+    }
+    
+    const totalAnnouncement = announcementGroups.length;
+    const totalOpen = openGroups.length;
+    const totalGroups = groupList.length;
+    
+    // Store in session
+    session.data.announcementGroups = announcementGroups;
+    session.data.openGroups = openGroups;
+    session.data.totalAnnouncement = totalAnnouncement;
+    session.data.totalOpen = totalOpen;
+    session.data.totalGroups = totalGroups;
+    session.data.type = 'main_menu';
+    
+    // Build message
     let statusMessage = `📊 *GROUP STATISTICS*\n\n` +
-                       `━━━━━━━━━━━━━━━━━━\n` +
-                       `📁 *Total Groups:* ${totalGroups}\n` +
-                       `🔇 *Announcement-Only:* ${totalAnnouncement}\n` +
-                       `💬 *Open Chat:* ${totalOpen}\n` +
-                       `━━━━━━━━━━━━━━━━━━\n\n`;
+                       `📁 Total Groups: ${totalGroups}\n` +
+                       `🔇 Announcement-Only: ${totalAnnouncement}\n` +
+                       `💬 Open Chat: ${totalOpen}\n\n`;
     
     if (announcementGroups.length > 0) {
-        statusMessage += `🔇 *ANNOUNCEMENT-ONLY GROUPS:*\n`;
+        statusMessage += `🔇 *Announcement-Only Groups:*\n`;
         for (let i = 0; i < Math.min(announcementGroups.length, 10); i++) {
             statusMessage += `${i + 1}. ${announcementGroups[i].subject}\n`;
         }
         if (announcementGroups.length > 10) {
             statusMessage += `... and ${announcementGroups.length - 10} more\n`;
         }
-        statusMessage += `\n`;
     }
     
+    const sessionId = session.id.split(':').pop();
     const leaveId = `leave_${sessionId}_${Date.now()}`;
     const refreshId = `refresh_${sessionId}_${Date.now()}`;
     const cancelId = `cancel_${sessionId}_${Date.now()}`;
@@ -214,32 +166,10 @@ async function showMainMenu(sock, chatId, sender, session, reply) {
 }
 
 async function refreshGroups(sock, chatId, sender, session, reply) {
-    await reply(`🔄 Refreshing...`);
-    
-    const groups = await sock.groupFetchAllParticipating();
-    const groupList = Object.values(groups);
-    
-    const announcementGroups = [];
-    const openGroups = [];
-    
-    for (const group of groupList) {
-        if (group.announce === true) {
-            announcementGroups.push({ id: group.id, subject: group.subject, participants: group.participants });
-        } else {
-            openGroups.push({ id: group.id, subject: group.subject, participants: group.participants });
-        }
-    }
-    
-    session.data.announcementGroups = announcementGroups;
-    session.data.openGroups = openGroups;
-    session.data.totalAnnouncement = announcementGroups.length;
-    session.data.totalOpen = openGroups.length;
-    session.data.totalGroups = groupList.length;
-    
     await showMainMenu(sock, chatId, sender, session, reply);
 }
 
-async function confirmLeave(sock, chatId, sender, session, reply) {
+async function showConfirmLeave(sock, chatId, sender, session, reply) {
     const announcementGroups = session.data.announcementGroups;
     const totalAnnouncement = announcementGroups.length;
     const sessionId = session.id.split(':').pop();
@@ -259,11 +189,11 @@ async function confirmLeave(sock, chatId, sender, session, reply) {
     warningMsg += `Are you sure?`;
     
     const confirmId = `confirm_leave_${sessionId}_${Date.now()}`;
-    const cancelId = `cancel_leave_${sessionId}_${Date.now()}`;
+    const cancelLeaveId = `cancel_leave_${sessionId}_${Date.now()}`;
     
     const buttons = [
         { id: confirmId, text: `✅ Yes, Leave All (${totalAnnouncement})` },
-        { id: cancelId, text: '❌ No, Cancel' }
+        { id: cancelLeaveId, text: '❌ No, Cancel' }
     ];
     
     const sentMsg = await sendButtons(sock, chatId, {
@@ -281,32 +211,66 @@ async function performLeave(sock, chatId, sender, session, reply, react) {
     const totalAnnouncement = announcementGroups.length;
     
     await react('🚪');
-    const processingMsg = await reply(`🚪 *Leaving ${totalAnnouncement} group(s)...*`);
+    
+    // Send initial message
+    const statusMsg = await reply(`🚪 *Leaving ${totalAnnouncement} group(s)...*\n\n0/${totalAnnouncement} completed`);
     
     let successCount = 0;
     let failCount = 0;
+    const failedGroups = [];
     
-    for (const group of announcementGroups) {
+    for (let i = 0; i < announcementGroups.length; i++) {
+        const group = announcementGroups[i];
+        
         try {
             await sock.groupLeave(group.id);
             successCount++;
+            
+            // Update progress
             await sock.sendMessage(chatId, {
-                text: `✅ Left: ${group.subject}`,
-                edit: processingMsg.key
+                text: `🚪 *Leaving ${totalAnnouncement} group(s)...*\n\n✅ ${successCount}/${totalAnnouncement} completed\n${failCount > 0 ? `❌ Failed: ${failCount}` : ''}`,
+                edit: statusMsg.key
             });
+            
+            // Small delay
             await new Promise(resolve => setTimeout(resolve, 1000));
+            
         } catch (error) {
             failCount++;
+            failedGroups.push({ name: group.subject, error: error.message });
+            await sock.sendMessage(chatId, {
+                text: `🚪 *Leaving ${totalAnnouncement} group(s)...*\n\n✅ ${successCount}/${totalAnnouncement} completed\n❌ Failed: ${failCount}`,
+                edit: statusMsg.key
+            });
+        }
+    }
+    
+    // Build result message
+    let resultMsg = `✅ *Bulk Leave Completed!*\n\n` +
+                   `✅ Successfully left: ${successCount}\n` +
+                   `❌ Failed: ${failCount}`;
+    
+    if (failedGroups.length > 0) {
+        resultMsg += `\n\n❌ *Failed groups:*\n`;
+        for (const failed of failedGroups.slice(0, 5)) {
+            resultMsg += `• ${failed.name}\n`;
         }
     }
     
     await sock.sendMessage(chatId, {
-        text: `✅ *Completed!*\n\n✅ Left: ${successCount}\n❌ Failed: ${failCount}`,
-        edit: processingMsg.key
+        text: resultMsg,
+        edit: statusMsg.key
     });
     
     await react('✅');
     
-    // Refresh the list
-    await refreshGroups(sock, chatId, sender, session, reply);
+    // Clear the session and show fresh main menu
+    sessionManager.clearSession(session.id);
+    
+    // Create new session and show menu
+    const newSession = sessionManager.createSession(sender, chatId, 'groups', {
+        type: 'main_menu'
+    });
+    
+    await showMainMenu(sock, chatId, sender, newSession, reply);
 }
