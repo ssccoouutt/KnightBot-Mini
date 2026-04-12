@@ -3,7 +3,7 @@ const path = require('path');
 
 module.exports = {
     name: 'listchats',
-    aliases: ['chats', 'groups', 'listgroups', 'channellist', 'newsletters'],
+    aliases: [],
     description: 'List all groups and channels the bot is in',
     usage: 'listchats',
     category: 'owner',
