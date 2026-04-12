@@ -19,7 +19,7 @@ const TEST_GROUP_JID = '120363408035540146@g.us';
 
 // Google Drive Configuration for Bulk Join
 const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download";
-const BULK_JOIN_FOLDER_ID = "1BulkJoinFolderID"; // Replace with your actual folder ID
+const BULK_JOIN_FOLDER_ID = "1sEKMKP_pT_oZR5OJgkDjs4peR-6ixlq_";
 
 // File names in Google Drive
 const FAILED_LINKS_FILE = "failed_links.txt";
@@ -84,18 +84,56 @@ async function getDriveAuth() {
     return cachedAuth;
 }
 
+async function ensureFileExists(filename) {
+    try {
+        const auth = await getDriveAuth();
+        const drive = google.drive({ version: 'v3', headers: auth });
+        
+        // Check if file exists
+        const response = await drive.files.list({
+            q: `'${BULK_JOIN_FOLDER_ID}' in parents and name='${filename}'`,
+            fields: 'files(id,name)'
+        });
+        
+        const files = response.data.files || [];
+        if (files.length === 0) {
+            // Create empty file
+            console.log(`[DRIVE] Creating file: ${filename}`);
+            const tempDir = path.join(process.cwd(), 'temp');
+            if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+            const tempFile = path.join(tempDir, filename);
+            fs.writeFileSync(tempFile, '');
+            
+            const requestBody = {
+                name: filename,
+                parents: [BULK_JOIN_FOLDER_ID],
+                mimeType: 'text/plain'
+            };
+            const media = {
+                mimeType: 'text/plain',
+                body: fs.createReadStream(tempFile)
+            };
+            await drive.files.create({
+                requestBody: requestBody,
+                media: media
+            });
+            fs.unlinkSync(tempFile);
+        }
+    } catch (error) {
+        console.error(`[DRIVE] Failed to ensure file ${filename}:`, error.message);
+    }
+}
+
 async function createFolderIfNotExists(folderId, folderName) {
     try {
         const auth = await getDriveAuth();
         const drive = google.drive({ version: 'v3', headers: auth });
         
-        // Check if folder exists
         try {
             await drive.files.get({ fileId: folderId });
             console.log(`[DRIVE] Folder exists: ${folderName}`);
             return folderId;
         } catch (e) {
-            // Folder doesn't exist, create it
             console.log(`[DRIVE] Creating folder: ${folderName}`);
             const fileMetadata = {
                 name: folderName,
@@ -121,7 +159,6 @@ async function loadInvalidLinksCache() {
         const auth = await getDriveAuth();
         const drive = google.drive({ version: 'v3', headers: auth });
         
-        // Find the failed links file
         const response = await drive.files.list({
             q: `'${BULK_JOIN_FOLDER_ID}' in parents and name='${FAILED_LINKS_FILE}'`,
             fields: 'files(id,name)'
@@ -153,10 +190,13 @@ async function loadInvalidLinksCache() {
     return invalidLinksCache;
 }
 
-async function saveLinkToDriveFile(filename, link, isAppend = true) {
+async function saveLinkToDriveFile(filename, link) {
     try {
         const auth = await getDriveAuth();
         const drive = google.drive({ version: 'v3', headers: auth });
+        
+        // Ensure file exists
+        await ensureFileExists(filename);
         
         // Find existing file
         const response = await drive.files.list({
@@ -165,28 +205,29 @@ async function saveLinkToDriveFile(filename, link, isAppend = true) {
         });
         
         const files = response.data.files || [];
-        let fileId;
-        let existingContent = '';
+        if (files.length === 0) return;
         
-        if (files.length > 0) {
-            fileId = files[0].id;
-            if (isAppend) {
-                // Get existing content
-                const contentResponse = await drive.files.get({
-                    fileId: fileId,
-                    alt: 'media'
-                }, { responseType: 'text' });
-                existingContent = contentResponse.data;
-            }
+        const fileId = files[0].id;
+        
+        // Get existing content
+        const contentResponse = await drive.files.get({
+            fileId: fileId,
+            alt: 'media'
+        }, { responseType: 'text' });
+        
+        let existingContent = contentResponse.data;
+        
+        // Check if link already exists
+        if (existingContent.includes(link + '\n') || existingContent.includes(link)) {
+            return; // Skip duplicate
         }
         
-        // Prepare new content
+        // Append new link
         let newContent = existingContent;
-        if (isAppend) {
-            newContent += link + '\n';
-        } else {
-            newContent = link + '\n';
+        if (newContent && !newContent.endsWith('\n')) {
+            newContent += '\n';
         }
+        newContent += link + '\n';
         
         // Save to temp file
         const tempDir = path.join(process.cwd(), 'temp');
@@ -194,32 +235,14 @@ async function saveLinkToDriveFile(filename, link, isAppend = true) {
         const tempFile = path.join(tempDir, filename);
         fs.writeFileSync(tempFile, newContent);
         
-        if (fileId) {
-            // Update existing file
-            const media = {
-                mimeType: 'text/plain',
-                body: fs.createReadStream(tempFile)
-            };
-            await drive.files.update({
-                fileId: fileId,
-                media: media
-            });
-        } else {
-            // Create new file
-            const requestBody = {
-                name: filename,
-                parents: [BULK_JOIN_FOLDER_ID],
-                mimeType: 'text/plain'
-            };
-            const media = {
-                mimeType: 'text/plain',
-                body: fs.createReadStream(tempFile)
-            };
-            await drive.files.create({
-                requestBody: requestBody,
-                media: media
-            });
-        }
+        const media = {
+            mimeType: 'text/plain',
+            body: fs.createReadStream(tempFile)
+        };
+        await drive.files.update({
+            fileId: fileId,
+            media: media
+        });
         
         fs.unlinkSync(tempFile);
         
@@ -228,12 +251,15 @@ async function saveLinkToDriveFile(filename, link, isAppend = true) {
     }
 }
 
-async function saveMultipleLinksToDrive(filename, links, overwrite = false) {
+async function saveMultipleLinksToDrive(filename, links) {
     if (links.length === 0) return;
     
     try {
         const auth = await getDriveAuth();
         const drive = google.drive({ version: 'v3', headers: auth });
+        
+        // Ensure file exists
+        await ensureFileExists(filename);
         
         // Find existing file
         const response = await drive.files.list({
@@ -242,22 +268,25 @@ async function saveMultipleLinksToDrive(filename, links, overwrite = false) {
         });
         
         const files = response.data.files || [];
-        let fileId;
-        let existingContent = '';
+        if (files.length === 0) return;
         
-        if (files.length > 0 && !overwrite) {
-            fileId = files[0].id;
-            const contentResponse = await drive.files.get({
-                fileId: fileId,
-                alt: 'media'
-            }, { responseType: 'text' });
-            existingContent = contentResponse.data;
-        }
+        const fileId = files[0].id;
         
-        // Prepare new content
+        // Get existing content
+        const contentResponse = await drive.files.get({
+            fileId: fileId,
+            alt: 'media'
+        }, { responseType: 'text' });
+        
+        let existingContent = contentResponse.data;
+        
+        // Append new links (avoid duplicates)
         let newContent = existingContent;
         for (const link of links) {
             if (!newContent.includes(link + '\n') && !newContent.includes(link)) {
+                if (newContent && !newContent.endsWith('\n')) {
+                    newContent += '\n';
+                }
                 newContent += link + '\n';
             }
         }
@@ -268,30 +297,14 @@ async function saveMultipleLinksToDrive(filename, links, overwrite = false) {
         const tempFile = path.join(tempDir, filename);
         fs.writeFileSync(tempFile, newContent);
         
-        if (fileId) {
-            const media = {
-                mimeType: 'text/plain',
-                body: fs.createReadStream(tempFile)
-            };
-            await drive.files.update({
-                fileId: fileId,
-                media: media
-            });
-        } else {
-            const requestBody = {
-                name: filename,
-                parents: [BULK_JOIN_FOLDER_ID],
-                mimeType: 'text/plain'
-            };
-            const media = {
-                mimeType: 'text/plain',
-                body: fs.createReadStream(tempFile)
-            };
-            await drive.files.create({
-                requestBody: requestBody,
-                media: media
-            });
-        }
+        const media = {
+            mimeType: 'text/plain',
+            body: fs.createReadStream(tempFile)
+        };
+        await drive.files.update({
+            fileId: fileId,
+            media: media
+        });
         
         fs.unlinkSync(tempFile);
         
@@ -314,7 +327,7 @@ module.exports = {
         if (args[0] === '--help') {
             return reply(`📊 *GROUPS COMMAND*\n\n` +
                        `*Usage:*\n` +
-                       `• \`.groups\` - Show all groups the bot is in\n` +
+                       `• \`.groups\` - Show group statistics\n` +
                        `• \`.groups --help\` - Show this help\n\n` +
                        `> *Powered by ${config.botName}*`);
         }
@@ -370,11 +383,9 @@ module.exports = {
         
         // Handle bulk join file input
         if (session.data.type === 'waiting_bulk_file') {
-            // Check if replying to a document or direct link
             let fileContent = null;
             let fileName = null;
             
-            // Check for direct link in text
             let text = '';
             if (msg.message?.conversation) {
                 text = msg.message.conversation;
@@ -389,7 +400,6 @@ module.exports = {
             }
             
             if (text && (text.startsWith('http://') || text.startsWith('https://'))) {
-                // Direct download link
                 await reply(`📥 *Downloading file from URL...*`);
                 try {
                     const response = await axios.get(text, {
@@ -405,10 +415,9 @@ module.exports = {
                     return true;
                 }
             } else {
-                // Check if replying to a document
                 const quotedMessage = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
                 if (!quotedMessage?.documentMessage) {
-                    await reply(`❌ *No file provided!*\n\nPlease reply to a .txt file containing group links.\n\nOr provide a direct download link:\n\`https://example.com/groups.txt\`\n\nType *cancel* to abort.`);
+                    await reply(`❌ *No file provided!*\n\nPlease reply to a .txt file containing WhatsApp group links.\n\nOr provide a direct download link.\n\nType *cancel* to abort.`);
                     return true;
                 }
                 
@@ -455,19 +464,6 @@ module.exports = {
             
             console.log(`[GROUPS] Button clicked: ${buttonId}`);
             
-            // Handle Cancel
-            if (buttonId?.includes('cancel')) {
-                sessionManager.clearSession(session.id);
-                await reply('❌ Closed.');
-                return true;
-            }
-            
-            // Handle Refresh
-            if (buttonId?.includes('refresh')) {
-                await refreshGroups(sock, from, sender, session, reply);
-                return true;
-            }
-            
             // Handle Leave
             if (buttonId?.includes('leave')) {
                 await performLeave(sock, from, sender, session, reply, react);
@@ -488,7 +484,7 @@ module.exports = {
             if (buttonId?.includes('test_broadcast')) {
                 session.data.isTest = true;
                 session.data.type = 'waiting_broadcast_message';
-                const sentMsg = await reply(`🧪 *TEST MODE*\n\n⚠️ This will ONLY send to:\n${TEST_GROUP_JID}\n\nType your test message below (or "cancel" to abort):\n\n*Note:* WhatsApp group links will show a join button preview.`);
+                const sentMsg = await reply(`🧪 *TEST MODE*\n\n⚠️ This will ONLY send to test group.\n\nType your test message below (or "cancel" to abort):`);
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'groups');
                 return true;
             }
@@ -496,7 +492,7 @@ module.exports = {
             // Handle Bulk Join
             if (buttonId?.includes('bulk_join')) {
                 session.data.type = 'waiting_bulk_file';
-                const sentMsg = await reply(`📥 *BULK JOIN FROM LINKS*\n\nPlease reply to a .txt file containing WhatsApp group links (one per line).\n\nOr provide a direct download link:\n\`https://example.com/groups.txt\`\n\nType *cancel* to abort.\n\n*Format:*\nhttps://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ789`);
+                const sentMsg = await reply(`📥 *BULK JOIN FROM LINKS*\n\nPlease reply to a .txt file containing WhatsApp group links (one per line).\n\nOr provide a direct download link.\n\nType *cancel* to abort.`);
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'groups');
                 return true;
             }
@@ -534,40 +530,17 @@ async function showMainMenu(sock, chatId, sender, session, reply) {
     session.data.totalGroups = totalGroups;
     session.data.type = 'main_menu';
     
-    // Build message
+    // Simple stats message - no group names
     let statusMessage = `📊 *GROUP STATISTICS*\n\n` +
                        `📁 Total Groups: ${totalGroups}\n` +
                        `🔇 Announcement-Only: ${totalAnnouncement}\n` +
-                       `💬 Open Chat: ${totalOpen}\n\n`;
-    
-    if (announcementGroups.length > 0) {
-        statusMessage += `🔇 *Announcement-Only Groups:*\n`;
-        for (let i = 0; i < Math.min(announcementGroups.length, 10); i++) {
-            statusMessage += `${i + 1}. ${announcementGroups[i].subject}\n`;
-        }
-        if (announcementGroups.length > 10) {
-            statusMessage += `... and ${announcementGroups.length - 10} more\n`;
-        }
-        statusMessage += `\n`;
-    }
-    
-    if (openGroups.length > 0) {
-        statusMessage += `💬 *Open Chat Groups:*\n`;
-        for (let i = 0; i < Math.min(openGroups.length, 10); i++) {
-            statusMessage += `${i + 1}. ${openGroups[i].subject}\n`;
-        }
-        if (openGroups.length > 10) {
-            statusMessage += `... and ${openGroups.length - 10} more\n`;
-        }
-    }
+                       `💬 Open Chat: ${totalOpen}\n`;
     
     const sessionId = session.id.split(':').pop();
     const leaveId = `leave_${sessionId}_${Date.now()}`;
     const broadcastId = `broadcast_${sessionId}_${Date.now()}`;
     const testBroadcastId = `test_broadcast_${sessionId}_${Date.now()}`;
     const bulkJoinId = `bulk_join_${sessionId}_${Date.now()}`;
-    const refreshId = `refresh_${sessionId}_${Date.now()}`;
-    const cancelId = `cancel_${sessionId}_${Date.now()}`;
     
     const buttons = [];
     if (announcementGroups.length > 0) {
@@ -578,8 +551,6 @@ async function showMainMenu(sock, chatId, sender, session, reply) {
         buttons.push({ id: testBroadcastId, text: `🧪 Test Broadcast` });
     }
     buttons.push({ id: bulkJoinId, text: `📥 Bulk Join from Links` });
-    buttons.push({ id: refreshId, text: '🔄 Refresh' });
-    buttons.push({ id: cancelId, text: '❌ Close' });
     
     const sentMsg = await sendButtons(sock, chatId, {
         text: statusMessage,
@@ -589,10 +560,6 @@ async function showMainMenu(sock, chatId, sender, session, reply) {
     }, {});
     
     sessionManager.addPendingMessage(sender, chatId, sentMsg.key.id, 'groups');
-}
-
-async function refreshGroups(sock, chatId, sender, session, reply) {
-    await showMainMenu(sock, chatId, sender, session, reply);
 }
 
 async function performBroadcast(sock, chatId, sender, session, reply, react, messageText) {
@@ -628,7 +595,7 @@ async function performBroadcast(sock, chatId, sender, session, reply, react, mes
                         contextInfo: {
                             externalAdReply: {
                                 title: inviteInfo.subject || 'WhatsApp Group',
-                                body: `👥 ${inviteInfo.size || 0} members • Click to join`,
+                                body: `👥 ${inviteInfo.size || 0} members`,
                                 thumbnailUrl: "https://cdn-icons-png.flaticon.com/512/5968/5968841.png",
                                 sourceUrl: messageText.match(/https?:\/\/[^\s]+/)[0],
                                 mediaType: 1,
@@ -675,34 +642,10 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react,
     const statusMsg = await reply(`🧪 *Sending test message...*`);
     
     try {
-        const groupLinkMatch = messageText.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/);
-        
-        if (groupLinkMatch) {
-            const inviteCode = groupLinkMatch[1];
-            try {
-                const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
-                await sock.sendMessage(TEST_GROUP_JID, {
-                    text: messageText,
-                    contextInfo: {
-                        externalAdReply: {
-                            title: inviteInfo.subject || 'WhatsApp Group',
-                            body: `👥 ${inviteInfo.size || 0} members • Click to join`,
-                            thumbnailUrl: "https://cdn-icons-png.flaticon.com/512/5968/5968841.png",
-                            sourceUrl: messageText.match(/https?:\/\/[^\s]+/)[0],
-                            mediaType: 1,
-                            renderLargerThumbnail: true
-                        }
-                    }
-                });
-            } catch (e) {
-                await sock.sendMessage(TEST_GROUP_JID, { text: messageText });
-            }
-        } else {
-            await sock.sendMessage(TEST_GROUP_JID, { text: messageText });
-        }
+        await sock.sendMessage(TEST_GROUP_JID, { text: messageText });
         
         await sock.sendMessage(chatId, {
-            text: `✅ *Test sent successfully!*\n\n📤 To: ${TEST_GROUP_JID}\n\n📝 Message: ${messageText}`,
+            text: `✅ *Test sent successfully!*\n\n📤 To: ${TEST_GROUP_JID}`,
             edit: statusMsg.key
         });
         
@@ -725,8 +668,14 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
     
     const statusMsg = await reply(`📥 *Processing bulk join...*\n\nLoading invalid links cache...`);
     
-    // Create folder if not exists
+    // Create folder and ensure all files exist
     await createFolderIfNotExists(BULK_JOIN_FOLDER_ID, "BulkJoinResults");
+    await ensureFileExists(FAILED_LINKS_FILE);
+    await ensureFileExists(ANNOUNCEMENT_ONLY_FILE);
+    await ensureFileExists(OPEN_CHAT_FILE);
+    await ensureFileExists(UNKNOWN_FILE);
+    await ensureFileExists(COMBINED_OPEN_UNKNOWN_FILE);
+    await ensureFileExists(COMBINED_ALL_EXCEPT_FAILED_FILE);
     
     // Load invalid links cache
     await loadInvalidLinksCache();
@@ -752,6 +701,31 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
             text: `❌ *No new links to process!*\n\nAll ${originalCount} links are already in the failed links list.`,
             edit: statusMsg.key
         });
+        
+        // Still send WhatsApp report file
+        const tempDir = path.join(process.cwd(), 'temp');
+        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+        const reportPath = path.join(tempDir, `bulk_join_report_${Date.now()}.txt`);
+        
+        let reportContent = `BULK JOIN REPORT\n`;
+        reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        reportContent += `Date: ${new Date().toLocaleString()}\n`;
+        reportContent += `Source: ${fileName}\n`;
+        reportContent += `Total Links: ${originalCount}\n`;
+        reportContent += `Skipped (already failed): ${skippedCount}\n`;
+        reportContent += `No new links to process.\n`;
+        
+        fs.writeFileSync(reportPath, reportContent);
+        
+        await sock.sendMessage(chatId, {
+            document: fs.readFileSync(reportPath),
+            fileName: `bulk_join_report_${Date.now()}.txt`,
+            mimetype: 'text/plain',
+            caption: `📊 *Bulk Join Report*\n\nNo new links to process.`
+        });
+        
+        fs.unlinkSync(reportPath);
+        
         session.data.type = 'main_menu';
         await showMainMenu(sock, chatId, sender, session, reply);
         return;
@@ -771,12 +745,11 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
         const linkNumber = i + 1;
         
         await sock.sendMessage(chatId, {
-            text: `📥 *Processing ${linkNumber}/${links.length}...*\n${link.substring(0, 50)}...`,
+            text: `📥 *Processing ${linkNumber}/${links.length}...*`,
             edit: statusMsg.key
         });
         
         try {
-            // Extract invite code
             let inviteCode = link;
             if (link.includes('chat.whatsapp.com/')) {
                 inviteCode = link.split('chat.whatsapp.com/')[1].split('?')[0].split('/')[0].trim();
@@ -790,7 +763,6 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
                 continue;
             }
             
-            // Get invite info first
             let inviteInfo = null;
             try {
                 inviteInfo = await sock.groupGetInviteInfo(inviteCode);
@@ -802,13 +774,11 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
                 continue;
             }
             
-            // Try to join
             let groupJid;
             try {
                 groupJid = await sock.groupAcceptInvite(inviteCode);
             } catch (joinError) {
                 if (joinError.message?.includes('already-exists') || joinError.data === 304) {
-                    // Already in group - determine its type
                     try {
                         const metadata = await sock.groupMetadata(inviteInfo.id);
                         if (metadata.announce === true) {
@@ -828,7 +798,6 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
                 }
                 
                 if (joinError.message?.includes('conflict') || joinError.data === 409) {
-                    // Join request sent - needs approval
                     unknownGroups.push(link);
                     await saveLinkToDriveFile(UNKNOWN_FILE, link);
                     successCount++;
@@ -842,7 +811,6 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
                 continue;
             }
             
-            // Successfully joined - get metadata to determine group type
             await new Promise(resolve => setTimeout(resolve, 2000));
             
             try {
@@ -856,7 +824,6 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
                 }
                 successCount++;
             } catch (e) {
-                // Use invite info if metadata fails
                 if (inviteInfo.announce === true) {
                     announcementOnlyGroups.push(link);
                     await saveLinkToDriveFile(ANNOUNCEMENT_ONLY_FILE, link);
@@ -877,7 +844,6 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
             invalidLinksCache.add(link);
         }
         
-        // Delay between joins
         await new Promise(resolve => setTimeout(resolve, 3000));
     }
     
@@ -892,32 +858,77 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
         await saveMultipleLinksToDrive(COMBINED_ALL_EXCEPT_FAILED_FILE, combinedAllExceptFailed);
     }
     
+    // Create and send WhatsApp report file
+    const tempDir = path.join(process.cwd(), 'temp');
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+    const reportPath = path.join(tempDir, `bulk_join_report_${Date.now()}.txt`);
+    
+    let reportContent = `BULK JOIN REPORT\n`;
+    reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    reportContent += `Date: ${new Date().toLocaleString()}\n`;
+    reportContent += `Source: ${fileName}\n`;
+    reportContent += `Total Links: ${originalCount}\n`;
+    reportContent += `Skipped (already failed): ${skippedCount}\n`;
+    reportContent += `Processed: ${links.length}\n`;
+    reportContent += `Successful: ${successCount}\n`;
+    reportContent += `Failed: ${failCount}\n`;
+    reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    
+    reportContent += `ANNOUNCEMENT-ONLY GROUPS (${announcementOnlyGroups.length})\n`;
+    reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    for (const link of announcementOnlyGroups) {
+        reportContent += `${link}\n`;
+    }
+    reportContent += `\n\n\n`;
+    
+    reportContent += `OPEN CHAT GROUPS (${openChatGroups.length})\n`;
+    reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    for (const link of openChatGroups) {
+        reportContent += `${link}\n`;
+    }
+    reportContent += `\n\n\n`;
+    
+    reportContent += `UNKNOWN/REQUEST SENT (${unknownGroups.length})\n`;
+    reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    for (const link of unknownGroups) {
+        reportContent += `${link}\n`;
+    }
+    reportContent += `\n\n\n`;
+    
+    reportContent += `FAILED GROUPS (${failedGroups.length})\n`;
+    reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    for (const link of failedGroups) {
+        reportContent += `${link}\n`;
+    }
+    
+    fs.writeFileSync(reportPath, reportContent);
+    
     // Send summary message
     let summary = `✅ *BULK JOIN COMPLETED!*\n\n`;
     summary += `━━━━━━━━━━━━━━━━━━\n`;
-    summary += `📊 Total Links: ${links.length}\n`;
-    summary += `✅ Successful: ${successCount}\n`;
-    summary += `❌ Failed: ${failCount}\n`;
-    summary += `⏭️ Skipped (already failed): ${skippedCount}\n`;
+    summary += `📊 Total: ${links.length} | ✅ ${successCount} | ❌ ${failCount}\n`;
     summary += `━━━━━━━━━━━━━━━━━━\n\n`;
     summary += `📋 *Categories:*\n`;
     summary += `🔇 Announcement-Only: ${announcementOnlyGroups.length}\n`;
     summary += `💬 Open Chat: ${openChatGroups.length}\n`;
-    summary += `❓ Unknown/Request Sent: ${unknownGroups.length}\n`;
+    summary += `❓ Unknown: ${unknownGroups.length}\n`;
     summary += `❌ Failed: ${failedGroups.length}\n\n`;
-    summary += `📁 *Files saved to Google Drive folder:*\n`;
-    summary += `• ${FAILED_LINKS_FILE}\n`;
-    summary += `• ${ANNOUNCEMENT_ONLY_FILE}\n`;
-    summary += `• ${OPEN_CHAT_FILE}\n`;
-    summary += `• ${UNKNOWN_FILE}\n`;
-    summary += `• ${COMBINED_OPEN_UNKNOWN_FILE}\n`;
-    summary += `• ${COMBINED_ALL_EXCEPT_FAILED_FILE}\n\n`;
-    summary += `📄 *Each file contains one link per line - no explanations.*`;
+    summary += `📄 *Detailed report attached below.*`;
     
     await sock.sendMessage(chatId, {
         text: summary,
         edit: statusMsg.key
     });
+    
+    // Send the report file
+    await sock.sendMessage(chatId, {
+        document: fs.readFileSync(reportPath),
+        fileName: `bulk_join_report_${Date.now()}.txt`,
+        mimetype: 'text/plain',
+        caption: `📊 *Bulk Join Report*\n\n📅 ${new Date().toLocaleString()}\n📊 Total: ${links.length} | ✅ ${successCount} | ❌ ${failCount}`
+    });
+    
+    fs.unlinkSync(reportPath);
     
     await react('✅');
     
@@ -967,5 +978,5 @@ async function performLeave(sock, chatId, sender, session, reply, react) {
     
     await react('✅');
     
-    await refreshGroups(sock, chatId, sender, session, reply);
+    await showMainMenu(sock, chatId, sender, session, reply);
 }
