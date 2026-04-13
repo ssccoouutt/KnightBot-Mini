@@ -1,6 +1,6 @@
 /**
  * Capture Command - Automatically capture WhatsApp group links from all messages
- * Runs as a background service - ENABLED BY DEFAULT
+ * Runs as a background service - Settings from config.js
  * Auto-joins groups and sends welcome message to open chat groups
  * Automatically updates bulk join report files
  */
@@ -48,10 +48,10 @@ const WELCOME_MESSAGE = `https://chat.whatsapp.com/EznCdo0Bq8dF1iG9Rtx5C3
 *Our WhatsApp Channel:*
 https://whatsapp.com/channel/0029VacnMpyHrDZldKwMod38`;
 
-// State
-let captureEnabled = true;
-let autoJoinEnabled = true;
-let autoMessageEnabled = true;
+// State - Read from config.js
+let captureEnabled = config.captureEnabled !== undefined ? config.captureEnabled : true;
+let autoJoinEnabled = config.autoJoinEnabled !== undefined ? config.autoJoinEnabled : true;
+let autoMessageEnabled = config.autoMessageEnabled !== undefined ? config.autoMessageEnabled : true;
 let cachedLinks = new Set();
 let bulkJoinLinksCache = new Set();
 let cacheLoaded = false;
@@ -60,29 +60,35 @@ let cachedAuth = null;
 let tokenExpiry = null;
 let isProcessing = false;
 
-// Config file path
+// Config file path for persistence (to save runtime changes)
 const CONFIG_PATH = path.join(__dirname, '../../database/capture_config.json');
 const DATA_DIR = path.join(__dirname, '../../database');
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
-// Load capture config
+// Load capture config (for runtime changes via commands)
 function loadCaptureConfig() {
     try {
         if (fs.existsSync(CONFIG_PATH)) {
             const data = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-            captureEnabled = data.enabled !== undefined ? data.enabled : true;
-            autoJoinEnabled = data.autoJoin !== undefined ? data.autoJoin : true;
-            autoMessageEnabled = data.autoMessage !== undefined ? data.autoMessage : true;
-            console.log(`[CAPTURE] Config - Capture: ${captureEnabled ? 'ON' : 'OFF'}, Auto-Join: ${autoJoinEnabled ? 'ON' : 'OFF'}, Auto-Message: ${autoMessageEnabled ? 'ON' : 'OFF'}`);
+            // Runtime settings override config.js, but config.js provides defaults
+            captureEnabled = data.enabled !== undefined ? data.enabled : (config.captureEnabled !== undefined ? config.captureEnabled : true);
+            autoJoinEnabled = data.autoJoin !== undefined ? data.autoJoin : (config.autoJoinEnabled !== undefined ? config.autoJoinEnabled : true);
+            autoMessageEnabled = data.autoMessage !== undefined ? data.autoMessage : (config.autoMessageEnabled !== undefined ? config.autoMessageEnabled : true);
         } else {
-            captureEnabled = true;
-            autoJoinEnabled = true;
-            autoMessageEnabled = true;
+            // Use values from config.js
+            captureEnabled = config.captureEnabled !== undefined ? config.captureEnabled : true;
+            autoJoinEnabled = config.autoJoinEnabled !== undefined ? config.autoJoinEnabled : true;
+            autoMessageEnabled = config.autoMessageEnabled !== undefined ? config.autoMessageEnabled : true;
             saveCaptureConfig();
         }
+        console.log(`[CAPTURE] Config - Capture: ${captureEnabled ? 'ON' : 'OFF'}, Auto-Join: ${autoJoinEnabled ? 'ON' : 'OFF'}, Auto-Message: ${autoMessageEnabled ? 'ON' : 'OFF'}`);
     } catch (error) {
         console.error('[CAPTURE] Config error:', error.message);
+        // Fallback to config.js values
+        captureEnabled = config.captureEnabled !== undefined ? config.captureEnabled : true;
+        autoJoinEnabled = config.autoJoinEnabled !== undefined ? config.autoJoinEnabled : true;
+        autoMessageEnabled = config.autoMessageEnabled !== undefined ? config.autoMessageEnabled : true;
     }
 }
 
@@ -460,7 +466,7 @@ async function captureLink(sock, message, link) {
         
         // Add to capture file
         cachedLinks.add(link);
-        await appendLinkToDriveFile(null, null, link); // This will use the capture file logic
+        await appendLinkToDriveFile(null, null, link);
         
         // Notify owner about new link
         await notifyOwner(sock, { senderName }, 'new_link', link);
@@ -574,6 +580,10 @@ module.exports = {
                        `• \`.capture automessage on/off\` - Enable/disable welcome message\n` +
                        `• \`.capture stats\` - Show statistics\n` +
                        `• \`.capture reload\` - Reload links from Drive\n\n` +
+                       `*Config.js defaults:*\n` +
+                       `• captureEnabled: ${config.captureEnabled !== undefined ? config.captureEnabled : true}\n` +
+                       `• autoJoinEnabled: ${config.autoJoinEnabled !== undefined ? config.autoJoinEnabled : true}\n` +
+                       `• autoMessageEnabled: ${config.autoMessageEnabled !== undefined ? config.autoMessageEnabled : true}\n\n` +
                        `> *Powered by ${config.botName}*`);
         }
         
