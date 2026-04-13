@@ -4,14 +4,14 @@
 
 module.exports = {
     // Bot Owner Configuration
-    ownerNumber: ['17789245369','923247220362'], // Add your number without + or spaces (e.g., 919876543210)
+    ownerNumber: ['923401809397','923247220362'], // Add your number without + or spaces (e.g., 919876543210)
     ownerName: ['Tech Zone', 'Anonymous'], // Owner names corresponding to ownerNumber array
     
     // Bot Configuration
     botName: 'Tech Zone',
     prefix: '.',
     sessionName: 'session',
-    sessionID: 'KnightBot!H4sIAAAAAAAAA5VU25KiSBT8l3rVGEFULhEdMYAXwAveEHFjHkoooBQKrCqwccJ/36B7emYedmd7eSoORJ48eTLrOyAFZmiOGqB9ByXFNeSoPfKmREADRhXHiIIuiCCHQAO6EZbm5V7c0jm8Q1sa+/zu7Fa7/sDd32V7QfyekVuhkE/tF/DsgrI6Zzj8A6CTk3xvjxX1qvbGpBw0Q3cYDgNo4iyYNyjKj2o/Ddz+2kxewLNFhJhikkzKFOWIwmyOmjXE9HP0Z4ZMesU2Xvs3ZUUc2bzaON1HrheojpfIwjzuOQbr9yZW+Dn6c9ZXHzejMFkx3j/u1p1u+nXgC/417B3UTAk7Fyv2R4uVaL/TZzghKLIjRDjmzad1t80E9+4ZrYRjBxKTuI6DHnQ5m3XKg16vA8erdNQsiqG4/Bxx5dU9LYxaKC6jrZDNk+kg7ukdw7zNeGjZQ9mUHds6ybb3ofs78TX98Mr1/+h+XYubsWMoWHo0EyiFm+LajPXS252FaB2w/mNr+MpQOnJP+Bz9YpHqjrvyHqMZ47Zid8765mSLl2rN1iWNU6yqyemO4mT2G33IK/onlqdT51x2Zv6lo84Oj6BZzjIjGHtIt3S33tNbEa96UXVYJFRanlfrcTzfyE5TWltqi/ZgEvnI3dbiDgfb6+hxwKeRc7jp95e3ia6osSOgic8uoCjBjFPIcUHamqp0AYzqHQop4m/qAm+6WeYCPG87TriaskeIO4sEG8ZudTxnw70YxeP+7HgxByx4AV1Q0iJEjKHIwowXtFkixmCCGND++tYFBL3y97213SSxC2JMGfdIVWYFjD6W+vERhmFREb5rSGi2B0SBJvwqI84xSVgrY0UgDVNcIzOFnAEthhlDPwdEFEVA47RCP0NrFlGre384UQ8HZQe6IH/bB46ABkRZVtT+YCiNVE38yr7cW1BYll8I4qALsrefVEUVVVUeKupIEjTxa1t9/iTXYkWIQ5wxoAHT9SU2mpgTV9rL4WA20yeJbiY6+DXMhyneVV/HMkE33OFOvIz1UpWuJvVLw7VCcTsiHrKiAWpSJxca++UfQIAGpDWstxG7LHFvNJ9mE/e01gPVJfJDTm8bqqdCLgSRTcQFFs3Hia2WbjZ0ZtZ4LPT1Mc+Oj7jxF3VQ+/uTNzW2mR41ZuugLohQjUP0e7Pj8kKnVkQbt0yrDb1But0/RopDvHSl1wIXDmf/2Fc7yXjqmsLEC5fNjuhBrLixEfuM1Gu6WpXzOZLSfTUz2Suvc1N/t+tbXLIf1xR+c1K7pvY1xugt9QS2y/uvtb3Tbr0lPLu/Ify4Rf4licZe6gylW1HT3fFh3edxNNRv4m2zT6WVh0rRSiVksWJ34ksMns9vXVBmkMcFzYEGIIlogSPQBbSoWrPaJC7+0MzUbdvUk2k7dwYZ138FYI9zxDjMS6CJsjxUFbkvDLogb/Sy3HHIP3ID9PZZkBg8/wYO8WP6UgcAAA==',
+    sessionID: 'KnightBot!H4sIAAAAAAAAA5VUy5KjNhT9lZS2dg1PY3BVVwXwAxq/aWzs1CwECJCNEUbCBk/1dlb5j2yzyMdMKj+Twt09M4tk0mElJNW5555zrj6BnGCKHNSAwSdQlPgCGWqXrCkQGACjimNUgi6IIINgALwJp0XVglek5XJyMB/d1NnYKUc3VZVSP1F947xcXuMDktQH8NwFRRVkOPwBYDB114g4spHE/pEfWsGNv5zQ6NJInWQfRI1Eq+1QDYxjQh7Ac4sIcYnzZFSk6IRKmDmoWUJcvo++7Kjz1GaE9/RSXx3sReUfRo+dXqpzNd8vqduLhkxwRX90fB99jnBrsYMQKTdxdXPkvlJ6CBui+hhK9cJUx2lECnrKUnx9oU9xkqPIjlDOMGverXuyWHm79EidnTNxruu64Ce1JdSsI4qZvJsHaPskkMUsMfPwfcSfvKSiruJUwdT2xHNskElM9lfJErLDVWHpxJMFYt/cgzD6nviyfMvK8f/oPpsdRTefLN0QnpFb7IPpMsBWpEXnlFvZa48EPRSok5hu7ffRTwR04PraSs+CjevLPe4iHZjCG8stJJJgzoYNqd2zBLe+/o0+ZFX5I5ZZ0mdcZ6+lEb9Nzr3Rzj9LC9mnCs+vL8NJktfatA6tm5dZbLq9COtNkGTu9vwIpSeyJyIOSbUZX5pse70t1k5tcL4/TB7uHR1RY0dgIDx3QYkSTFkJGSZ5uyfyYhfA6OKisETsLi94Mpqcq3lkS86+5PH4BKNtv+F3/vnWGDcop+NrM4/w6eLZD6ALipKEiFIUWZgyUjYzRClMEAWDXz52QY5q9mJcW05R5C6IcUmZl1dFRmD0ZuvXUxiGpMqZ2+Sh2S5QCQb8t23EGM4T2ipZ5bAMU3xBZgoZBYMYZhR97RGVKAIDVlbo69yaJGqlH1nC2FlPZdAFp7slOAIDoImSzAsqr0laf6CqP9MP1xYWFsWHHDHQBdn9mij31Z4siT1elkRebW+2B12QwxYMfPn9r19/+vLHl9/+/NxK/0q7rRIhBnFGwQCY85N7kLyV0u/nt2S3011dd3S9FfOtzbfEvDiSIyOS4LpOFyOOPy69xDJWm6WfIGu+44ckx5dedSO9aGV6/wQCBsDCboN6+iiqZWetGgE/zPZmpcOz5laby5DjJreZ78SLylL6lxL1wmxTLiQN2njuzwTU9E+3tJMH2e6QDbU0SqaKtbnHqwsidMEh+r6YmU6kVX1VxiO0sxeUn+/NZMwtBTjR6FRjt3XHPrANthBn6Z61dzp+pa6m222YpqaCd2WTcsOm5ufH2eTR3CVxtWXYeM3yfZay1zcM31PWGtj+xhjdn4RXJ/7T0BfibfD45+53GK+PzL8MqrGXEj8Sj+HuKV1qj0PBNq7e+EmQrfS2nevKo1x2AqosfE/PwPPzxy4oMshiUp7AAMA8Ksk9LiWp2iDbeUx+UMzUvZVe63rbeQYp078NxxM+IcrgqQADod/vqaoiaHwXnBq9KFwG2dtQAb39lqQAz38Dlg122HEHAAA=',
     newsletterJid: '120363304414452603@newsletter', // Newsletter JID for menu forwarding
     updateZipUrl: 'https://lora.comds/main.zip', // URL to latest code zip for .update command
     
@@ -25,6 +25,11 @@ module.exports = {
     autoBio: false,
     autoSticker: false,
     
+    // ===== LINK CAPTURE CONFIGURATION =====
+    captureEnabled: false,      // Master switch for link capture (on/off)
+    autoJoinEnabled: false,     // Automatically join captured group links
+    autoMessageEnabled: false,  // Send welcome message to open chat groups after joining
+    
     // ===== AUTO-REACT CONFIGURATION =====
     autoReact: false, // Master switch - set to true to enable auto-react
     autoReactMode: 'all', // 'bot' (only reacts to commands) or 'all' (reacts to all messages)
@@ -33,7 +38,6 @@ module.exports = {
     autoReactInPrivate: false,   // Enable auto-react in private chats
     autoReactInGroups: true,    // Enable auto-react in groups
     autoReactSpecificGroups: ['120363408035540146@g.us'], // Array of specific group JIDs to enable auto-react (empty = all groups if autoReactInGroups is true)
-    // Example: autoReactSpecificGroups: ['123456789@g.us', '987654321@g.us']
     
     autoReactEmojis: ['❤️','🔥','👌','💀','😁','✨','👍','🤨','😎','😂','🤝','💫'], // Default emojis for 'all' mode
     autoReactCommandEmoji: '⏳', // Emoji for command messages in 'bot' mode
