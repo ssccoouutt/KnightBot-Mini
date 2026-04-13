@@ -17,11 +17,12 @@ const FORCE_AI_MODE = true;
 // Test group JID for testing broadcast
 const TEST_GROUP_JID = '120363408035540146@g.us';
 
+// Hardcoded thumbnail URL for link previews
+const THUMBNAIL_URL = "https://drive.usercontent.google.com/download?id=1V1h-ncE4v12Bkvkz4yBd4_k13RffEABC&export=download&confirm=t";
+
 // ==================== GOOGLE DRIVE CONFIGURATION ====================
-// IMPORTANT: Create a folder in Google Drive and put its ID here
-// How to get folder ID: Open folder in Google Drive, copy from URL
-// Example: https://drive.google.com/drive/folders/THIS_IS_YOUR_FOLDER_ID
-const BULK_JOIN_FOLDER_ID = "YOUR_GOOGLE_DRIVE_FOLDER_ID_HERE"; // REPLACE THIS!
+// Google Drive folder for bulk join reports
+const BULK_JOIN_FOLDER_ID = "11XKmEGAfN5QrygCxy4p2wNRo0iK_tSD8";
 
 // File names in Google Drive (ONLY LINKS - one per line, no explanations)
 const FAILED_LINKS_FILE = "failed_links.txt";
@@ -420,7 +421,7 @@ module.exports = {
                 session.data.isTest = false;
                 session.data.type = 'waiting_broadcast_message';
                 const totalOpen = session.data.openGroups.length;
-                const sentMsg = await reply(`📢 *Send message to ${totalOpen} groups*\n\nType your message below (or "cancel" to abort):`);
+                const sentMsg = await reply(`📢 *Send message to ${totalOpen} groups*\n\nType your message below (or "cancel" to abort):\n\n*Note:* WhatsApp group links will show a join button preview.`);
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'groups');
                 return true;
             }
@@ -428,7 +429,7 @@ module.exports = {
             if (buttonId?.includes('test_broadcast')) {
                 session.data.isTest = true;
                 session.data.type = 'waiting_broadcast_message';
-                const sentMsg = await reply(`🧪 *TEST MODE*\n\n⚠️ This will ONLY send to test group.\n\nType your test message below (or "cancel" to abort):`);
+                const sentMsg = await reply(`🧪 *TEST MODE*\n\n⚠️ This will ONLY send to test group.\n\nType your test message below (or "cancel" to abort):\n\n*Note:* WhatsApp group links will show a join button preview.`);
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'groups');
                 return true;
             }
@@ -520,11 +521,41 @@ async function performBroadcast(sock, chatId, sender, session, reply, react, mes
     let successCount = 0;
     let failCount = 0;
     
+    // Check if message contains WhatsApp group link
+    const groupLinkMatch = messageText.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/);
+    
     for (let i = 0; i < openGroups.length; i++) {
         const group = openGroups[i];
         
         try {
-            await sock.sendMessage(group.id, { text: messageText });
+            if (groupLinkMatch) {
+                const inviteCode = groupLinkMatch[1];
+                try {
+                    // Get group invite info for rich preview
+                    const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
+                    
+                    // Send with rich preview using externalAdReply (like bomb.js)
+                    await sock.sendMessage(group.id, {
+                        text: messageText,
+                        contextInfo: {
+                            externalAdReply: {
+                                title: inviteInfo.subject || 'WhatsApp Group',
+                                body: `👥 ${inviteInfo.size || 0} members • Click to join`,
+                                thumbnailUrl: THUMBNAIL_URL,
+                                sourceUrl: messageText.match(/https?:\/\/[^\s]+/)[0],
+                                mediaType: 1,
+                                renderLargerThumbnail: true
+                            }
+                        }
+                    });
+                } catch (e) {
+                    // Fallback to normal message
+                    await sock.sendMessage(group.id, { text: messageText });
+                }
+            } else {
+                // Normal message without group link
+                await sock.sendMessage(group.id, { text: messageText });
+            }
             successCount++;
             
             if ((i + 1) % 5 === 0 || i === openGroups.length - 1) {
@@ -558,7 +589,37 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react,
     const statusMsg = await reply(`🧪 *Sending test message...*`);
     
     try {
-        await sock.sendMessage(TEST_GROUP_JID, { text: messageText });
+        // Check if message contains WhatsApp group link
+        const groupLinkMatch = messageText.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/);
+        
+        if (groupLinkMatch) {
+            const inviteCode = groupLinkMatch[1];
+            try {
+                // Get group invite info for rich preview
+                const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
+                
+                // Send with rich preview using externalAdReply (like bomb.js)
+                await sock.sendMessage(TEST_GROUP_JID, {
+                    text: messageText,
+                    contextInfo: {
+                        externalAdReply: {
+                            title: inviteInfo.subject || 'WhatsApp Group',
+                            body: `👥 ${inviteInfo.size || 0} members • Click to join`,
+                            thumbnailUrl: THUMBNAIL_URL,
+                            sourceUrl: messageText.match(/https?:\/\/[^\s]+/)[0],
+                            mediaType: 1,
+                            renderLargerThumbnail: true
+                        }
+                    }
+                });
+            } catch (e) {
+                // Fallback to normal message
+                await sock.sendMessage(TEST_GROUP_JID, { text: messageText });
+            }
+        } else {
+            // Normal message without group link
+            await sock.sendMessage(TEST_GROUP_JID, { text: messageText });
+        }
         
         await sock.sendMessage(chatId, {
             text: `✅ *Test sent successfully!*\n\n📤 To: ${TEST_GROUP_JID}`,
@@ -583,17 +644,6 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
     await react('📥');
     
     const statusMsg = await reply(`📥 *Processing bulk join...*\n\nLoading invalid links cache...`);
-    
-    // Check if folder ID is configured
-    if (BULK_JOIN_FOLDER_ID === "YOUR_GOOGLE_DRIVE_FOLDER_ID_HERE") {
-        await sock.sendMessage(chatId, {
-            text: `⚠️ *Google Drive not configured!*\n\nPlease set your Google Drive folder ID in the groups.js file.\n\nCreate a folder in Google Drive and replace:\n\`BULK_JOIN_FOLDER_ID\``,
-            edit: statusMsg.key
-        });
-        session.data.type = 'main_menu';
-        await showMainMenu(sock, chatId, sender, session, reply);
-        return;
-    }
     
     // Ensure all Drive files exist
     await ensureDriveFileExists(BULK_JOIN_FOLDER_ID, FAILED_LINKS_FILE);
