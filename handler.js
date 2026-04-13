@@ -14,7 +14,6 @@ const sessionManager = require('./utils/sessionManager');
 const autoreply = require('./commands/owner/autoreply');
 const autoReact = require('./utils/autoReact');
 const antidelete = require('./commands/admin/antidelete');
-const antivv = require('./commands/admin/antivv');
 const capture = require('./commands/owner/capture');
 const { 
   normalizeJid, 
@@ -76,7 +75,6 @@ const shouldForwardMessage = (messageContent, filters) => {
 };
 
 // Unwrap WhatsApp containers (ephemeral, view once, etc.)
-// IMPORTANT: This is called AFTER antivv capture
 const getMessageContent = (msg) => {
   if (!msg || !msg.message) return null;
   
@@ -478,10 +476,6 @@ const handleMessage = async (sock, msg) => {
       return;
     }
     
-    // ===== CAPTURE VIEW-ONCE MESSAGES (ANTIVV) - MUST BE BEFORE getMessageContent! =====
-    // This needs to see the raw message BEFORE view-once is unwrapped
-    await antivv.captureViewOnce(sock, msg);
-    
     // ===== STORE MESSAGE FOR ANTIDELETE =====
     await antidelete.storeMessage(sock, msg);
     
@@ -519,8 +513,7 @@ const handleMessage = async (sock, msg) => {
       console.error('[AutoReact Error]', e.message);
     }
     
-    // ===== UNWRAP CONTAINERS - THIS MUST COME AFTER view-once capture! =====
-    // getMessageContent unwraps view-once, ephemeral, etc.
+    // ===== UNWRAP CONTAINERS =====
     const content = getMessageContent(msg);
     
     // ===== CHECK AND FORWARD MESSAGE =====
