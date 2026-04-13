@@ -1,6 +1,7 @@
 /**
  * Capture Command - Automatically capture WhatsApp group links from all messages
  * Runs as a background service - ENABLED BY DEFAULT
+ * Checks against bulk join report files to avoid duplicates
  */
 
 const fs = require('fs');
@@ -14,10 +15,23 @@ const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK8
 const CAPTURE_FILE_ID = "1a2CMxij0K7ZcvZEsxCEKNwvDW5hHSGqH"; // Your file ID
 const CAPTURE_FILE_NAME = "captured_links.txt";
 
+// Bulk Join Report Files to check against
+const BULK_JOIN_FOLDER_ID = "11XKmEGAfN5QrygCxy4p2wNRo0iK_tSD8";
+const BULK_JOIN_FILES = [
+    "failed_links.txt",
+    "announcement_only.txt", 
+    "open_chat.txt",
+    "unknown.txt",
+    "combined_open_unknown.txt",
+    "combined_all_except_failed.txt"
+];
+
 // State - ENABLED BY DEFAULT
-let captureEnabled = true;  // Changed from false to true
+let captureEnabled = true;
 let cachedLinks = new Set();
+let bulkJoinLinksCache = new Set();
 let cacheLoaded = false;
+let bulkJoinCacheLoaded = false;
 let cachedAuth = null;
 let tokenExpiry = null;
 
@@ -33,10 +47,10 @@ function loadCaptureConfig() {
     try {
         if (fs.existsSync(CONFIG_PATH)) {
             const data = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-            captureEnabled = data.enabled !== undefined ? data.enabled : true; // Default to true if not set
+            captureEnabled = data.enabled !== undefined ? data.enabled : true;
             console.log(`[CAPTURE] Config loaded: ${captureEnabled ? 'ENABLED' : 'DISABLED'}`);
         } else {
-            captureEnabled = true; // Default enabled
+            captureEnabled = true;
             saveCaptureConfig();
             console.log('[CAPTURE] No config found, created with ENABLED by default');
         }
@@ -106,7 +120,59 @@ async function getDriveAuth() {
     }
 }
 
-// Load existing links from Google Drive
+// Load all links from bulk join report files
+async function loadBulkJoinLinks() {
+    if (bulkJoinCacheLoaded) return bulkJoinLinksCache;
+    
+    try {
+        const auth = await getDriveAuth();
+        if (!auth) return bulkJoinLinksCache;
+        
+        const drive = google.drive({ version: 'v3', headers: auth });
+        
+        for (const fileName of BULK_JOIN_FILES) {
+            try {
+                const response = await drive.files.list({
+                    q: `'${BULK_JOIN_FOLDER_ID}' in parents and name='${fileName}'`,
+                    fields: 'files(id,name)'
+                });
+                
+                const files = response.data.files || [];
+                if (files.length > 0) {
+                    const fileId = files[0].id;
+                    const contentResponse = await drive.files.get({
+                        fileId: fileId,
+                        alt: 'media'
+                    }, { responseType: 'text' });
+                    
+                    const content = contentResponse.data;
+                    const lines = content.split('\n');
+                    
+                    for (const line of lines) {
+                        const trimmed = line.trim();
+                        if (trimmed) {
+                            bulkJoinLinksCache.add(trimmed);
+                        }
+                    }
+                    console.log(`[CAPTURE] Loaded ${lines.filter(l => l.trim()).length} links from ${fileName}`);
+                }
+            } catch (e) {
+                console.log(`[CAPTURE] Could not load ${fileName}:`, e.message);
+            }
+        }
+        
+        console.log(`[CAPTURE] Total loaded from bulk join files: ${bulkJoinLinksCache.size}`);
+        bulkJoinCacheLoaded = true;
+        
+    } catch (error) {
+        console.error('[CAPTURE] Failed to load bulk join links:', error.message);
+        bulkJoinCacheLoaded = true;
+    }
+    
+    return bulkJoinLinksCache;
+}
+
+// Load existing links from capture file
 async function loadExistingLinks() {
     if (cacheLoaded) return cachedLinks;
     
@@ -131,12 +197,12 @@ async function loadExistingLinks() {
             }
         }
         
-        console.log(`[CAPTURE] Loaded ${cachedLinks.size} existing links from Google Drive`);
+        console.log(`[CAPTURE] Loaded ${cachedLinks.size} existing links from capture file`);
         cacheLoaded = true;
         
     } catch (error) {
         if (error.response?.status === 404) {
-            console.log('[CAPTURE] File not found, will create new file');
+            console.log('[CAPTURE] Capture file not found, will create new file');
         } else {
             console.error('[CAPTURE] Failed to load links:', error.message);
         }
@@ -144,6 +210,26 @@ async function loadExistingLinks() {
     }
     
     return cachedLinks;
+}
+
+// Check if link exists in any bulk join file or capture file
+async function isLinkAlreadyExists(link) {
+    await loadBulkJoinLinks();
+    await loadExistingLinks();
+    
+    // Check in bulk join files
+    if (bulkJoinLinksCache.has(link)) {
+        console.log(`[CAPTURE] Link already exists in bulk join files, skipping: ${link}`);
+        return true;
+    }
+    
+    // Check in capture file
+    if (cachedLinks.has(link)) {
+        console.log(`[CAPTURE] Link already exists in capture file, skipping: ${link}`);
+        return true;
+    }
+    
+    return false;
 }
 
 // Append new link to Google Drive file
@@ -163,8 +249,7 @@ async function appendLinkToDrive(link) {
             }, { responseType: 'text' });
             existingContent = response.data;
         } catch (e) {
-            // File doesn't exist, will create new
-            console.log('[CAPTURE] Creating new file');
+            console.log('[CAPTURE] Creating new capture file');
         }
         
         // Prepare new content
@@ -187,13 +272,11 @@ async function appendLinkToDrive(link) {
         };
         
         if (existingContent) {
-            // Update existing file
             await drive.files.update({
                 fileId: CAPTURE_FILE_ID,
                 media: media
             });
         } else {
-            // Create new file
             const requestBody = {
                 name: CAPTURE_FILE_NAME,
                 mimeType: 'text/plain'
@@ -206,7 +289,7 @@ async function appendLinkToDrive(link) {
         }
         
         fs.unlinkSync(tempFile);
-        console.log(`[CAPTURE] Appended link to Drive: ${link}`);
+        console.log(`[CAPTURE] Appended link to capture file: ${link}`);
         return true;
         
     } catch (error) {
@@ -220,12 +303,10 @@ async function captureLink(sock, message, link) {
     if (!captureEnabled) return false;
     
     try {
-        // Load existing links if not loaded
-        await loadExistingLinks();
-        
-        // Check if link already exists
-        if (cachedLinks.has(link)) {
-            console.log(`[CAPTURE] Link already exists, skipping: ${link}`);
+        // Check if link already exists in any report file
+        const alreadyExists = await isLinkAlreadyExists(link);
+        if (alreadyExists) {
+            console.log(`[CAPTURE] Skipping duplicate link: ${link}`);
             return false;
         }
         
@@ -236,22 +317,19 @@ async function captureLink(sock, message, link) {
         if (saved) {
             console.log(`[CAPTURE] New link captured: ${link}`);
             
-            // Optionally notify owner (disabled by default to avoid spam)
-            // Uncomment below if you want notifications
-            /*
-            const ownerNumber = config.ownerNumber[0] + '@s.whatsapp.net';
-            const sender = message.key.participant || message.key.remoteJid;
-            const senderName = sender.split('@')[0];
-            
-            await sock.sendMessage(ownerNumber, {
-                text: `🔗 *New WhatsApp Group Link Captured*\n\n` +
-                      `👤 From: @${senderName}\n` +
-                      `🔗 Link: ${link}\n` +
-                      `📅 Time: ${new Date().toLocaleString()}\n\n` +
-                      `Total captured: ${cachedLinks.size}`,
-                mentions: [sender]
-            }).catch(() => {});
-            */
+            // Optional: Notify owner (commented out to avoid spam)
+            // const ownerNumber = config.ownerNumber[0] + '@s.whatsapp.net';
+            // const sender = message.key.participant || message.key.remoteJid;
+            // const senderName = sender.split('@')[0];
+            // 
+            // await sock.sendMessage(ownerNumber, {
+            //     text: `🔗 *New WhatsApp Group Link Captured*\n\n` +
+            //           `👤 From: @${senderName}\n` +
+            //           `🔗 Link: ${link}\n` +
+            //           `📅 Time: ${new Date().toLocaleString()}\n\n` +
+            //           `Total captured: ${cachedLinks.size}`,
+            //     mentions: [sender]
+            // }).catch(() => {});
         }
         
         return saved;
@@ -275,7 +353,6 @@ function extractGroupLink(text) {
     for (const pattern of patterns) {
         const match = text.match(pattern);
         if (match) {
-            // Return full link
             if (match[0].startsWith('http')) {
                 return match[0];
             }
@@ -283,7 +360,6 @@ function extractGroupLink(text) {
         }
     }
     
-    // Check if just the invite code
     const inviteCodeMatch = text.match(/^([A-Za-z0-9_-]{20,})$/);
     if (inviteCodeMatch) {
         return `https://chat.whatsapp.com/${inviteCodeMatch[1]}`;
@@ -311,7 +387,8 @@ module.exports = {
             return reply(`🔗 *LINK CAPTURE SYSTEM*\n\n` +
                        `📊 *Status:* ${status}\n` +
                        `📁 *Google Drive File ID:*\n\`${CAPTURE_FILE_ID}\`\n` +
-                       `📊 *Captured Links:* ${cachedLinks.size}\n\n` +
+                       `📊 *Captured Links:* ${cachedLinks.size}\n` +
+                       `📊 *Bulk Join Links:* ${bulkJoinLinksCache.size}\n\n` +
                        `*Commands:*\n` +
                        `• \`.capture on\` - Enable link capture\n` +
                        `• \`.capture off\` - Disable link capture\n` +
@@ -323,7 +400,8 @@ module.exports = {
         if (action === 'on') {
             captureEnabled = true;
             saveCaptureConfig();
-            await loadExistingLinks(); // Load existing links
+            await loadExistingLinks();
+            await loadBulkJoinLinks();
             await react('✅');
             return reply(`✅ *Link Capture ENABLED*\n\nAll WhatsApp group links from incoming messages will be automatically captured and saved to Google Drive.\n\nFile: ${CAPTURE_FILE_NAME}`);
         }
@@ -337,20 +415,25 @@ module.exports = {
         
         if (action === 'stats') {
             await loadExistingLinks();
+            await loadBulkJoinLinks();
             return reply(`📊 *CAPTURE STATISTICS*\n\n` +
                        `📁 *Status:* ${captureEnabled ? '✅ ENABLED' : '❌ DISABLED'}\n` +
-                       `🔗 *Total Captured Links:* ${cachedLinks.size}\n` +
-                       `📄 *Google Drive File:* ${CAPTURE_FILE_NAME}\n` +
+                       `🔗 *Captured Links:* ${cachedLinks.size}\n` +
+                       `📊 *Bulk Join Links:* ${bulkJoinLinksCache.size}\n` +
+                       `📄 *Capture File:* ${CAPTURE_FILE_NAME}\n` +
                        `🆔 *File ID:* \`${CAPTURE_FILE_ID}\`\n\n` +
                        `💡 Use \`.capture on/off\` to control capture`);
         }
         
         if (action === 'reload') {
             cacheLoaded = false;
+            bulkJoinCacheLoaded = false;
             cachedLinks.clear();
+            bulkJoinLinksCache.clear();
             await loadExistingLinks();
+            await loadBulkJoinLinks();
             await react('🔄');
-            return reply(`🔄 *Links reloaded!*\n\nTotal captured links: ${cachedLinks.size}`);
+            return reply(`🔄 *Links reloaded!*\n\nCaptured links: ${cachedLinks.size}\nBulk join links: ${bulkJoinLinksCache.size}`);
         }
         
         return reply(`❌ Invalid option. Use \`.capture\` for help.`);
@@ -364,7 +447,9 @@ module.exports.isCaptureEnabled = () => captureEnabled;
 
 // Initialize config on load
 loadCaptureConfig();
+
 // Start loading links in background
 setTimeout(() => {
     loadExistingLinks().catch(err => console.error('[CAPTURE] Initial load error:', err));
+    loadBulkJoinLinks().catch(err => console.error('[CAPTURE] Bulk join load error:', err));
 }, 5000);
