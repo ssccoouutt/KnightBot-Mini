@@ -37,9 +37,9 @@ module.exports = {
     // Granular auto-react controls
     autoReactInPrivate: false,   // Enable auto-react in private chats
     autoReactInGroups: true,    // Enable auto-react in groups
-    autoReactSpecificGroups: ['120363408035540146@g.us'], // Array of specific group JIDs to enable auto-react (empty = all groups if autoReactInGroups is true)
+    autoReactSpecificGroups: ['120363420955143933@g.us'], // Array of specific group JIDs to enable auto-react (empty = all groups if autoReactInGroups is true)
     
-    autoReactEmojis: ['❤️','🔥','👌','💀','😁','✨','👍','🤨','😎','😂','🤝','💫'], // Default emojis for 'all' mode
+    autoReactEmojis: ['❤️','🔥','👌','💀','😁','✨','👍','🤨','😎','😯','🤝','💫'], // Default emojis for 'all' mode
     autoReactCommandEmoji: '⏳', // Emoji for command messages in 'bot' mode
     
     autoDownload: false,
