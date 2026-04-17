@@ -1,6 +1,6 @@
 /**
  * Ghibli Command - Convert images to Ghibli Studio art style using API
- * Uses remote API for image conversion
+ * Uses remote API for image conversion with long timeout support
  */
 
 const config = require('../../config');
@@ -23,12 +23,14 @@ const API_HEALTH_ENDPOINT = `${API_BASE_URL}/health`;
 
 // Store active conversions
 const activeConversions = new Map();
-const conversionQueue = new Map();
 
 // Check API health
 async function checkApiHealth() {
     try {
-        const response = await axios.get(API_HEALTH_ENDPOINT, { timeout: 10000 });
+        const response = await axios.get(API_HEALTH_ENDPOINT, { 
+            timeout: 10000,
+            headers: { 'ngrok-skip-browser-warning': 'true' }
+        });
         return response.data;
     } catch (error) {
         console.error('[GHIBLI] API health check failed:', error.message);
@@ -39,7 +41,10 @@ async function checkApiHealth() {
 // Check model status
 async function checkModelStatus() {
     try {
-        const response = await axios.get(API_STATUS_ENDPOINT, { timeout: 10000 });
+        const response = await axios.get(API_STATUS_ENDPOINT, { 
+            timeout: 10000,
+            headers: { 'ngrok-skip-browser-warning': 'true' }
+        });
         return response.data;
     } catch (error) {
         console.error('[GHIBLI] Model status check failed:', error.message);
@@ -89,8 +94,8 @@ async function downloadImage(sock, msg) {
     }
 }
 
-// Convert image using API
-async function convertWithApi(imageBuffer, strength = 0.6, progressCallback) {
+// Convert image using API with long timeout
+async function convertWithApi(imageBuffer, strength = 0.6, updateStatus) {
     try {
         const formData = new FormData();
         formData.append('image', imageBuffer, {
@@ -100,16 +105,18 @@ async function convertWithApi(imageBuffer, strength = 0.6, progressCallback) {
         formData.append('strength', strength.toString());
         formData.append('return_base64', 'true');
         
-        if (progressCallback) {
-            await progressCallback('📤 Uploading image to API...');
+        if (updateStatus) {
+            await updateStatus('📤 Uploading image to API...');
         }
         
+        // Create a promise that resolves when the request completes
+        // Use a very long timeout (20 minutes = 1200000 ms)
         const response = await axios.post(API_GENERATE_ENDPOINT, formData, {
             headers: {
                 ...formData.getHeaders(),
                 'ngrok-skip-browser-warning': 'true'
             },
-            timeout: 900000, // 15 minutes timeout
+            timeout: 1200000, // 20 minutes timeout
             maxContentLength: Infinity,
             maxBodyLength: Infinity
         });
@@ -129,9 +136,55 @@ async function convertWithApi(imageBuffer, strength = 0.6, progressCallback) {
         
     } catch (error) {
         console.error('[GHIBLI] API error:', error.message);
+        if (error.code === 'ECONNABORTED') {
+            throw new Error('Request timeout - API took too long to respond. The image might still be processing. Check API logs.');
+        }
         if (error.response) {
             console.error('[GHIBLI] Response data:', error.response.data);
             throw new Error(error.response.data?.error || error.message);
+        }
+        throw error;
+    }
+}
+
+// Poll for result with job ID (if API supports it)
+// Alternative approach: Send message and return immediately, then check later
+async function convertWithPolling(imageBuffer, strength = 0.6, updateStatus, sock, from, sender) {
+    try {
+        const formData = new FormData();
+        formData.append('image', imageBuffer, {
+            filename: 'image.jpg',
+            contentType: 'image/jpeg'
+        });
+        formData.append('strength', strength.toString());
+        formData.append('return_base64', 'true');
+        
+        if (updateStatus) {
+            await updateStatus('📤 Uploading image to API...');
+        }
+        
+        // Send request with longer timeout
+        const response = await axios.post(API_GENERATE_ENDPOINT, formData, {
+            headers: {
+                ...formData.getHeaders(),
+                'ngrok-skip-browser-warning': 'true'
+            },
+            timeout: 1200000, // 20 minutes
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity
+        });
+        
+        return response.data;
+        
+    } catch (error) {
+        if (error.code === 'ECONNABORTED') {
+            // If timeout, the API might still be processing
+            // Keep the session alive and wait
+            if (updateStatus) {
+                await updateStatus('⏳ API is still processing your image... This may take several more minutes.');
+            }
+            // Return a special status indicating pending
+            return { success: false, pending: true, message: 'Image still processing' };
         }
         throw error;
     }
@@ -197,23 +250,46 @@ module.exports = {
             activeConversions.set(sender, true);
             
             await react('🎨');
+            
+            // Send initial message - this will be updated throughout the process
             const processingMsg = await reply(`🎨 *Converting to Ghibli Style...*\n\n` +
                                               `🎭 Strength: ${strength}\n` +
-                                              `⏳ This may take 10-15 minutes...\n\n` +
+                                              `⏳ This may take 10-15 minutes...\n` +
+                                              `🔄 Waiting for API response...\n\n` +
                                               `> *Powered by Stable Diffusion & Ghibli Diffusion*`);
             
+            // Send a keep-alive message that will be updated
+            let lastUpdate = Date.now();
+            let keepAliveInterval = setInterval(async () => {
+                if (activeConversions.has(sender) && Date.now() - lastUpdate > 30000) {
+                    try {
+                        await sock.sendMessage(from, {
+                            text: `⏳ *Still processing...*\n\nYour image is still being converted.\nEstimated time remaining: ~${Math.max(5, Math.floor((Date.now() - lastUpdate) / 60000))} minutes\n\nPlease wait...`,
+                            edit: processingMsg.key
+                        });
+                        lastUpdate = Date.now();
+                    } catch (e) {}
+                }
+            }, 60000);
+            
             try {
-                // Convert image
+                // Convert image with longer timeout
                 const result = await convertWithApi(imageBuffer, strength, async (status) => {
+                    lastUpdate = Date.now();
                     await sock.sendMessage(from, {
-                        text: status,
+                        text: `🎨 *Converting to Ghibli Style...*\n\n` +
+                              `🎭 Strength: ${strength}\n` +
+                              `${status}\n\n` +
+                              `> *Powered by Stable Diffusion & Ghibli Diffusion*`,
                         edit: processingMsg.key
                     });
                 });
                 
+                clearInterval(keepAliveInterval);
+                
                 if (result.success && result.imageBase64) {
                     // Convert base64 to buffer
-                    const imageBuffer = Buffer.from(result.imageBase64, 'base64');
+                    const resultBuffer = Buffer.from(result.imageBase64, 'base64');
                     
                     const caption = `🎨 *Ghibli Style Converted!*\n\n` +
                                    `✨ *Strength:* ${strength}\n` +
@@ -223,7 +299,7 @@ module.exports = {
                                    `> *Powered by Stable Diffusion & Ghibli Diffusion*`;
                     
                     await sock.sendMessage(from, {
-                        image: imageBuffer,
+                        image: resultBuffer,
                         caption: caption
                     });
                     
@@ -238,9 +314,21 @@ module.exports = {
                 }
                 
             } catch (error) {
+                clearInterval(keepAliveInterval);
                 console.error('[GHIBLI] Error:', error);
+                
+                let errorMsg = `❌ *Conversion Failed*\n\nError: ${error.message}\n\n`;
+                
+                if (error.message.includes('timeout')) {
+                    errorMsg += `The API is taking longer than expected.\nThe image might still be processing on the server.\n\nTry checking the API logs or try again with a smaller image.`;
+                } else if (error.message.includes('503')) {
+                    errorMsg += `The API server is overloaded.\nPlease try again in a few minutes.`;
+                } else {
+                    errorMsg += `Possible issues:\n• API server might be overloaded\n• Image format not supported\n• Try again with a different image`;
+                }
+                
                 await sock.sendMessage(from, {
-                    text: `❌ *Conversion Failed*\n\nError: ${error.message}\n\nPossible issues:\n• API server might be overloaded\n• Image format not supported\n• Try again with a different image`,
+                    text: errorMsg,
                     edit: processingMsg.key
                 });
                 await react('❌');
@@ -251,7 +339,6 @@ module.exports = {
         }
         
         // If no image, create session to wait for image
-        // Clear any existing sessions
         const existingSessions = sessionManager.getUserSessions(sender, from);
         for (const sess of existingSessions) {
             if (sess.command === 'ghibli') {
@@ -376,22 +463,42 @@ module.exports = {
         activeConversions.set(sender, true);
         
         await react('🎨');
+        
         const processingMsg = await reply(`🎨 *Converting to Ghibli Style...*\n\n` +
                                           `🎭 Strength: ${session.data.strength}\n` +
-                                          `⏳ This may take 10-15 minutes...\n\n` +
+                                          `⏳ This may take 10-15 minutes...\n` +
+                                          `🔄 Waiting for API response...\n\n` +
                                           `> *Powered by Stable Diffusion & Ghibli Diffusion*`);
         
+        // Keep-alive interval
+        let lastUpdate = Date.now();
+        let keepAliveInterval = setInterval(async () => {
+            if (activeConversions.has(sender) && Date.now() - lastUpdate > 30000) {
+                try {
+                    await sock.sendMessage(from, {
+                        text: `⏳ *Still processing...*\n\nYour image is still being converted.\nStrength: ${session.data.strength}\n\nPlease wait...`,
+                        edit: processingMsg.key
+                    });
+                    lastUpdate = Date.now();
+                } catch (e) {}
+            }
+        }, 60000);
+        
         try {
-            // Convert image
             const result = await convertWithApi(imageBuffer, session.data.strength, async (status) => {
+                lastUpdate = Date.now();
                 await sock.sendMessage(from, {
-                    text: status,
+                    text: `🎨 *Converting to Ghibli Style...*\n\n` +
+                          `🎭 Strength: ${session.data.strength}\n` +
+                          `${status}\n\n` +
+                          `> *Powered by Stable Diffusion & Ghibli Diffusion*`,
                     edit: processingMsg.key
                 });
             });
             
+            clearInterval(keepAliveInterval);
+            
             if (result.success && result.imageBase64) {
-                // Convert base64 to buffer
                 const resultBuffer = Buffer.from(result.imageBase64, 'base64');
                 
                 const caption = `🎨 *Ghibli Style Converted!*\n\n` +
@@ -417,9 +524,21 @@ module.exports = {
             }
             
         } catch (error) {
+            clearInterval(keepAliveInterval);
             console.error('[GHIBLI] Error:', error);
+            
+            let errorMsg = `❌ *Conversion Failed*\n\nError: ${error.message}\n\n`;
+            
+            if (error.message.includes('timeout')) {
+                errorMsg += `The API is taking longer than expected.\nThe image might still be processing on the server.\n\nCheck the API logs for progress.\n\nYou can try again with a smaller image.`;
+            } else if (error.message.includes('503')) {
+                errorMsg += `The API server is overloaded.\nPlease try again in a few minutes.`;
+            } else {
+                errorMsg += `Possible issues:\n• API server might be overloaded\n• Image format not supported\n• Try again with a different image`;
+            }
+            
             await sock.sendMessage(from, {
-                text: `❌ *Conversion Failed*\n\nError: ${error.message}\n\nPossible issues:\n• API server might be overloaded\n• Image format not supported\n• Try again with a different image`,
+                text: errorMsg,
                 edit: processingMsg.key
             });
             await react('❌');
