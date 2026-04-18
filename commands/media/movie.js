@@ -20,7 +20,7 @@ const { sendButtons, sendInteractiveMessage } = giftedBtns;
 const FORCE_AI_MODE = true;
 
 // Cineverse base URL
-const CINEVERSE_BASE = "https://cineverse.com.ng";
+const CINEVERSE_BASE = "https://cinverse.com.ng";
 
 // Google Drive Configuration
 const DRIVE_FOLDER_ID = '1vCEe1RQPN3tmBg5VZ8ojQnYrjdJ6K61v'; // Moviebox folder
