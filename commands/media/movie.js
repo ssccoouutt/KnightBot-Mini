@@ -251,41 +251,43 @@ async function getDownloadOptions(page, movieUrl) {
     await page.goto(movieUrl, { waitUntil: 'networkidle', timeout: 30000 });
     await page.waitForTimeout(3000);
     
-    // Click Download button
-    const buttons = await page.$$('button');
-    for (const btn of buttons) {
-        const text = await btn.innerText();
-        if (text && text.includes('Download')) {
-            await btn.click();
-            break;
-        }
-    }
+    // Click Download button - Use evaluate to bypass "enabled" check if it's stuck
+    await page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const btn = buttons.find(b => b.innerText.includes('Download'));
+        if (btn) btn.click();
+    });
     
     await page.waitForTimeout(3000);
     
-    // Click Video tab
-    const videoTab = await page.$('button:has-text("Video")');
-    if (videoTab) {
-        await videoTab.click();
-        await page.waitForTimeout(1000);
-    }
+    // Click Video tab - Use evaluate to bypass "enabled" check
+    await page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const btn = buttons.find(b => b.innerText.includes('Video'));
+        if (btn) btn.click();
+    });
+    
+    await page.waitForTimeout(3000);
     
     // Find quality buttons
     const downloadButtons = await page.$$('button:has-text("Download")');
     
     const qualities = [];
     for (const btn of downloadButtons) {
-        const parent = await btn.evaluateHandle(el => {
+        const info = await btn.evaluate(el => {
             let curr = el;
-            while (curr && curr.parentElement && !curr.innerText.includes('p')) {
+            let text = "";
+            for(let i=0; i<5; i++) {
+                if (!curr) break;
+                text += " " + curr.innerText;
+                if (text.includes('p')) break;
                 curr = curr.parentElement;
             }
-            return curr;
+            return text;
         });
         
-        const parentText = await parent.innerText();
-        const qualityMatch = parentText.match(/(\d{3,4}p)/i);
-        const sizeMatch = parentText.match(/([\d.]+\s*(?:MB|GB))/i);
+        const qualityMatch = info.match(/(\d{3,4}p)/i);
+        const sizeMatch = info.match(/([\d.]+\s*(?:MB|GB))/i);
         
         if (qualityMatch) {
             qualities.push({
@@ -296,35 +298,62 @@ async function getDownloadOptions(page, movieUrl) {
         }
     }
     
+    // Fallback: If no quality matched but we have download buttons, take the last one
+    if (qualities.length === 0 && downloadButtons.length > 0) {
+        qualities.push({
+            quality: "Original",
+            size: "Unknown",
+            button: downloadButtons[downloadButtons.length - 1]
+        });
+    }
+    
     return qualities;
 }
 
 async function getDownloadUrl(page, qualityInfo) {
     const button = qualityInfo.button;
     
-    // Listen for requests that contain 'download' to capture the correct URL
+    // Listen for requests and responses to capture the correct URL
     let capturedUrl = null;
     const requestHandler = (request) => {
         const url = request.url();
-        if (url.includes('download') && (url.includes('id=') || url.includes('url='))) {
+        if (url.startsWith('data:')) return;
+        
+        const isDownload = url.includes('download') || 
+                           url.match(/\.(mp4|mkv|mov|avi|m3u8)(\?|$)/i) || 
+                           url.includes('get_download_url') || 
+                           url.includes('storage') ||
+                           url.includes('stream') ||
+                           url.includes('file');
+        
+        if (isDownload && !url.includes('google-analytics') && !url.includes('facebook')) {
             capturedUrl = url;
+        }
+    };
+
+    const responseHandler = (response) => {
+        const headers = response.headers();
+        if (headers['content-disposition']?.includes('attachment') || headers['content-type']?.includes('video/')) {
+            capturedUrl = response.url();
         }
     };
     
     page.on('request', requestHandler);
+    page.on('response', responseHandler);
     
-    await page.evaluate(async (buttonElement) => {
-        buttonElement.click();
+    await page.evaluate((btn) => {
+        btn.click();
     }, button);
     
-    // Wait for the request to be captured
+    // Wait for the request to be captured (up to 30 seconds)
     let count = 0;
-    while (!capturedUrl && count < 50) {
+    while (!capturedUrl && count < 300) {
         await page.waitForTimeout(100);
         count++;
     }
     
     page.off('request', requestHandler);
+    page.off('response', responseHandler);
     
     return capturedUrl;
 }
