@@ -1,26 +1,21 @@
 /**
  * Movie Downloader - Search, download movie and upload to Google Drive
  * 
- * FIXED ISSUES:
- * 1. Search Results: Now correctly extracts movie titles instead of just showing 'Movie'.
- * 2. 0 MB Download: Improved download URL capture and added validation for content-length.
- * 3. Fixed "element is not enabled" error with full debugging.
+ * FIXED: Bypasses anti-bot protection using stealth mode and direct API calls
  */
 
 const { chromium } = require('playwright');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const FormData = require('form-data');
 const config = require('../../config');
 const sessionManager = require('../../utils/sessionManager');
 const giftedBtns = require('gifted-btns');
-const { sendButtons, sendInteractiveMessage } = giftedBtns;
+const { sendButtons } = giftedBtns;
 
-// Force AI mode ON for gifted buttons
 const FORCE_AI_MODE = true;
 
-// Cineverse base URL (updated to the working domain)
+// Use the correct base URL from your working logs
 const CINEVERSE_BASE = "https://cinverse.com.ng";
 
 // Google Drive Configuration
@@ -33,25 +28,51 @@ let cachedToken = null;
 let tokenExpiry = null;
 let browserInstance = null;
 
-// Debug logger
-function debugLog(step, data = '') {
-    const timestamp = new Date().toISOString().split('T')[1].slice(0, 12);
-    console.log(`[DEBUG ${timestamp}] [MOVIE] ${step}: ${typeof data === 'object' ? JSON.stringify(data, null, 2) : data}`);
-}
-
+// Stealth browser with real user agent
 async function getBrowser() {
     if (!browserInstance) {
-        debugLog('Launching browser');
+        console.log('[MOVIE] Launching stealth browser...');
         browserInstance = await chromium.launch({
             headless: true,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage'
+                '--disable-dev-shm-usage',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-web-security',
+                '--disable-features=IsolateOrigins,site-per-process'
             ]
         });
     }
     return browserInstance;
+}
+
+// Create stealth page with realistic viewport
+async function createStealthPage(browser) {
+    const page = await browser.newPage();
+    
+    // Set realistic viewport
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    
+    // Set realistic user agent
+    await page.setExtraHTTPHeaders({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
+    });
+    
+    // Remove webdriver痕迹
+    await page.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+    });
+    
+    return page;
 }
 
 // ==================== GOOGLE DRIVE FUNCTIONS ====================
@@ -62,7 +83,7 @@ async function getAccessToken() {
             return cachedToken;
         }
         
-        debugLog('Fetching Google Drive token');
+        console.log('[MOVIE] Fetching Google Drive token...');
         
         const tokenResponse = await axios({
             method: 'GET',
@@ -88,7 +109,7 @@ async function getAccessToken() {
         
         const expiryDate = new Date(tokenData.expiry);
         if (new Date() > expiryDate) {
-            debugLog('Token expired, refreshing');
+            console.log('[MOVIE] Token expired, refreshing...');
             const refreshData = {
                 client_id: tokenData.client_id,
                 client_secret: tokenData.client_secret,
@@ -111,19 +132,16 @@ async function getAccessToken() {
     }
 }
 
-async function uploadToDrive(filePath, fileName, onProgress, progressMsgKey) {
+async function uploadToDrive(filePath, fileName, onProgress) {
     try {
         const token = await getAccessToken();
         if (!token) throw new Error('No access token');
         
-        debugLog(`Uploading ${fileName} to Google Drive`);
+        console.log(`[MOVIE] Uploading ${fileName} to Google Drive...`);
         
         const stats = fs.statSync(filePath);
-        if (stats.size === 0) {
-            throw new Error('Cannot upload an empty file (0 bytes)');
-        }
+        if (stats.size === 0) throw new Error('Cannot upload an empty file (0 bytes)');
 
-        const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
         const fileSizeBytes = stats.size;
         
         const metadata = {
@@ -145,11 +163,7 @@ async function uploadToDrive(filePath, fileName, onProgress, progressMsgKey) {
         });
         
         const uploadUrl = startResponse.headers.location;
-        if (!uploadUrl) {
-            throw new Error('Failed to get upload URL');
-        }
-        
-        debugLog('Resumable upload URL obtained');
+        if (!uploadUrl) throw new Error('Failed to get upload URL');
         
         const fileStream = fs.createReadStream(filePath);
         
@@ -167,7 +181,7 @@ async function uploadToDrive(filePath, fileName, onProgress, progressMsgKey) {
             onUploadProgress: (progressEvent) => {
                 if (onProgress && progressEvent.total) {
                     const percent = (progressEvent.loaded / progressEvent.total * 100).toFixed(1);
-                    onProgress(percent, progressEvent.loaded, progressEvent.total, progressMsgKey);
+                    onProgress(percent);
                 }
             }
         });
@@ -182,15 +196,13 @@ async function uploadToDrive(filePath, fileName, onProgress, progressMsgKey) {
                 headers: { 'Authorization': `Bearer ${token}` }
             });
         } catch (e) {
-            debugLog('Could not set public permission');
+            console.log('[MOVIE] Could not set public permission');
         }
         
         const directLink = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
         const viewLink = `https://drive.google.com/file/d/${fileId}/view?usp=drivesdk`;
         
-        debugLog(`Upload complete: ${fileSizeMB} MB`);
-        
-        return { directLink, viewLink, fileId, size: fileSizeMB };
+        return { directLink, viewLink, fileId, size: (stats.size / (1024 * 1024)).toFixed(2) };
         
     } catch (error) {
         console.error('[MOVIE] Upload to Drive failed:', error.message);
@@ -198,46 +210,50 @@ async function uploadToDrive(filePath, fileName, onProgress, progressMsgKey) {
     }
 }
 
-// ==================== MOVIE FUNCTIONS WITH FULL DEBUGGING ====================
+// ==================== MOVIE FUNCTIONS ====================
 
 async function searchMovie(page, movieName) {
     const searchUrl = `${CINEVERSE_BASE}/search?q=${encodeURIComponent(movieName)}`;
-    debugLog('Searching URL', searchUrl);
+    console.log(`[MOVIE] Searching: ${searchUrl}`);
     
-    await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(3000);
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(5000);
     
-    // Take screenshot for debugging
-    await page.screenshot({ path: `/tmp/search_${Date.now()}.png` }).catch(() => {});
+    // Try to wait for results to load
+    try {
+        await page.waitForSelector('a[href*="/movie/"]', { timeout: 10000 });
+    } catch (e) {
+        console.log('[MOVIE] No movie links found');
+    }
     
     const results = await page.evaluate(() => {
         const results = [];
-        const links = document.querySelectorAll('a');
+        const links = document.querySelectorAll('a[href*="/movie/"]');
+        
         for (let link of links) {
             const text = link.innerText.trim();
             const href = link.href;
-            if (text && text.length > 3 && href && (href.includes('/movie/') || href.includes('/tv/'))) {
-                const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-                let year = '', rating = '', title = '';
+            
+            if (text && text.length > 3 && href) {
+                // Extract year from text
+                const yearMatch = text.match(/\b(19|20)\d{2}\b/);
+                const year = yearMatch ? yearMatch[0] : '';
                 
-                for (let line of lines) {
-                    if (line.match(/^\d{4}$/)) year = line;
-                    else if (line.match(/^\d\.\d$/)) rating = line;
-                    else if (line.toLowerCase() !== 'movie' && line.length > title.length) {
-                        title = line;
-                    }
+                // Clean title (remove year and extra spaces)
+                let title = text.replace(/\b(19|20)\d{2}\b/, '').trim();
+                title = title.split('\n')[0].trim();
+                
+                if (title && title.length > 2 && title.toLowerCase() !== 'movie') {
+                    results.push({
+                        title: title,
+                        year: year,
+                        url: href
+                    });
                 }
-                
-                if (!title) title = lines[lines.length - 1] || text;
-
-                results.push({
-                    title: title,
-                    year: year,
-                    rating: rating,
-                    url: href
-                });
             }
         }
+        
+        // Remove duplicates
         const unique = [];
         const seen = new Set();
         for (let r of results) {
@@ -246,281 +262,80 @@ async function searchMovie(page, movieName) {
                 unique.push(r);
             }
         }
-        return unique;
+        
+        return unique.slice(0, 10);
     });
     
-    debugLog(`Found ${results.length} results`);
+    console.log(`[MOVIE] Found ${results.length} results`);
     return results;
 }
 
-async function getDownloadOptions(page, movieUrl) {
-    debugLog('Getting download options for:', movieUrl);
+async function getDirectVideoUrl(page, movieUrl) {
+    console.log(`[MOVIE] Extracting video URL from: ${movieUrl}`);
     
-    // Navigate to movie page
-    await page.goto(movieUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.goto(movieUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(5000);
     
-    // Take screenshot after page load
-    const screenshotPath = `/tmp/movie_page_${Date.now()}.png`;
-    await page.screenshot({ path: screenshotPath }).catch(() => {});
-    debugLog('Screenshot saved to', screenshotPath);
+    // Try multiple methods to get video URL
     
-    // Get page HTML for debugging
-    const pageTitle = await page.title();
-    debugLog('Page title', pageTitle);
-    
-    // Try multiple strategies to get download links
-    
-    // STRATEGY 1: Look for direct download links first
-    debugLog('Strategy 1: Looking for direct download links');
-    const directLinks = await page.evaluate(() => {
-        const links = [];
-        // Look for any link containing download, drive, or stream
-        const allLinks = document.querySelectorAll('a[href*="download"], a[href*="drive.google"], a[href*="usercontent"], a[href*="googledrive"]');
-        allLinks.forEach(link => {
-            const href = link.href;
-            const text = link.innerText;
-            links.push({ href, text });
-        });
-        return links;
-    });
-    
-    if (directLinks.length > 0) {
-        debugLog(`Found ${directLinks.length} direct links`, directLinks);
-        const qualities = [];
-        for (const link of directLinks) {
-            let quality = 'Unknown';
-            let size = 'Unknown';
-            
-            // Try to extract quality from link text or surrounding elements
-            if (link.text.match(/\d{3,4}p/i)) {
-                quality = link.text.match(/\d{3,4}p/i)[0];
-            }
-            if (link.text.match(/[\d.]+\s*(?:MB|GB)/i)) {
-                size = link.text.match(/[\d.]+\s*(?:MB|GB)/i)[0];
-            }
-            
-            qualities.push({
-                quality: quality,
-                size: size,
-                url: link.href,
-                isDirect: true
-            });
-        }
-        if (qualities.length > 0) {
-            debugLog('Returning direct links as quality options');
-            return qualities;
-        }
-    }
-    
-    // STRATEGY 2: Look for and click Download button (without waiting for Video tab)
-    debugLog('Strategy 2: Looking for Download button');
-    
-    // Find all buttons
-    const allButtons = await page.$$eval('button, a[role="button"], div[role="button"]', btns => {
-        return btns.map(btn => ({
-            text: btn.innerText?.trim() || '',
-            className: btn.className,
-            id: btn.id,
-            disabled: btn.disabled,
-            tagName: btn.tagName
-        }));
-    });
-    
-    debugLog(`Found ${allButtons.length} buttons/clickable elements`);
-    debugLog('First 10 buttons', allButtons.slice(0, 10));
-    
-    // Try to find any button with Download text (case insensitive)
-    let downloadBtn = null;
-    for (const btn of allButtons) {
-        if (btn.text.toLowerCase().includes('download')) {
-            debugLog(`Found potential download button:`, btn);
-            downloadBtn = await page.$(`button:has-text("${btn.text}")`);
-            if (downloadBtn) break;
-        }
-    }
-    
-    if (!downloadBtn) {
-        // Try alternative selector
-        downloadBtn = await page.$('button:has-text("Download"), a:has-text("Download")');
-    }
-    
-    if (downloadBtn) {
-        debugLog('Clicking download button');
-        try {
-            // Remove disabled attribute if present
-            await page.evaluate((btn) => {
-                btn.removeAttribute('disabled');
-                btn.style.pointerEvents = 'auto';
-            }, downloadBtn);
-            await downloadBtn.click({ force: true });
-            debugLog('Download button clicked');
-            await page.waitForTimeout(3000);
-        } catch (err) {
-            debugLog('Failed to click download button', err.message);
-        }
-    }
-    
-    // STRATEGY 3: Look for quality buttons/links in the entire page
-    debugLog('Strategy 3: Looking for quality options');
-    
-    // Wait a bit for any dynamic content
-    await page.waitForTimeout(2000);
-    
-    const qualityOptions = await page.evaluate(() => {
-        const qualities = [];
-        
-        // Look for elements containing quality indicators
-        const qualityPatterns = ['1080p', '720p', '480p', '360p', '4K', '2160p', '1440p'];
-        const sizePattern = /[\d.]+(?:\.\d+)?\s*(?:MB|GB)/i;
-        
-        // Check all elements
-        const allElements = document.querySelectorAll('*');
-        for (const el of allElements) {
-            const text = el.innerText || '';
-            if (!text) continue;
-            
-            let foundQuality = null;
-            for (const q of qualityPatterns) {
-                if (text.toLowerCase().includes(q.toLowerCase())) {
-                    foundQuality = q;
-                    break;
-                }
-            }
-            
-            if (foundQuality) {
-                const sizeMatch = text.match(sizePattern);
-                const size = sizeMatch ? sizeMatch[0] : 'Unknown';
-                
-                // Check if this element or its children contain a link/button
-                let clickable = el.querySelector('a, button');
-                if (!clickable && (el.tagName === 'A' || el.tagName === 'BUTTON')) {
-                    clickable = el;
-                }
-                
-                if (clickable) {
-                    qualities.push({
-                        quality: foundQuality,
-                        size: size,
-                        element: clickable,
-                        text: text.substring(0, 100)
-                    });
-                }
-            }
-        }
-        
-        return qualities;
-    });
-    
-    debugLog(`Found ${qualityOptions.length} quality options via text search`);
-    
-    if (qualityOptions.length > 0) {
-        // Convert to our format
-        const qualities = [];
-        for (let i = 0; i < qualityOptions.length; i++) {
-            const q = qualityOptions[i];
-            qualities.push({
-                quality: q.quality,
-                size: q.size,
-                selector: q.element,
-                text: q.text
-            });
-        }
-        return qualities;
-    }
-    
-    // STRATEGY 4: Look for server/storage links
-    debugLog('Strategy 4: Looking for server/storage links');
-    
-    const serverLinks = await page.evaluate(() => {
-        const links = [];
-        const allLinks = document.querySelectorAll('a[href*="upstream"], a[href*="storage"], a[href*="cdn"], a[href*="video"]');
-        allLinks.forEach(link => {
-            links.push({
-                href: link.href,
-                text: link.innerText
-            });
-        });
-        return links;
-    });
-    
-    if (serverLinks.length > 0) {
-        debugLog(`Found ${serverLinks.length} server links`);
-        const qualities = serverLinks.map((link, idx) => ({
-            quality: `Option ${idx + 1}`,
-            size: 'Unknown',
-            url: link.href,
-            isDirect: true
-        }));
-        return qualities;
-    }
-    
-    // If all strategies fail, return empty array
-    debugLog('No quality options found with any strategy');
-    return [];
-}
-
-async function getDownloadUrl(page, qualityInfo) {
-    debugLog('Getting download URL for quality:', qualityInfo.quality);
-    
-    // If we have a direct URL
-    if (qualityInfo.isDirect && qualityInfo.url) {
-        debugLog('Using direct URL:', qualityInfo.url);
-        return qualityInfo.url;
-    }
-    
-    // If we have a selector/element
-    if (qualityInfo.selector) {
-        debugLog('Clicking on element with text:', qualityInfo.text);
-        
-        try {
-            // Try to find and click the element
-            const elementHandle = await page.evaluateHandle((selector) => {
-                // Find element by text content
-                const elements = Array.from(document.querySelectorAll('a, button, div[role="button"]'));
-                for (const el of elements) {
-                    if (el.innerText?.includes(selector.quality)) {
-                        return el;
-                    }
-                }
-                return null;
-            }, qualityInfo);
-            
-            if (elementHandle) {
-                // Setup request capture
-                const requestPromise = page.waitForRequest(
-                    req => req.url().includes('download') || req.url().includes('drive') || req.url().includes('usercontent'),
-                    { timeout: 15000 }
-                ).catch(() => null);
-                
-                await elementHandle.click({ force: true });
-                const request = await requestPromise;
-                if (request) {
-                    debugLog('Captured download URL from click:', request.url());
-                    return request.url();
-                }
-            }
-        } catch (err) {
-            debugLog('Error clicking element:', err.message);
-        }
-    }
-    
-    // Try to extract from page source
-    debugLog('Trying to extract download URL from page source');
-    const extractedUrl = await page.evaluate(() => {
-        // Check for video sources
+    // Method 1: Check for video element source
+    const videoUrl = await page.evaluate(() => {
+        // Check video tag
         const video = document.querySelector('video');
-        if (video && video.src) return video.src;
+        if (video && video.src && video.src.startsWith('http')) {
+            return video.src;
+        }
         
-        // Check for iframes
+        // Check source tags
+        const source = document.querySelector('source');
+        if (source && source.src && source.src.startsWith('http')) {
+            return source.src;
+        }
+        
+        // Check iframe embeds
         const iframe = document.querySelector('iframe');
-        if (iframe && iframe.src && (iframe.src.includes('drive') || iframe.src.includes('download'))) {
+        if (iframe && iframe.src) {
             return iframe.src;
         }
         
-        // Check all scripts for URL patterns
+        return null;
+    });
+    
+    if (videoUrl && videoUrl.includes('http')) {
+        console.log(`[MOVIE] Found video URL: ${videoUrl.substring(0, 100)}`);
+        return videoUrl;
+    }
+    
+    // Method 2: Look for download links in the page
+    const downloadLinks = await page.evaluate(() => {
+        const links = [];
+        const patterns = ['download', 'drive.google', 'usercontent', 'googledrive', 'mega', 'mediafire'];
+        
+        document.querySelectorAll('a').forEach(link => {
+            const href = link.href;
+            const text = link.innerText.toLowerCase();
+            
+            for (const pattern of patterns) {
+                if (href.includes(pattern) || text.includes(pattern)) {
+                    links.push(href);
+                    break;
+                }
+            }
+        });
+        
+        return links;
+    });
+    
+    if (downloadLinks.length > 0) {
+        console.log(`[MOVIE] Found download links:`, downloadLinks);
+        return downloadLinks[0];
+    }
+    
+    // Method 3: Extract from script tags (for embedded JSON data)
+    const scriptUrl = await page.evaluate(() => {
         const scripts = document.querySelectorAll('script');
-        const urlPattern = /(https?:\/\/[^\s"'<>]+(?:drive|download|usercontent|googledrive)[^\s"'<>]+)/gi;
+        const urlPattern = /(https?:\/\/[^\s"'<>]+\.(?:mp4|m3u8|mkv|avi)[^\s"'<>]*)/gi;
+        
         for (const script of scripts) {
             const content = script.textContent;
             if (content) {
@@ -530,20 +345,20 @@ async function getDownloadUrl(page, qualityInfo) {
                 }
             }
         }
-        
         return null;
     });
     
-    if (extractedUrl) {
-        debugLog('Extracted URL from page:', extractedUrl);
-        return extractedUrl;
+    if (scriptUrl) {
+        console.log(`[MOVIE] Found video URL in script: ${scriptUrl}`);
+        return scriptUrl;
     }
     
-    throw new Error('Could not find download URL for ' + qualityInfo.quality);
+    console.log('[MOVIE] No video URL found');
+    return null;
 }
 
-async function downloadFile(url, filepath, onProgress, progressMsgKey, sock, from) {
-    debugLog('Downloading from URL:', url.substring(0, 100));
+async function downloadFile(url, filepath, onProgress, sock, from, progressMsgKey) {
+    console.log(`[MOVIE] Downloading from: ${url.substring(0, 100)}`);
     
     const response = await axios({
         method: 'GET',
@@ -551,7 +366,7 @@ async function downloadFile(url, filepath, onProgress, progressMsgKey, sock, fro
         responseType: 'stream',
         timeout: 600000,
         headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Referer': CINEVERSE_BASE
         }
     });
@@ -559,10 +374,10 @@ async function downloadFile(url, filepath, onProgress, progressMsgKey, sock, fro
     const totalLength = parseInt(response.headers['content-length'], 10);
     
     if (isNaN(totalLength) || totalLength <= 0) {
-        throw new Error('Invalid file size received from server (0 MB)');
+        throw new Error('Invalid file size received from server');
     }
-
-    debugLog(`File size: ${(totalLength / 1024 / 1024).toFixed(2)} MB`);
+    
+    console.log(`[MOVIE] File size: ${(totalLength / 1024 / 1024).toFixed(2)} MB`);
     
     let downloadedLength = 0;
     let lastPercent = 0;
@@ -577,7 +392,7 @@ async function downloadFile(url, filepath, onProgress, progressMsgKey, sock, fro
             const percentInt = Math.floor(parseFloat(percent));
             if (percentInt > lastPercent && percentInt % 10 === 0) {
                 lastPercent = percentInt;
-                onProgress(percent, downloadedLength, totalLength, progressMsgKey, sock, from);
+                onProgress(percent, sock, from, progressMsgKey);
             }
         }
     });
@@ -585,11 +400,8 @@ async function downloadFile(url, filepath, onProgress, progressMsgKey, sock, fro
     return new Promise((resolve, reject) => {
         writer.on('finish', () => {
             const stats = fs.statSync(filepath);
-            if (stats.size === 0) reject(new Error('Downloaded file is empty (0 bytes)'));
-            else {
-                debugLog(`Download complete: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
-                resolve();
-            }
+            if (stats.size === 0) reject(new Error('Downloaded file is empty'));
+            else resolve();
         });
         writer.on('error', reject);
         response.data.on('error', reject);
@@ -599,7 +411,7 @@ async function downloadFile(url, filepath, onProgress, progressMsgKey, sock, fro
 module.exports = {
     name: 'movie',
     aliases: ['cinema', 'cineverse', 'downloadmovie'],
-    description: 'Search, download and upload movies to Google Drive',
+    description: 'Search and download movies from Cineverse',
     usage: '.movie <movie name>',
     category: 'media',
     ownerOnly: false,
@@ -612,7 +424,7 @@ module.exports = {
                        `Usage: \`${config.prefix}movie <movie name>\`\n\n` +
                        `*Examples:*\n` +
                        `• \`${config.prefix}movie 3 idiots\`\n` +
-                       `• \`${config.prefix}movie stranger things\``);
+                       `• \`${config.prefix}movie inception\``);
             return;
         }
 
@@ -625,7 +437,7 @@ module.exports = {
             query: query,
             results: [],
             selectedMovie: null,
-            qualities: [],
+            videoUrl: null,
             page: null,
             browser: null
         });
@@ -634,11 +446,7 @@ module.exports = {
         
         try {
             const browser = await getBrowser();
-            const page = await browser.newPage();
-            
-            // Enable console logging from the browser
-            page.on('console', msg => debugLog('Browser console:', msg.text()));
-            page.on('pageerror', err => debugLog('Browser error:', err));
+            const page = await createStealthPage(browser);
             
             sessionManager.updateSession(sender, from, {
                 page: page,
@@ -657,8 +465,7 @@ module.exports = {
             
             sessionManager.updateSession(sender, from, {
                 step: 'selecting',
-                results: results,
-                query: query
+                results: results
             });
             
             const sessionId = session.id.split(':').pop();
@@ -668,7 +475,6 @@ module.exports = {
                 const result = results[i];
                 let buttonText = result.title;
                 if (result.year) buttonText += ` (${result.year})`;
-                if (result.rating) buttonText += ` ⭐${result.rating}`;
                 
                 buttons.push({
                     id: `movie_${sessionId}_${i}`,
@@ -677,7 +483,7 @@ module.exports = {
             }
             
             const sentMsg = await sendButtons(sock, from, {
-                text: `📋 *Found ${results.length} results for "${query}"*\n\nSelect a movie to continue:`,
+                text: `📋 *Found ${results.length} results for "${query}"*\n\nSelect a movie to download:`,
                 footer: 'Movie Downloader',
                 buttons: buttons,
                 aimode: FORCE_AI_MODE
@@ -732,20 +538,13 @@ module.exports = {
                 if (index >= 0 && index < results.length) {
                     const selectedMovie = results[index];
                     
-                    await reply(`🎬 *${selectedMovie.title}*\n\n⏳ Getting download options...`);
-                    
-                    sessionManager.updateSession(sender, from, {
-                        step: 'getting_qualities',
-                        selectedMovie: selectedMovie
-                    });
+                    await reply(`🎬 *${selectedMovie.title}*\n\n⏳ Fetching video URL...`);
                     
                     try {
-                        const qualities = await getDownloadOptions(page, selectedMovie.url);
+                        const videoUrl = await getDirectVideoUrl(page, selectedMovie.url);
                         
-                        debugLog(`Found ${qualities.length} quality options`);
-                        
-                        if (!qualities || qualities.length === 0) {
-                            await reply(`❌ No download options found for *${selectedMovie.title}*\n\nThis could be because:\n• The movie page structure changed\n• Download links require login\n• The site is blocking automation\n\nTry a different movie or check back later.`);
+                        if (!videoUrl) {
+                            await reply(`❌ Could not find download link for *${selectedMovie.title}*.\n\nThis site may have changed or requires login.`);
                             await page.close();
                             sessionManager.clearSession(session.id);
                             await react('❌');
@@ -753,87 +552,33 @@ module.exports = {
                         }
                         
                         sessionManager.updateSession(sender, from, {
-                            step: 'selecting_quality',
-                            qualities: qualities,
-                            selectedMovie: selectedMovie
+                            step: 'downloading',
+                            selectedMovie: selectedMovie,
+                            videoUrl: videoUrl
                         });
                         
-                        const sessionId = session.id.split(':').pop();
-                        
-                        const qualityButtons = [];
-                        for (let i = 0; i < Math.min(10, qualities.length); i++) {
-                            const q = qualities[i];
-                            let displayText = `${q.quality} - ${q.size}`;
-                            if (displayText.length > 50) displayText = displayText.substring(0, 47) + '...';
-                            qualityButtons.push({
-                                id: `quality_${sessionId}_${i}`,
-                                text: displayText
-                            });
-                        }
-                        
-                        const sentMsg = await sendButtons(sock, from, {
-                            text: `🎬 *${selectedMovie.title}*\n\n📥 Choose quality:`,
-                            footer: 'Movie Downloader',
-                            buttons: qualityButtons,
-                            aimode: FORCE_AI_MODE
-                        }, {});
-                        
-                        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, this.name);
-                        
-                    } catch (error) {
-                        console.error('[MOVIE] Error getting qualities:', error);
-                        await reply(`❌ Failed to get download options: ${error.message}\n\nFull error: ${error.stack || 'No stack trace'}`);
-                        await page.close();
-                        sessionManager.clearSession(session.id);
-                        await react('❌');
-                    }
-                }
-                return true;
-            }
-            
-            if (buttonId && buttonId.startsWith('quality_')) {
-                const parts = buttonId.split('_');
-                const index = parseInt(parts[2]);
-                const qualities = session.data.qualities;
-                const selectedMovie = session.data.selectedMovie;
-                const page = session.data.page;
-                
-                if (!page || !selectedMovie || !qualities) {
-                    await reply(`❌ Session expired. Please search again.`);
-                    sessionManager.clearSession(session.id);
-                    return true;
-                }
-                
-                if (index >= 0 && index < qualities.length) {
-                    const selectedQuality = qualities[index];
-                    
-                    await reply(`⏳ Preparing download for *${selectedMovie.title}* (${selectedQuality.quality})...`);
-                    
-                    try {
-                        const downloadUrl = await getDownloadUrl(page, selectedQuality);
-                        
-                        if (!downloadUrl) {
-                            await reply(`❌ Failed to get direct download link for ${selectedQuality.quality}.`);
-                            return true;
-                        }
-                        
-                        const fileName = `${selectedMovie.title.replace(/[^a-zA-Z0-9]/g, '_')}_${selectedQuality.quality}.mp4`;
+                        // Start download immediately without quality selection
+                        const fileName = `${selectedMovie.title.replace(/[^a-zA-Z0-9]/g, '_')}.mp4`;
                         const filePath = path.join(process.cwd(), 'temp', fileName);
                         const tempDir = path.dirname(filePath);
                         if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
                         
                         const progressMsg = await reply(`📥 Downloading: 0%`);
                         
-                        const onDownloadProgress = async (percent) => {
-                            await sock.sendMessage(from, { edit: progressMsg.key, text: `📥 Downloading: ${percent}%` }).catch(() => {});
+                        const onProgress = async (percent, sock, from, key) => {
+                            try {
+                                await sock.sendMessage(from, { edit: key, text: `📥 Downloading: ${percent}%` });
+                            } catch (e) {}
                         };
                         
-                        await downloadFile(downloadUrl, filePath, onDownloadProgress);
+                        await downloadFile(videoUrl, filePath, onProgress, sock, from, progressMsg.key);
                         
-                        await sock.sendMessage(from, { edit: progressMsg.key, text: `📤 Uploading to Google Drive...` }).catch(() => {});
+                        await sock.sendMessage(from, { edit: progressMsg.key, text: `📤 Uploading to Google Drive...` });
                         
                         const onUploadProgress = async (percent) => {
-                            await sock.sendMessage(from, { edit: progressMsg.key, text: `📤 Uploading: ${percent}%` }).catch(() => {});
+                            try {
+                                await sock.sendMessage(from, { edit: progressMsg.key, text: `📤 Uploading: ${percent}%` });
+                            } catch (e) {}
                         };
                         
                         const uploadResult = await uploadToDrive(filePath, fileName, onUploadProgress);
@@ -845,14 +590,16 @@ module.exports = {
                         await reply(`✅ *Movie Uploaded Successfully!*\n\n` +
                                    `🎬 *Title:* ${selectedMovie.title}\n` +
                                    `📊 *Size:* ${uploadResult.size} MB\n` +
-                                   `📥 *Download Link:* ${uploadResult.directLink}\n\n` +
-                                   `🔗 *View Link:* ${uploadResult.viewLink}`);
+                                   `📥 *Direct Download:* ${uploadResult.directLink}\n\n` +
+                                   `🔗 *Google Drive Link:* ${uploadResult.viewLink}`);
                         
                         await react('✅');
                         
                     } catch (error) {
-                        console.error('[MOVIE] Download/Upload error:', error);
-                        await reply(`❌ Failed: ${error.message}\n\nFull error: ${error.stack || 'No stack trace'}`);
+                        console.error('[MOVIE] Error:', error);
+                        await reply(`❌ Failed: ${error.message}`);
+                        await page.close();
+                        sessionManager.clearSession(session.id);
                         await react('❌');
                     }
                 }
