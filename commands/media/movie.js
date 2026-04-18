@@ -4,6 +4,7 @@
  * FIXED ISSUES:
  * 1. Search Results: Now correctly extracts movie titles instead of just showing 'Movie'.
  * 2. 0 MB Download: Improved download URL capture and added validation for content-length.
+ * 3. Fixed "element is not enabled" error for download buttons.
  */
 
 const { chromium } = require('playwright');
@@ -248,36 +249,56 @@ async function searchMovie(page, movieName) {
 }
 
 async function getDownloadOptions(page, movieUrl) {
+    console.log('[MOVIE] Getting download options for:', movieUrl);
     await page.goto(movieUrl, { waitUntil: 'networkidle', timeout: 30000 });
     await page.waitForTimeout(3000);
+
+    // 1. Click the main "Download" button - wait for it to be enabled
+    console.log('[MOVIE] Looking for main Download button...');
+    const mainDownloadBtn = await page.waitForSelector('button:has-text("Download")', { timeout: 10000 });
+    if (!mainDownloadBtn) throw new Error('Main Download button not found');
     
-    // Click Download button
-    const buttons = await page.$$('button');
-    for (const btn of buttons) {
-        const text = await btn.innerText();
-        if (text && text.includes('Download')) {
-            await btn.click();
-            break;
-        }
-    }
-    
+    // Ensure button is enabled and click
+    await mainDownloadBtn.waitForElementState('enabled', { timeout: 10000 });
+    await mainDownloadBtn.click({ force: true });
+    console.log('[MOVIE] Main Download button clicked');
+
+    // Wait for modal/tabs to appear
     await page.waitForTimeout(3000);
-    
-    // Click Video tab
-    const videoTab = await page.$('button:has-text("Video")');
+
+    // 2. Click the "Video" tab - wait for it to be visible and enabled
+    console.log('[MOVIE] Looking for Video tab...');
+    const videoTab = await page.waitForSelector('button:has-text("Video")', { timeout: 10000 }).catch(() => null);
     if (videoTab) {
-        await videoTab.click();
-        await page.waitForTimeout(1000);
+        await videoTab.waitForElementState('enabled', { timeout: 5000 });
+        await videoTab.click({ force: true });
+        console.log('[MOVIE] Video tab clicked');
+        await page.waitForTimeout(2000);
+    } else {
+        console.log('[MOVIE] No Video tab found, proceeding...');
     }
+
+    // 3. Find quality buttons - wait for them to be present and enabled
+    console.log('[MOVIE] Searching for quality buttons...');
+    await page.waitForSelector('button:has-text("Download")', { timeout: 15000 });
     
-    // Find quality buttons
     const downloadButtons = await page.$$('button:has-text("Download")');
-    
+    console.log(`[MOVIE] Found ${downloadButtons.length} download/quality buttons`);
+
     const qualities = [];
-    for (const btn of downloadButtons) {
+    for (let i = 0; i < downloadButtons.length; i++) {
+        const btn = downloadButtons[i];
+        // Check if button is disabled
+        const isDisabled = await btn.getAttribute('disabled');
+        if (isDisabled !== null) {
+            console.log(`[MOVIE] Button ${i} is disabled, skipping`);
+            continue;
+        }
+        
+        // Get parent container for quality/size info
         const parent = await btn.evaluateHandle(el => {
-            let curr = el;
-            while (curr && curr.parentElement && !curr.innerText.includes('p')) {
+            let curr = el.parentElement;
+            while (curr && !curr.innerText.includes('p') && curr !== document.body) {
                 curr = curr.parentElement;
             }
             return curr;
@@ -291,7 +312,24 @@ async function getDownloadOptions(page, movieUrl) {
             qualities.push({
                 quality: qualityMatch[1],
                 size: sizeMatch ? sizeMatch[1] : "Unknown",
-                button: btn
+                button: btn,
+                elementHandle: btn
+            });
+            console.log(`[MOVIE] Found quality: ${qualityMatch[1]} - ${sizeMatch ? sizeMatch[1] : 'Unknown'}`);
+        }
+    }
+    
+    if (qualities.length === 0) {
+        console.log('[MOVIE] No quality buttons found after filtering');
+        // Fallback: try to get any download link from page
+        const anyLink = await page.$eval('a[href*="download"]', a => a.href).catch(() => null);
+        if (anyLink) {
+            console.log('[MOVIE] Fallback: found direct download link:', anyLink);
+            qualities.push({
+                quality: 'Unknown',
+                size: 'Unknown',
+                url: anyLink,
+                isDirect: true
             });
         }
     }
@@ -300,33 +338,85 @@ async function getDownloadOptions(page, movieUrl) {
 }
 
 async function getDownloadUrl(page, qualityInfo) {
-    const button = qualityInfo.button;
-    
-    // Listen for requests that contain 'download' to capture the correct URL
-    let capturedUrl = null;
-    const requestHandler = (request) => {
-        const url = request.url();
-        if (url.includes('download') && (url.includes('id=') || url.includes('url='))) {
-            capturedUrl = url;
-        }
-    };
-    
-    page.on('request', requestHandler);
-    
-    await page.evaluate(async (buttonElement) => {
-        buttonElement.click();
-    }, button);
-    
-    // Wait for the request to be captured
-    let count = 0;
-    while (!capturedUrl && count < 50) {
-        await page.waitForTimeout(100);
-        count++;
+    // If we already have a direct URL from fallback
+    if (qualityInfo.isDirect && qualityInfo.url) {
+        console.log('[MOVIE] Using direct URL:', qualityInfo.url);
+        return qualityInfo.url;
     }
     
-    page.off('request', requestHandler);
+    const button = qualityInfo.button;
+    console.log('[MOVIE] Attempting to click quality button...');
     
-    return capturedUrl;
+    // Ensure button is enabled before clicking
+    try {
+        await button.waitForElementState('enabled', { timeout: 10000 });
+    } catch (e) {
+        console.log('[MOVIE] Button not enabled, trying force click...');
+        // If still not enabled, try to remove disabled attribute via JavaScript
+        await page.evaluate((btn) => {
+            btn.removeAttribute('disabled');
+            btn.style.pointerEvents = 'auto';
+        }, button);
+        await page.waitForTimeout(500);
+    }
+    
+    // Setup request interception BEFORE clicking
+    let capturedUrl = null;
+    const requestPromise = page.waitForRequest(
+        (request) => {
+            const url = request.url();
+            return url.includes('download') && (url.includes('id=') || url.includes('url=') || url.includes('redirect'));
+        },
+        { timeout: 15000 }
+    ).then(request => {
+        capturedUrl = request.url();
+        console.log('[MOVIE] Captured download URL:', capturedUrl);
+        return capturedUrl;
+    }).catch(err => {
+        console.log('[MOVIE] No download request captured:', err.message);
+        return null;
+    });
+    
+    // Click the button (force if needed)
+    try {
+        await button.click({ force: true, timeout: 5000 });
+        console.log('[MOVIE] Button clicked');
+    } catch (clickErr) {
+        console.log('[MOVIE] Normal click failed, using JavaScript click');
+        await page.evaluate((btn) => btn.click(), button);
+    }
+    
+    // Wait for the request to be captured
+    const result = await requestPromise;
+    if (result) return result;
+    
+    // Fallback: check for new window or iframe
+    console.log('[MOVIE] No request captured, trying to find download link in page...');
+    const fallbackUrl = await page.evaluate(() => {
+        // Look for any link that might be the download
+        const links = Array.from(document.querySelectorAll('a[href*="download"], a[href*="googledrive"], a[href*="drive.google"]'));
+        for (let link of links) {
+            const href = link.href;
+            if (href && (href.includes('download') || href.includes('drive.google'))) {
+                return href;
+            }
+        }
+        // Check for meta refresh
+        const meta = document.querySelector('meta[http-equiv="refresh"]');
+        if (meta) {
+            const content = meta.getAttribute('content');
+            const urlMatch = content.match(/url=(.+)/i);
+            if (urlMatch) return urlMatch[1];
+        }
+        return null;
+    });
+    
+    if (fallbackUrl) {
+        console.log('[MOVIE] Fallback URL found:', fallbackUrl);
+        return fallbackUrl;
+    }
+    
+    throw new Error('Could not capture download URL');
 }
 
 async function downloadFile(url, filepath, onProgress, progressMsgKey, sock, from) {
