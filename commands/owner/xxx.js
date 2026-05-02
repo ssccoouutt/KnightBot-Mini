@@ -1,6 +1,6 @@
 /**
  * XXX Command - Adult Content Search & Downloader
- * MIRRORED LOGIC FROM AUDIT COMMAND FOR BUTTON RELIABILITY
+ * MIRRORED EXACTLY FROM AUDIT/COMMIT COMMAND LOGIC
  */
 
 const axios = require('axios');
@@ -11,6 +11,7 @@ const sessionManager = require('../../utils/sessionManager');
 const giftedBtns = require('gifted-btns');
 const { sendButtons } = giftedBtns;
 
+// Force AI mode ON for gifted buttons
 const FORCE_AI_MODE = true;
 
 const SITES_CONFIG = {
@@ -34,7 +35,7 @@ const SITES_CONFIG = {
     }
 };
 
-// ==================== BUTTON HANDLER (Mirrored from Audit) ====================
+// ==================== BUTTON HANDLER (STANDALONE) ====================
 
 async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, reply, react) {
     const session = sessionManager.getLatestSession(sender, from);
@@ -49,32 +50,32 @@ async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, 
         return true;
     }
 
-    // STAGE 1: SITE SELECTION
+    // Step 1: Site Selection
     if (buttonId && buttonId.startsWith('xxx_site_')) {
         const parts = buttonId.split('_');
         const siteChoice = parts[2]; 
-        await performSearch(sock, from, sender, reply, react, session, siteChoice, session.data.query);
+        await performSearch(sock, from, sender, reply, react, session, siteChoice);
         return true;
     }
 
-    // STAGE 2: VIDEO PICK
-    if (buttonId && buttonId.startsWith('xxx_pick_')) {
+    // Step 2: Result Selection
+    if (buttonId && buttonId.startsWith('xxx_res_')) {
         const parts = buttonId.split('_');
         const index = parseInt(parts[2]);
         const results = session.data.searchResults;
         if (results && results[index]) {
-            await analyzeVideo(sock, from, sender, reply, react, session, results[index]);
+            await handleAnalysis(sock, from, sender, reply, react, session, results[index]);
         }
         return true;
     }
 
-    // STAGE 3: QUALITY PICK
-    if (buttonId && buttonId.startsWith('xxx_fin_')) {
+    // Step 3: Quality Selection
+    if (buttonId && buttonId.startsWith('xxx_qlty_')) {
         const parts = buttonId.split('_');
         const index = parseInt(parts[2]);
         const qualities = session.data.videoInfo.qualities;
         if (qualities && qualities[index]) {
-            await executeDownload(sock, from, sender, reply, react, session, qualities[index]);
+            await handleDownload(sock, from, sender, reply, react, session, qualities[index]);
         }
         return true;
     }
@@ -84,98 +85,101 @@ async function handleButtonClick(sock, msg, buttonId, buttonText, from, sender, 
 
 // ==================== LOGIC FUNCTIONS ====================
 
-async function performSearch(sock, from, sender, reply, react, session, siteChoice, query) {
+async function performSearch(sock, from, sender, reply, react, session, siteChoice) {
     const cfg = SITES_CONFIG[siteChoice];
+    const query = session.data.query;
     await react('🔍');
-    const processingMsg = await reply(`🔍 Searching *${cfg.name}* for "${query}"...`);
+    const processingMsg = await reply(`🔍 Searching *${cfg.name}*...`);
 
     try {
         const response = await axios.get(cfg.searchUrl(query), { 
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-            timeout: 15000 
+            timeout: 10000 
         });
         
-        const matches = [...response.data.matchAll(cfg.regex)];
-        const links = [...new Set(matches.map(m => m[1].startsWith('http') ? m[1] : cfg.base + m[1]))].slice(0, 5);
+        const rawLinks = [...response.data.matchAll(cfg.regex)];
+        const links = [...new Set(rawLinks.map(m => m[1].startsWith('http') ? m[1] : cfg.base + m[1]))].slice(0, 5);
 
         if (links.length === 0) {
-            return await sock.sendMessage(from, { text: `❌ No results found on ${cfg.name}.`, edit: processingMsg.key });
+            return await sock.sendMessage(from, { text: `❌ No results found.`, edit: processingMsg.key });
         }
 
+        sessionManager.updateSession(sender, from, { searchResults: links });
         const sessionId = session.id.split(':').pop();
+
         const buttons = links.map((_, i) => ({
-            id: `xxx_pick_${i}_${sessionId}`,
-            text: `Download Result ${i + 1}`
+            id: `xxx_res_${i}_${sessionId}`,
+            text: `Select Video ${i + 1}`
         }));
 
-        sessionManager.updateSession(sender, from, { searchResults: links });
+        let listText = `🔞 *Results from ${cfg.name}*\n\n`;
+        links.forEach((url, i) => listText += `*${i+1}.* ${url}\n\n`);
 
-        let text = `🔞 *Results from ${cfg.name}*\n\n`;
-        links.forEach((url, i) => text += `*${i + 1}.* ${url}\n\n`);
-
-        await sock.sendMessage(from, { text: text, edit: processingMsg.key });
-        await sendButtons(sock, from, {
-            text: "Choose a video to download:",
+        await sock.sendMessage(from, { text: listText, edit: processingMsg.key });
+        const sentMsg = await sendButtons(sock, from, {
+            text: `Choose a video to download:`,
             footer: cfg.name,
             buttons: [...buttons, { id: 'cancel', text: '❌ Cancel' }],
             aimode: FORCE_AI_MODE
         }, {});
+        
+        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'xxx');
     } catch (e) {
         await reply(`❌ Error: ${e.message}`);
     }
 }
 
-async function analyzeVideo(sock, from, sender, reply, react, session, url) {
+async function handleAnalysis(sock, from, sender, reply, react, session, url) {
     await react('📊');
-    const processingMsg = await reply(`📊 Analyzing video content...`);
+    const processingMsg = await reply(`📊 Analyzing formats...`);
     
     try {
-        // Uses getAvailableQualities from your dlp command logic
+        // Shared logic with your dlp command
         const videoInfo = await getAvailableQualities(url); 
         const sessionId = session.id.split(':').pop();
 
         const buttons = videoInfo.qualities.map((q, i) => ({
-            id: `xxx_fin_${i}_${sessionId}`,
+            id: `xxx_qlty_${i}_${sessionId}`,
             text: q.name
         }));
 
-        sessionManager.updateSession(sender, from, { videoInfo, selectedUrl: url });
+        sessionManager.updateSession(sender, from, { videoInfo, targetUrl: url });
 
         await sock.sendMessage(from, {
-            text: `✅ *Metadata Found*\n\n🎬 *Title:* ${videoInfo.title}\n⏱️ *Duration:* ${videoInfo.duration}\n\nSelect quality:`,
+            text: `✅ *Video:* ${videoInfo.title}\n⏱️ *Duration:* ${videoInfo.duration}\n\nChoose quality:`,
             edit: processingMsg.key
         });
 
-        await sendButtons(sock, from, {
-            text: `Select download quality for:\n${videoInfo.title}`,
+        const sentMsg = await sendButtons(sock, from, {
+            text: `Select download quality:`,
             buttons: [...buttons, { id: 'cancel', text: '❌ Cancel' }],
             aimode: FORCE_AI_MODE
         }, {});
+        
+        sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'xxx');
     } catch (e) {
-        await reply(`❌ Analysis failed: ${e.message}`);
+        await reply(`❌ Error: ${e.message}`);
     }
 }
 
-async function executeDownload(sock, from, sender, reply, react, session, quality) {
+async function handleDownload(sock, from, sender, reply, react, session, quality) {
     await react('⬇️');
-    const processingMsg = await reply(`📥 Downloading *${quality.name}*... Please wait.`);
+    const processingMsg = await reply(`📥 Downloading...`);
 
     try {
-        // Uses downloadMedia from your dlp command logic
-        const result = await downloadMedia(session.data.selectedUrl, quality);
+        const result = await downloadMedia(session.data.targetUrl, quality);
         
         await sock.sendMessage(from, {
             video: fs.readFileSync(result.path),
-            caption: `✅ *Download Complete*\n\n🎬 ${session.data.videoInfo.title}\n📊 Size: ${quality.filesize || 'Unknown'}`,
+            caption: `✅ *Downloaded:* ${session.data.videoInfo.title}`,
             mimetype: 'video/mp4'
         });
 
-        // Cleanup
         fs.unlinkSync(result.path);
         fs.rmdirSync(result.tempDir);
         sessionManager.clearSession(session.id);
     } catch (e) {
-        await reply(`❌ Download failed: ${e.message}`);
+        await reply(`❌ Failed: ${e.message}`);
     }
 }
 
@@ -184,37 +188,31 @@ async function executeDownload(sock, from, sender, reply, react, session, qualit
 module.exports = {
     name: 'xxx',
     aliases: ['xnxx', 'ph', 'xh'],
-    description: 'Search and download adult content (Owner Only)',
+    description: 'Adult content downloader (Owner Only)',
+    usage: '.xxx <query>',
     category: 'owner',
     ownerOnly: true,
 
     async execute(sock, msg, args, context) {
         const { from, sender, reply, react } = context;
-
-        if (args.length === 0) {
-            return reply(`🔞 *Adult Content Search*\n\nUsage: \`${config.prefix}xxx <query>\``);
-        }
+        
+        if (args.length === 0) return reply(`🔞 Usage: .xxx <query>`);
 
         const query = args.join(' ');
-        const session = sessionManager.createSession(sender, from, 'xxx', {
-            query: query,
-            searchResults: null,
-            videoInfo: null,
-            selectedUrl: null
-        });
-        
+        const session = sessionManager.createSession(sender, from, 'xxx', { query });
         const sessionId = session.id.split(':').pop();
 
         const buttons = [
             { id: `xxx_site_1_${sessionId}`, text: 'XNXX' },
             { id: `xxx_site_2_${sessionId}`, text: 'Pornhub' },
-            { id: `xxx_site_3_${sessionId}`, text: 'xHamster' }
+            { id: `xxx_site_3_${sessionId}`, text: 'xHamster' },
+            { id: 'cancel', text: '❌ Cancel' }
         ];
 
         await react('🔞');
         const sentMsg = await sendButtons(sock, from, {
-            text: `🔞 *Adult Search*\n\nQuery: _${query}_\n\nSelect a website to search:`,
-            footer: 'XXX Engine',
+            text: `🔞 *Adult Search*\nQuery: _${query}_\n\nChoose website:`,
+            footer: 'Gifted Bot Engine',
             buttons: buttons,
             aimode: FORCE_AI_MODE
         }, { quoted: msg });
@@ -232,24 +230,21 @@ module.exports = {
             if (msg.message?.buttonsResponseMessage) {
                 buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
             } else if (msg.message?.interactiveResponseMessage) {
-                const interactive = msg.message.interactiveResponseMessage;
-                if (interactive.nativeFlowResponseMessage) {
-                    try {
-                        const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
-                        buttonId = params.id;
-                        buttonText = params.display_text;
-                    } catch (e) {}
-                }
+                try {
+                    const params = JSON.parse(msg.message.interactiveResponseMessage.nativeFlowResponseMessage.paramsJson);
+                    buttonId = params.id;
+                    buttonText = params.display_text;
+                } catch (e) {}
             }
 
             if (buttonId) {
-                const handled = await handleButtonClick(sock, msg, buttonId, buttonText, from, sender, reply, react);
-                if (handled) return true;
+                return await handleButtonClick(sock, msg, buttonId, buttonText, from, sender, reply, react);
             }
         }
         return true;
     }
 };
 
-// Crucial: Exporting the button handler for the core bot to recognize
+// CRITICAL: Export for core handler
 module.exports.handleButtonClick = handleButtonClick;
+    
