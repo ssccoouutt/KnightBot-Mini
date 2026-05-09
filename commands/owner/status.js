@@ -12,13 +12,8 @@ const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 
 const FORCE_AI_MODE = true;
 
-// Status visibility options
-const STATUS_VISIBILITY = {
-    'all': 'Everyone',
-    'contacts': 'Only Contacts',
-    'contacts_except': 'Contacts Except...',
-    'only_share_with': 'Only Share With...'
-};
+// Status broadcast JID
+const STATUS_JID = 'status@broadcast';
 
 module.exports = {
     name: 'status',
@@ -40,7 +35,7 @@ module.exports = {
                        `• With caption: \`.status My caption\` (reply to media)\n\n` +
                        `*Options:*\n` +
                        `• \`.status --help\` - Show this help\n` +
-                       `• \`.status --background\` - Set custom background color\n\n` +
+                       `• \`.status --background #FF0000\` - Custom background color\n\n` +
                        `*Note:* Status expires after 24 hours\n\n` +
                        `> *Powered by ${config.botName}*`);
         }
@@ -75,10 +70,9 @@ module.exports = {
             const processingMsg = await reply(`📱 *Posting text status...*\n\n"${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
             
             try {
-                // Send text status
-                await sock.sendMessage(sender, {
+                // Send text status to status@broadcast
+                await sock.sendMessage(STATUS_JID, {
                     text: text,
-                    status: true,
                     backgroundColor: backgroundColor
                 });
                 
@@ -120,11 +114,9 @@ module.exports = {
                 
                 // Get the media message
                 let mediaMsg = msg.message?.imageMessage || msg.message?.videoMessage;
-                let isQuoted = false;
                 
                 if (!mediaMsg && quotedMessage) {
                     mediaMsg = quotedMessage.imageMessage || quotedMessage.videoMessage;
-                    isQuoted = true;
                 }
                 
                 if (!mediaMsg) {
@@ -150,20 +142,19 @@ module.exports = {
                     throw new Error('Video too large! Max 16MB for status videos.');
                 }
                 
-                // Send media status
+                // Send media status to status@broadcast
                 if (isImage) {
-                    await sock.sendMessage(sender, {
+                    await sock.sendMessage(STATUS_JID, {
                         image: mediaBuffer,
                         caption: caption || '',
-                        status: true,
                         mimetype: mimetype
                     });
                 } else {
-                    await sock.sendMessage(sender, {
+                    await sock.sendMessage(STATUS_JID, {
                         video: mediaBuffer,
                         caption: caption || '',
-                        status: true,
-                        mimetype: mimetype
+                        mimetype: mimetype,
+                        gifPlayback: false
                     });
                 }
                 
