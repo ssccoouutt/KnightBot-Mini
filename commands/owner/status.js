@@ -15,6 +15,17 @@ const FORCE_AI_MODE = true;
 // Status broadcast JID
 const STATUS_JID = 'status@broadcast';
 
+// Font types for text status
+const FONTS = {
+    1: 'Sans Serif',
+    2: 'Serif',
+    3: 'Norse',
+    4: 'Bryndan Write',
+    5: 'Thin',
+    6: 'Bold',
+    7: 'Light'
+};
+
 module.exports = {
     name: 'status',
     aliases: ['story', 'uploadstatus', 'poststatus'],
@@ -30,13 +41,14 @@ module.exports = {
             return reply(`📱 *STATUS UPLOAD COMMAND*\n\n` +
                        `*Usage:*\n` +
                        `• Text status: \`.status Hello everyone!\`\n` +
+                       `• Text with font: \`.status Hello --font 2\` (1-7)\n` +
+                       `• Text with background: \`.status Hello --bg #FF0000\`\n` +
                        `• Image status: Reply to an image with \`.status\`\n` +
                        `• Video status: Reply to a video with \`.status\`\n` +
                        `• With caption: \`.status My caption\` (reply to media)\n\n` +
-                       `*Options:*\n` +
-                       `• \`.status --help\` - Show this help\n` +
-                       `• \`.status --background #FF0000\` - Custom background color\n\n` +
-                       `*Note:* Status expires after 24 hours\n\n` +
+                       `*Font Options:*\n` +
+                       `• 1 - Sans Serif | 2 - Serif | 3 - Norse\n` +
+                       `• 4 - Bryndan Write | 5 - Thin | 6 - Bold | 7 - Light\n\n` +
                        `> *Powered by ${config.botName}*`);
         }
         
@@ -48,20 +60,33 @@ module.exports = {
         const hasVideo = !!msg.message?.videoMessage || !!quotedMessage?.videoMessage;
         const hasText = args.length > 0 && !args[0].startsWith('--');
         
-        // Extract caption if provided
+        // Extract options
         let caption = '';
         let backgroundColor = '#075E54'; // WhatsApp green default
+        let font = 1; // Default font
         
-        // Check for background color option
-        const bgIndex = args.findIndex(a => a === '--background');
-        if (bgIndex !== -1 && args[bgIndex + 1]) {
-            backgroundColor = args[bgIndex + 1];
-            args.splice(bgIndex, 2);
+        // Parse arguments for options
+        let remainingArgs = [...args];
+        
+        for (let i = 0; i < remainingArgs.length; i++) {
+            const arg = remainingArgs[i];
+            if (arg === '--bg' && remainingArgs[i + 1]) {
+                backgroundColor = remainingArgs[i + 1];
+                remainingArgs.splice(i, 2);
+                i--;
+            } else if (arg === '--font' && remainingArgs[i + 1]) {
+                font = parseInt(remainingArgs[i + 1]);
+                if (isNaN(font) || font < 1 || font > 7) font = 1;
+                remainingArgs.splice(i, 2);
+                i--;
+            }
         }
         
-        if (!hasImage && !hasVideo && hasText) {
+        const textContent = remainingArgs.join(' ');
+        
+        if (!hasImage && !hasVideo && textContent) {
             // Text only status
-            const text = args.join(' ');
+            const text = textContent;
             
             if (text.length > 700) {
                 return reply(`❌ *Text too long!*\n\nStatus text cannot exceed 700 characters.\nCurrent: ${text.length} chars`);
@@ -70,14 +95,21 @@ module.exports = {
             const processingMsg = await reply(`📱 *Posting text status...*\n\n"${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
             
             try {
-                // Send text status to status@broadcast
-                await sock.sendMessage(STATUS_JID, {
-                    text: text,
-                    backgroundColor: backgroundColor
-                });
+                // CORRECT METHOD FOR TEXT STATUS
+                const statusOptions = {
+                    backgroundColor: backgroundColor,
+                    font: font,
+                    statusJidList: [sock.user.id] // Send to own status
+                };
+                
+                const result = await sock.sendMessage(STATUS_JID, {
+                    text: text
+                }, statusOptions);
+                
+                console.log('[STATUS] Text status result:', result);
                 
                 await sock.sendMessage(from, {
-                    text: `✅ *Status posted successfully!*\n\n📝 *Text:* ${text}\n🎨 *Background:* ${backgroundColor}\n⏰ Expires in 24 hours`,
+                    text: `✅ *Status posted successfully!*\n\n📝 *Text:* ${text}\n🎨 *Background:* ${backgroundColor}\n🔤 *Font:* ${FONTS[font] || 'Default'}\n⏰ Expires in 24 hours`,
                     edit: processingMsg.key
                 });
                 
@@ -86,7 +118,7 @@ module.exports = {
             } catch (error) {
                 console.error('[STATUS] Text status error:', error);
                 await sock.sendMessage(from, {
-                    text: `❌ *Failed to post status*\n\nError: ${error.message}`,
+                    text: `❌ *Failed to post status*\n\nError: ${error.message}\n\nMake sure your WhatsApp account is active.`,
                     edit: processingMsg.key
                 });
                 await react('❌');
@@ -97,9 +129,9 @@ module.exports = {
             const isImage = hasImage;
             const isVideo = hasVideo;
             
-            // Get caption from args if provided
-            if (args.length > 0 && !args[0].startsWith('--')) {
-                caption = args.join(' ');
+            // Get caption from remaining args
+            if (textContent) {
+                caption = textContent;
             }
             
             if (caption.length > 700) {
@@ -142,21 +174,28 @@ module.exports = {
                     throw new Error('Video too large! Max 16MB for status videos.');
                 }
                 
-                // Send media status to status@broadcast
+                // CORRECT METHOD FOR MEDIA STATUS
+                const statusOptions = {
+                    statusJidList: [sock.user.id] // Send to own status
+                };
+                
+                let result;
                 if (isImage) {
-                    await sock.sendMessage(STATUS_JID, {
+                    result = await sock.sendMessage(STATUS_JID, {
                         image: mediaBuffer,
                         caption: caption || '',
                         mimetype: mimetype
-                    });
+                    }, statusOptions);
                 } else {
-                    await sock.sendMessage(STATUS_JID, {
+                    result = await sock.sendMessage(STATUS_JID, {
                         video: mediaBuffer,
                         caption: caption || '',
                         mimetype: mimetype,
                         gifPlayback: false
-                    });
+                    }, statusOptions);
                 }
+                
+                console.log('[STATUS] Media status result:', result);
                 
                 await sock.sendMessage(from, {
                     text: `✅ *Status posted successfully!*\n\n📹 *Type:* ${isImage ? 'Image' : 'Video'}\n${caption ? `📝 *Caption:* ${caption}\n` : ''}📊 *Size:* ${sizeMB.toFixed(2)} MB\n⏰ Expires in 24 hours`,
@@ -178,10 +217,11 @@ module.exports = {
             return reply(`📱 *Status Upload*\n\n` +
                        `*How to use:*\n` +
                        `• Text: \`.status Hello world!\`\n` +
+                       `• Text with font: \`.status Hello --font 2\`\n` +
+                       `• Text with background: \`.status Hello --bg #FF0000\`\n` +
                        `• Image: Reply to an image with \`.status\`\n` +
                        `• Video: Reply to a video with \`.status\`\n` +
-                       `• With caption: Reply to media with \`.status My caption\`\n` +
-                       `• Custom background: \`.status Hello --background #FF0000\`\n\n` +
+                       `• With caption: Reply to media with \`.status My caption\`\n\n` +
                        `> *Powered by ${config.botName}*`);
         }
     }
