@@ -11,6 +11,11 @@ const config = require('../../config');
 const sessionManager = require('../../utils/sessionManager');
 const giftedBtns = require('gifted-btns');
 const { sendButtons, sendInteractiveMessage } = giftedBtns;
+const ffmpeg = require('fluent-ffmpeg');
+const ffmpegStatic = require('ffmpeg-static');
+
+// Set ffmpeg path
+ffmpeg.setFfmpegPath(ffmpegStatic);
 
 // Force AI mode ON for gifted buttons
 const FORCE_AI_MODE = true;
@@ -135,15 +140,14 @@ async function getAvailableQualities(url) {
                 const qualities = new Map();
                 
                 for (const format of formats) {
-                    if (format.vcodec !== 'none') {
+                    if (format.vcodec !== 'none' && format.acodec !== 'none') {
                         const height = format.height || 0;
                         const quality = height >= 2160 ? '4K' :
                                        height >= 1440 ? '2K' :
                                        height >= 1080 ? '1080p' :
                                        height >= 720 ? '720p' :
                                        height >= 480 ? '480p' :
-                                       height >= 360 ? '360p' :
-                                       height >= 240 ? '240p' : '144p';
+                                       height >= 360 ? '360p' : '240p';
                         
                         if (!qualities.has(quality) || height > (qualities.get(quality)?.height || 0)) {
                             qualities.set(quality, {
@@ -160,16 +164,17 @@ async function getAvailableQualities(url) {
                 
                 // Add audio-only option
                 qualities.set('mp3', {
-                    formatId: 'bestaudio',
+                    formatId: 'bestaudio/best',
                     height: 0,
                     ext: 'mp3',
                     filesize: null,
                     vcodec: 'none',
-                    acodec: 'mp4a'
+                    acodec: 'mp4a',
+                    isAudio: true
                 });
                 
                 // Sort qualities by height
-                const qualityOrder = ['4K', '2K', '1080p', '720p', '480p', '360p', '240p', '144p', 'mp3'];
+                const qualityOrder = ['4K', '2K', '1080p', '720p', '480p', '360p', '240p', 'mp3'];
                 const sortedQualities = [];
                 
                 for (const q of qualityOrder) {
@@ -198,68 +203,140 @@ async function getAvailableQualities(url) {
     });
 }
 
-async function downloadMedia(url, qualityInfo) {
+async function downloadAndMergeVideo(url, qualityInfo) {
     const tempDir = path.join(process.cwd(), 'temp', `dlp_${Date.now()}`);
     if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
     
+    const videoOutput = path.join(tempDir, 'video.mp4');
+    const audioOutput = path.join(tempDir, 'audio.mp4');
+    const finalOutput = path.join(tempDir, 'final.mp4');
+    
     return new Promise((resolve, reject) => {
-        let outputTemplate;
-        let formatSpec;
-        
-        if (qualityInfo.name === 'mp3') {
-            outputTemplate = path.join(tempDir, '%(title)s.%(ext)s');
-            formatSpec = 'bestaudio/best';
-        } else {
-            outputTemplate = path.join(tempDir, `%(title)s_${qualityInfo.name}.%(ext)s`);
-            formatSpec = qualityInfo.formatId;
-        }
-        
         const cookieArg = (cookiesPath && fs.existsSync(cookiesPath)) ? `--cookies "${cookiesPath}"` : '';
-        let cmd = `yt-dlp ${cookieArg} -f "${formatSpec}" -o "${outputTemplate}" "${url}"`;
         
-        if (qualityInfo.name === 'mp3') {
-            cmd += ' --extract-audio --audio-format mp3 --audio-quality 0';
-        } else {
-            cmd += ' --merge-output-format mp4';
-        }
+        // Download best video without audio
+        const videoCmd = `yt-dlp ${cookieArg} -f "bestvideo[height<=${qualityInfo.height}][ext=mp4]+bestaudio/best" -o "${videoOutput}" --merge-output-format mp4 "${url}"`;
         
-        console.log('[DLP] Executing download command...');
+        console.log('[DLP] Downloading video with audio...');
         
-        exec(cmd, { maxBuffer: 50 * 1024 * 1024 }, (error, stdout, stderr) => {
+        exec(videoCmd, { maxBuffer: 200 * 1024 * 1024 }, async (error, stdout, stderr) => {
             if (error) {
                 console.error('[DLP] Download error:', error.message);
-                // Clean up temp dir on error
-                try {
-                    if (fs.existsSync(tempDir)) {
-                        fs.rmSync(tempDir, { recursive: true, force: true });
+                
+                // Fallback: Try downloading video and audio separately and merge
+                await fallbackDownloadAndMerge(url, qualityInfo, tempDir, videoOutput, audioOutput, finalOutput, resolve, reject);
+                return;
+            }
+            
+            // Check if file exists and is valid
+            if (fs.existsSync(videoOutput) && fs.statSync(videoOutput).size > 0) {
+                const stats = fs.statSync(videoOutput);
+                resolve({
+                    path: videoOutput,
+                    filename: path.basename(videoOutput),
+                    size: stats.size,
+                    tempDir: tempDir
+                });
+            } else {
+                reject(new Error('Download failed - no file created'));
+            }
+        });
+    });
+}
+
+async function fallbackDownloadAndMerge(url, qualityInfo, tempDir, videoOutput, audioOutput, finalOutput, resolve, reject) {
+    const cookieArg = (cookiesPath && fs.existsSync(cookiesPath)) ? `--cookies "${cookiesPath}"` : '';
+    
+    // Download video only
+    const videoCmd = `yt-dlp ${cookieArg} -f "bestvideo[height<=${qualityInfo.height}][ext=mp4]" -o "${videoOutput}" "${url}"`;
+    
+    exec(videoCmd, { maxBuffer: 200 * 1024 * 1024 }, (videoError, videoStdout, videoStderr) => {
+        if (videoError) {
+            reject(new Error('Failed to download video stream'));
+            return;
+        }
+        
+        // Download audio only
+        const audioCmd = `yt-dlp ${cookieArg} -f "bestaudio[ext=m4a]/bestaudio" -o "${audioOutput}" "${url}"`;
+        
+        exec(audioCmd, { maxBuffer: 200 * 1024 * 1024 }, (audioError, audioStdout, audioStderr) => {
+            if (audioError) {
+                reject(new Error('Failed to download audio stream'));
+                return;
+            }
+            
+            // Merge video and audio with ffmpeg
+            ffmpeg()
+                .input(videoOutput)
+                .input(audioOutput)
+                .outputOptions(['-c:v copy', '-c:a aac', '-strict experimental'])
+                .save(finalOutput)
+                .on('end', () => {
+                    if (fs.existsSync(finalOutput) && fs.statSync(finalOutput).size > 0) {
+                        const stats = fs.statSync(finalOutput);
+                        resolve({
+                            path: finalOutput,
+                            filename: path.basename(finalOutput),
+                            size: stats.size,
+                            tempDir: tempDir
+                        });
+                    } else {
+                        reject(new Error('Merge failed - no file created'));
                     }
-                } catch (e) {}
-                reject(new Error(`Download failed: ${error.message}`));
+                })
+                .on('error', (err) => {
+                    console.error('[DLP] FFmpeg error:', err);
+                    reject(new Error(`Merge failed: ${err.message}`));
+                });
+        });
+    });
+}
+
+async function downloadAudioOnly(url) {
+    const tempDir = path.join(process.cwd(), 'temp', `dlp_${Date.now()}`);
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+    
+    const outputPath = path.join(tempDir, 'audio.mp3');
+    
+    return new Promise((resolve, reject) => {
+        const cookieArg = (cookiesPath && fs.existsSync(cookiesPath)) ? `--cookies "${cookiesPath}"` : '';
+        const cmd = `yt-dlp ${cookieArg} -f "bestaudio/best" --extract-audio --audio-format mp3 --audio-quality 0 -o "${outputPath}" "${url}"`;
+        
+        console.log('[DLP] Downloading audio...');
+        
+        exec(cmd, { maxBuffer: 200 * 1024 * 1024 }, (error, stdout, stderr) => {
+            if (error) {
+                console.error('[DLP] Audio download error:', error.message);
+                reject(new Error('Failed to download audio'));
                 return;
             }
             
             // Find the downloaded file
-            try {
-                const files = fs.readdirSync(tempDir);
-                if (files.length === 0) {
-                    reject(new Error('No file downloaded'));
-                    return;
-                }
-                
-                const downloadedFile = path.join(tempDir, files[0]);
-                const stats = fs.statSync(downloadedFile);
-                
-                resolve({
-                    path: downloadedFile,
-                    filename: files[0],
-                    size: stats.size,
-                    tempDir: tempDir
-                });
-            } catch (err) {
-                reject(new Error(`Failed to locate downloaded file: ${err.message}`));
+            const files = fs.readdirSync(tempDir);
+            if (files.length === 0) {
+                reject(new Error('No audio file downloaded'));
+                return;
             }
+            
+            const audioFile = path.join(tempDir, files[0]);
+            const stats = fs.statSync(audioFile);
+            
+            resolve({
+                path: audioFile,
+                filename: files[0],
+                size: stats.size,
+                tempDir: tempDir
+            });
         });
     });
+}
+
+async function downloadMedia(url, qualityInfo) {
+    if (qualityInfo.name === 'mp3') {
+        return await downloadAudioOnly(url);
+    } else {
+        return await downloadAndMergeVideo(url, qualityInfo);
+    }
 }
 
 function formatFileSize(bytes) {
@@ -288,7 +365,7 @@ function formatDuration(seconds) {
 
 module.exports = {
     name: 'dlp',
-    aliases: [],
+    aliases: ['download', 'vd'],
     description: 'Download videos/audio from any supported website',
     usage: '.dlp <url>',
     category: 'media',
@@ -464,17 +541,25 @@ module.exports = {
                         const isVideo = selectedQuality.name !== 'mp3';
                         const mimetype = isVideo ? 'video/mp4' : 'audio/mpeg';
                         
-                        await sock.sendMessage(from, {
-                            [isVideo ? 'video' : 'audio']: fs.readFileSync(result.path),
-                            mimetype: mimetype,
-                            caption: caption,
-                            ptt: !isVideo
-                        }, { quoted: msg });
+                        if (isVideo) {
+                            await sock.sendMessage(from, {
+                                video: fs.readFileSync(result.path),
+                                mimetype: mimetype,
+                                caption: caption
+                            }, { quoted: msg });
+                        } else {
+                            await sock.sendMessage(from, {
+                                audio: fs.readFileSync(result.path),
+                                mimetype: mimetype,
+                                caption: caption,
+                                ptt: false
+                            }, { quoted: msg });
+                        }
                         
                         // Clean up temp files
                         try {
-                            fs.unlinkSync(result.path);
-                            fs.rmdirSync(result.tempDir);
+                            if (fs.existsSync(result.path)) fs.unlinkSync(result.path);
+                            if (fs.existsSync(result.tempDir)) fs.rmSync(result.tempDir, { recursive: true, force: true });
                         } catch (cleanErr) {}
                         
                         await sock.sendMessage(from, {
