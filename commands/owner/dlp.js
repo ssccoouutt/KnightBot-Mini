@@ -24,32 +24,60 @@ let cachedToken = null;
 let tokenExpiry = null;
 let cookiesPath = null;
 
+// Check if yt-dlp is installed
+async function checkYtDlp() {
+    return new Promise((resolve) => {
+        exec('yt-dlp --version', (error, stdout) => {
+            if (error) {
+                console.log('[DLP] yt-dlp not found, attempting to install...');
+                exec('pip install yt-dlp -q', (installError) => {
+                    if (installError) {
+                        console.log('[DLP] Failed to install yt-dlp');
+                        resolve(false);
+                    } else {
+                        console.log('[DLP] yt-dlp installed successfully');
+                        resolve(true);
+                    }
+                });
+            } else {
+                console.log(`[DLP] yt-dlp version: ${stdout.trim()}`);
+                resolve(true);
+            }
+        });
+    });
+}
+
 async function getAccessToken() {
     if (cachedToken && tokenExpiry && new Date() < tokenExpiry) return cachedToken;
     
-    const tokenResponse = await axios({ method: 'GET', url: TOKEN_URL, responseType: 'stream', timeout: 30000 });
-    const tempTokenFile = path.join(process.cwd(), 'temp', `token_${Date.now()}.json`);
-    const tokenDir = path.dirname(tempTokenFile);
-    if (!fs.existsSync(tokenDir)) fs.mkdirSync(tokenDir, { recursive: true });
-    
-    const tokenWriter = fs.createWriteStream(tempTokenFile);
-    tokenResponse.data.pipe(tokenWriter);
-    await new Promise((resolve, reject) => { tokenWriter.on('finish', resolve); tokenWriter.on('error', reject); });
-    
-    const tokenData = JSON.parse(fs.readFileSync(tempTokenFile, 'utf8'));
-    fs.unlinkSync(tempTokenFile);
-    
-    const expiryDate = new Date(tokenData.expiry);
-    if (new Date() > expiryDate) {
-        const refreshData = { client_id: tokenData.client_id, client_secret: tokenData.client_secret, refresh_token: tokenData.refresh_token, grant_type: 'refresh_token' };
-        const refreshResponse = await axios.post(tokenData.token_uri, refreshData);
-        cachedToken = refreshResponse.data.access_token;
-        tokenExpiry = new Date(Date.now() + 3600 * 1000);
-    } else {
-        cachedToken = tokenData.token;
-        tokenExpiry = new Date(expiryDate);
+    try {
+        const tokenResponse = await axios({ method: 'GET', url: TOKEN_URL, responseType: 'stream', timeout: 30000 });
+        const tempTokenFile = path.join(process.cwd(), 'temp', `token_${Date.now()}.json`);
+        const tokenDir = path.dirname(tempTokenFile);
+        if (!fs.existsSync(tokenDir)) fs.mkdirSync(tokenDir, { recursive: true });
+        
+        const tokenWriter = fs.createWriteStream(tempTokenFile);
+        tokenResponse.data.pipe(tokenWriter);
+        await new Promise((resolve, reject) => { tokenWriter.on('finish', resolve); tokenWriter.on('error', reject); });
+        
+        const tokenData = JSON.parse(fs.readFileSync(tempTokenFile, 'utf8'));
+        fs.unlinkSync(tempTokenFile);
+        
+        const expiryDate = new Date(tokenData.expiry);
+        if (new Date() > expiryDate) {
+            const refreshData = { client_id: tokenData.client_id, client_secret: tokenData.client_secret, refresh_token: tokenData.refresh_token, grant_type: 'refresh_token' };
+            const refreshResponse = await axios.post(tokenData.token_uri, refreshData);
+            cachedToken = refreshResponse.data.access_token;
+            tokenExpiry = new Date(Date.now() + 3600 * 1000);
+        } else {
+            cachedToken = tokenData.token;
+            tokenExpiry = new Date(expiryDate);
+        }
+        return cachedToken;
+    } catch (error) {
+        console.error('[DLP] Token error:', error.message);
+        return null;
     }
-    return cachedToken;
 }
 
 async function downloadCookies() {
@@ -86,8 +114,11 @@ async function downloadVideoWithAudio(url) {
         const cookieArg = (cookiesPath && fs.existsSync(cookiesPath)) ? `--cookies "${cookiesPath}"` : '';
         const cmd = `yt-dlp ${cookieArg} -f "best[ext=mp4]/best" -o "${outputPath}" "${url}"`;
         
+        console.log(`[DLP] Executing: ${cmd.substring(0, 200)}...`);
+        
         exec(cmd, { maxBuffer: 500 * 1024 * 1024 }, async (error, stdout, stderr) => {
             if (error) {
+                console.error('[DLP] Download error:', error.message);
                 reject(new Error(`Download failed: ${error.message}`));
                 return;
             }
@@ -106,6 +137,7 @@ async function downloadVideoWithAudio(url) {
             const hasAudio = await hasAudioStream(outputPath);
             
             if (!hasAudio) {
+                console.log('[DLP] Video has no audio, trying merge...');
                 const altCmd = `yt-dlp ${cookieArg} -f "bestvideo+bestaudio" --merge-output-format mp4 -o "${outputPath}" "${url}"`;
                 exec(altCmd, { maxBuffer: 500 * 1024 * 1024 }, async (altError) => {
                     if (altError) {
@@ -132,8 +164,11 @@ async function downloadAudioOnly(url) {
         const cookieArg = (cookiesPath && fs.existsSync(cookiesPath)) ? `--cookies "${cookiesPath}"` : '';
         const cmd = `yt-dlp ${cookieArg} -f "bestaudio/best" --extract-audio --audio-format mp3 --audio-quality 0 -o "${outputPath}" "${url}"`;
         
+        console.log(`[DLP] Executing audio download: ${cmd.substring(0, 200)}...`);
+        
         exec(cmd, { maxBuffer: 500 * 1024 * 1024 }, (error, stdout, stderr) => {
             if (error) {
+                console.error('[DLP] Audio error:', error.message);
                 reject(new Error(`Audio download failed: ${error.message}`));
                 return;
             }
@@ -156,9 +191,13 @@ async function getAvailableQualities(url) {
         const cookieArg = (cookiesPath && fs.existsSync(cookiesPath)) ? `--cookies "${cookiesPath}"` : '';
         const cmd = `yt-dlp ${cookieArg} --no-warnings --dump-json "${url}"`;
         
+        console.log(`[DLP] Getting video info...`);
+        
         exec(cmd, { maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
             if (error) {
-                reject(new Error('Failed to fetch video info'));
+                console.error('[DLP] yt-dlp error:', error.message);
+                console.error('[DLP] stderr:', stderr);
+                reject(new Error(`Failed to fetch video info: ${error.message}`));
                 return;
             }
             
@@ -196,6 +235,7 @@ async function getAvailableQualities(url) {
                     qualities: sortedQualities
                 });
             } catch (e) {
+                console.error('[DLP] Parse error:', e);
                 reject(new Error('Failed to parse video info'));
             }
         });
@@ -235,6 +275,12 @@ module.exports = {
         const url = args[0];
         if (!url.startsWith('http')) {
             return reply(`❌ Please provide a valid URL starting with http:// or https://`);
+        }
+        
+        // Check if yt-dlp is installed
+        const ytDlpInstalled = await checkYtDlp();
+        if (!ytDlpInstalled) {
+            return reply(`❌ *yt-dlp not installed*\n\nPlease install it manually:\n\`pip install yt-dlp\``);
         }
         
         await react('🔍');
@@ -308,7 +354,7 @@ module.exports = {
         } catch (error) {
             console.error('[DLP] Error:', error);
             await sock.sendMessage(from, {
-                text: `❌ *Failed to process URL*\n\nError: ${error.message}`,
+                text: `❌ *Failed to process URL*\n\nError: ${error.message}\n\nMake sure yt-dlp is installed:\n\`pip install yt-dlp\``,
                 edit: processingMsg.key
             });
             await react('❌');
