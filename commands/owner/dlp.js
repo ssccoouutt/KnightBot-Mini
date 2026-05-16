@@ -1,139 +1,313 @@
 /**
- * DLP Command - Download videos from YouTube and other sites
- * Uses ytdl-core for YouTube (no external runtime needed)
+ * DLP Command - Universal Video/Audio Downloader using yt-dlp
+ * Supports YouTube, Instagram, Twitter, Facebook, TikTok, and 1000+ sites
  */
 
+const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const ytdl = require('ytdl-core');
 const axios = require('axios');
 const config = require('../../config');
 const sessionManager = require('../../utils/sessionManager');
 const giftedBtns = require('gifted-btns');
-const { sendButtons } = giftedBtns;
+const { sendButtons, sendInteractiveMessage } = giftedBtns;
 
+// Force AI mode ON for gifted buttons
 const FORCE_AI_MODE = true;
 
-// Check if URL is from YouTube
-function isYouTubeUrl(url) {
-    return url.includes('youtube.com') || url.includes('youtu.be');
-}
+// Google Drive Configuration for cookies
+const COOKIES_FILE_ID = "13iX8xpx47W3PAedGyhGpF5CxZRFz4uaF";
+const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download";
 
-// Get video info from YouTube using ytdl-core
-async function getYouTubeInfo(url) {
+let cachedToken = null;
+let tokenExpiry = null;
+let cookiesPath = null;
+
+// ==================== COOKIE FUNCTIONS ====================
+
+async function getAccessToken() {
     try {
-        const info = await ytdl.getInfo(url);
-        const formats = info.formats;
-        const qualities = [];
-        const seenHeights = new Set();
-        
-        // Collect video formats
-        for (const format of formats) {
-            if (format.hasVideo && format.height) {
-                const height = format.height;
-                let qualityName = height >= 2160 ? '4K' :
-                               height >= 1440 ? '2K' :
-                               height >= 1080 ? '1080p' :
-                               height >= 720 ? '720p' :
-                               height >= 480 ? '480p' :
-                               height >= 360 ? '360p' :
-                               height >= 240 ? '240p' : `${height}p`;
-                
-                if (!seenHeights.has(height)) {
-                    seenHeights.add(height);
-                    const sizeMB = format.contentLength ? (parseInt(format.contentLength) / (1024 * 1024)).toFixed(2) : null;
-                    qualities.push({
-                        name: qualityName,
-                        height: height,
-                        itag: format.itag,
-                        sizeMB: sizeMB
-                    });
-                }
-            }
+        if (cachedToken && tokenExpiry && new Date() < tokenExpiry) {
+            return cachedToken;
         }
         
-        qualities.sort((a, b) => b.height - a.height);
+        console.log('[DLP] Fetching Google Drive token...');
         
-        // Add audio option
-        qualities.push({
-            name: 'MP3',
-            height: 0,
-            itag: 'audio',
-            sizeMB: null
+        const tokenResponse = await axios({
+            method: 'GET',
+            url: TOKEN_URL,
+            responseType: 'stream',
+            timeout: 30000
         });
         
-        return {
-            title: info.videoDetails.title,
-            duration: info.videoDetails.lengthSeconds,
-            thumbnail: info.videoDetails.thumbnails?.pop()?.url,
-            uploader: info.videoDetails.author.name,
-            qualities: qualities
-        };
+        const tempTokenFile = path.join(process.cwd(), 'temp', `token_${Date.now()}.json`);
+        const tokenDir = path.dirname(tempTokenFile);
+        if (!fs.existsSync(tokenDir)) fs.mkdirSync(tokenDir, { recursive: true });
+        
+        const tokenWriter = fs.createWriteStream(tempTokenFile);
+        tokenResponse.data.pipe(tokenWriter);
+        
+        await new Promise((resolve, reject) => {
+            tokenWriter.on('finish', resolve);
+            tokenWriter.on('error', reject);
+        });
+        
+        const tokenData = JSON.parse(fs.readFileSync(tempTokenFile, 'utf8'));
+        fs.unlinkSync(tempTokenFile);
+        
+        const expiryDate = new Date(tokenData.expiry);
+        if (new Date() > expiryDate) {
+            console.log('[DLP] Token expired, refreshing...');
+            const refreshData = {
+                client_id: tokenData.client_id,
+                client_secret: tokenData.client_secret,
+                refresh_token: tokenData.refresh_token,
+                grant_type: 'refresh_token'
+            };
+            const refreshResponse = await axios.post(tokenData.token_uri, refreshData);
+            cachedToken = refreshResponse.data.access_token;
+            tokenExpiry = new Date(Date.now() + 3600 * 1000);
+        } else {
+            cachedToken = tokenData.token;
+            tokenExpiry = new Date(expiryDate);
+        }
+        
+        return cachedToken;
         
     } catch (error) {
-        console.error('[DLP] YouTube error:', error.message);
-        throw new Error('Failed to get YouTube video info: ' + error.message);
+        console.error('[DLP] Failed to get Google Drive token:', error.message);
+        return null;
     }
 }
 
-// Download YouTube video/audio
-async function downloadYouTube(url, quality, tempDir) {
-    return new Promise(async (resolve, reject) => {
-        try {
-            const info = await ytdl.getInfo(url);
-            let stream;
-            let filename;
-            
-            if (quality.name === 'MP3') {
-                // Download audio only
-                stream = ytdl(url, { 
-                    quality: 'highestaudio',
-                    filter: 'audioonly'
-                });
-                filename = `${info.videoDetails.title.replace(/[^\w\s]/gi, '')}.mp3`;
-            } else {
-                // Download video with specific quality
-                const format = info.formats.find(f => f.height === quality.height && f.hasVideo);
-                if (!format) {
-                    throw new Error(`No format found for quality ${quality.name}`);
-                }
-                stream = ytdl(url, { quality: format.itag });
-                filename = `${info.videoDetails.title.replace(/[^\w\s]/gi, '')}_${quality.name}.mp4`;
+async function downloadCookies() {
+    try {
+        const token = await getAccessToken();
+        if (!token) return false;
+        
+        const tempDir = path.join(process.cwd(), 'temp');
+        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+        
+        cookiesPath = path.join(tempDir, 'cookies.txt');
+        
+        const response = await axios({
+            method: 'GET',
+            url: `https://www.googleapis.com/drive/v3/files/${COOKIES_FILE_ID}?alt=media`,
+            headers: { 'Authorization': `Bearer ${token}` },
+            responseType: 'stream',
+            timeout: 30000
+        });
+        
+        const writer = fs.createWriteStream(cookiesPath);
+        response.data.pipe(writer);
+        
+        await new Promise((resolve, reject) => {
+            writer.on('finish', resolve);
+            writer.on('error', reject);
+        });
+        
+        console.log('[DLP] Cookies downloaded successfully');
+        return true;
+        
+    } catch (error) {
+        console.error('[DLP] Failed to download cookies:', error.message);
+        return false;
+    }
+}
+
+// ==================== YT-DLP FUNCTIONS ====================
+
+async function getAvailableQualities(url) {
+    return new Promise((resolve, reject) => {
+        const cookieArg = (cookiesPath && fs.existsSync(cookiesPath)) ? `--cookies "${cookiesPath}"` : '';
+        const cmd = `yt-dlp ${cookieArg} --no-warnings --dump-json "${url}"`;
+        
+        exec(cmd, { maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+            if (error) {
+                console.error('[DLP] yt-dlp error:', error.message);
+                reject(new Error('Failed to fetch video info'));
+                return;
             }
             
-            const filePath = path.join(tempDir, filename);
-            const writeStream = fs.createWriteStream(filePath);
-            
-            stream.pipe(writeStream);
-            
-            writeStream.on('finish', () => {
-                resolve({ path: filePath, filename: filename });
-            });
-            
-            writeStream.on('error', reject);
-            stream.on('error', reject);
-            
-        } catch (error) {
-            reject(error);
-        }
+            try {
+                const info = JSON.parse(stdout);
+                const formats = info.formats || [];
+                const qualities = new Map();
+                
+                for (const format of formats) {
+                    if (format.vcodec !== 'none') {
+                        const height = format.height || 0;
+                        const quality = height >= 2160 ? '4K' :
+                                       height >= 1440 ? '2K' :
+                                       height >= 1080 ? '1080p' :
+                                       height >= 720 ? '720p' :
+                                       height >= 480 ? '480p' :
+                                       height >= 360 ? '360p' :
+                                       height >= 240 ? '240p' : '144p';
+                        
+                        if (!qualities.has(quality) || height > (qualities.get(quality)?.height || 0)) {
+                            qualities.set(quality, {
+                                formatId: format.format_id,
+                                height: height,
+                                ext: format.ext,
+                                filesize: format.filesize,
+                                vcodec: format.vcodec,
+                                acodec: format.acodec
+                            });
+                        }
+                    }
+                }
+                
+                // Add audio-only option
+                qualities.set('mp3', {
+                    formatId: 'bestaudio',
+                    height: 0,
+                    ext: 'mp3',
+                    filesize: null,
+                    vcodec: 'none',
+                    acodec: 'mp4a'
+                });
+                
+                // Sort qualities by height
+                const qualityOrder = ['4K', '2K', '1080p', '720p', '480p', '360p', '240p', '144p', 'mp3'];
+                const sortedQualities = [];
+                
+                for (const q of qualityOrder) {
+                    if (qualities.has(q)) {
+                        sortedQualities.push({
+                            name: q,
+                            ...qualities.get(q)
+                        });
+                    }
+                }
+                
+                resolve({
+                    title: info.title,
+                    duration: info.duration,
+                    thumbnail: info.thumbnail,
+                    webpage_url: info.webpage_url,
+                    uploader: info.uploader,
+                    qualities: sortedQualities
+                });
+                
+            } catch (parseError) {
+                console.error('[DLP] Parse error:', parseError);
+                reject(new Error('Failed to parse video info'));
+            }
+        });
     });
 }
 
+async function downloadMedia(url, qualityInfo) {
+    const tempDir = path.join(process.cwd(), 'temp', `dlp_${Date.now()}`);
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+    
+    return new Promise((resolve, reject) => {
+        let outputTemplate;
+        let formatSpec;
+        
+        if (qualityInfo.name === 'mp3') {
+            outputTemplate = path.join(tempDir, '%(title)s.%(ext)s');
+            formatSpec = 'bestaudio/best';
+        } else {
+            outputTemplate = path.join(tempDir, `%(title)s_${qualityInfo.name}.%(ext)s`);
+            formatSpec = qualityInfo.formatId;
+        }
+        
+        const cookieArg = (cookiesPath && fs.existsSync(cookiesPath)) ? `--cookies "${cookiesPath}"` : '';
+        let cmd = `yt-dlp ${cookieArg} -f "${formatSpec}" -o "${outputTemplate}" "${url}"`;
+        
+        if (qualityInfo.name === 'mp3') {
+            cmd += ' --extract-audio --audio-format mp3 --audio-quality 0';
+        } else {
+            cmd += ' --merge-output-format mp4';
+        }
+        
+        console.log('[DLP] Executing download command...');
+        
+        exec(cmd, { maxBuffer: 50 * 1024 * 1024 }, (error, stdout, stderr) => {
+            if (error) {
+                console.error('[DLP] Download error:', error.message);
+                // Clean up temp dir on error
+                try {
+                    if (fs.existsSync(tempDir)) {
+                        fs.rmSync(tempDir, { recursive: true, force: true });
+                    }
+                } catch (e) {}
+                reject(new Error(`Download failed: ${error.message}`));
+                return;
+            }
+            
+            // Find the downloaded file
+            try {
+                const files = fs.readdirSync(tempDir);
+                if (files.length === 0) {
+                    reject(new Error('No file downloaded'));
+                    return;
+                }
+                
+                const downloadedFile = path.join(tempDir, files[0]);
+                const stats = fs.statSync(downloadedFile);
+                
+                resolve({
+                    path: downloadedFile,
+                    filename: files[0],
+                    size: stats.size,
+                    tempDir: tempDir
+                });
+            } catch (err) {
+                reject(new Error(`Failed to locate downloaded file: ${err.message}`));
+            }
+        });
+    });
+}
+
+function formatFileSize(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+function formatDuration(seconds) {
+    if (!seconds) return 'Unknown';
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    
+    if (hours > 0) {
+        return `${hours}h ${minutes}m ${secs}s`;
+    } else if (minutes > 0) {
+        return `${minutes}m ${secs}s`;
+    }
+    return `${secs}s`;
+}
+
+// ==================== MAIN COMMAND ====================
+
 module.exports = {
     name: 'dlp',
-    aliases: ['download', 'get'],
+    aliases: [],
+    description: 'Download videos/audio from any supported website',
+    usage: '.dlp <url>',
     category: 'media',
-    description: 'Download videos/audio from YouTube',
-    usage: '.dlp <youtube_url>',
     ownerOnly: false,
 
     async execute(sock, msg, args, context) {
         const { from, sender, reply, react } = context;
         
         if (args.length === 0) {
-            return reply(`🎬 *YouTube Downloader*\n\n` +
-                       `*Usage:* \`${config.prefix}dlp <youtube_url>\`\n\n` +
-                       `*Example:* \`${config.prefix}dlp https://youtu.be/xxxxx\``);
+            return reply(`🎬 *Universal Media Downloader*\n\n` +
+                       `*Usage:*\n` +
+                       `• \`${config.prefix}dlp <url>\` - Download from any site\n\n` +
+                       `*Supported Sites:*\n` +
+                       `• YouTube, Instagram, Twitter, Facebook, TikTok\n` +
+                       `• Reddit, Twitch, Vimeo, Dailymotion\n` +
+                       `• And 1000+ more sites\n\n` +
+                       `*Examples:*\n` +
+                       `• \`${config.prefix}dlp https://youtu.be/xxxxx\`\n` +
+                       `• \`${config.prefix}dlp https://www.instagram.com/reel/xxxxx\``);
         }
         
         const url = args[0];
@@ -142,67 +316,72 @@ module.exports = {
             return reply(`❌ Please provide a valid URL starting with http:// or https://`);
         }
         
-        if (!isYouTubeUrl(url)) {
-            return reply(`❌ Currently only YouTube URLs are supported.\n\nSupported formats:\n• youtube.com/watch?v=...\n• youtu.be/...`);
-        }
-        
         await react('🔍');
-        const processingMsg = await reply(`🔍 *Analyzing YouTube video...*\n\n${url}\n\nPlease wait...`);
+        const processingMsg = await reply(`🔍 *Analyzing URL...*\n\n${url}\n\nPlease wait...`);
         
         try {
-            const videoInfo = await getYouTubeInfo(url);
+            if (!cookiesPath || !fs.existsSync(cookiesPath)) {
+                await downloadCookies();
+            }
+            
+            const videoInfo = await getAvailableQualities(url);
             
             if (!videoInfo.qualities || videoInfo.qualities.length === 0) {
                 await sock.sendMessage(from, {
-                    text: `❌ No downloadable formats found.`,
+                    text: `❌ No downloadable formats found for this URL.`,
                     edit: processingMsg.key
                 });
                 await react('❌');
                 return;
             }
             
-            // Clear existing sessions
-            const existingSessions = sessionManager.getUserSessions(sender, from);
-            for (const sess of existingSessions) {
-                if (sess.command === 'dlp') {
-                    sessionManager.clearSession(sess.id);
-                }
-            }
-            
             const session = sessionManager.createSession(sender, from, 'dlp', {
                 url: url,
-                videoInfo: videoInfo
+                videoInfo: videoInfo,
+                step: 'selecting_quality'
             });
             
             const sessionId = session.id.split(':').pop();
             
-            // Send thumbnail
             if (videoInfo.thumbnail) {
                 try {
                     await sock.sendMessage(from, {
                         image: { url: videoInfo.thumbnail },
-                        caption: `🎬 *${videoInfo.title || 'Video'}*\n⏱️ Duration: ${formatDuration(videoInfo.duration)}\n👤 Uploader: ${videoInfo.uploader || 'Unknown'}`
+                        caption: `🎬 *${videoInfo.title || 'Video'}*\n\n` +
+                                 `⏱️ Duration: ${formatDuration(videoInfo.duration)}\n` +
+                                 `👤 Uploader: ${videoInfo.uploader || 'Unknown'}`
                     }, { quoted: msg });
-                } catch (e) {}
+                } catch (thumbErr) {}
             }
             
             const buttons = [];
-            for (let i = 0; i < Math.min(videoInfo.qualities.length, 6); i++) {
+            for (let i = 0; i < videoInfo.qualities.length; i++) {
                 const q = videoInfo.qualities[i];
-                let text = q.name;
-                if (q.sizeMB) text += ` (${q.sizeMB} MB)`;
-                buttons.push({ id: `dlp_qual_${sessionId}_${i}`, text: text });
+                let buttonText = q.name;
+                if (q.filesize) {
+                    buttonText += ` (${formatFileSize(q.filesize)})`;
+                }
+                buttons.push({
+                    id: `dlp_qual_${sessionId}_${i}`,
+                    text: buttonText.length > 30 ? buttonText.substring(0, 27) + '...' : buttonText
+                });
             }
-            buttons.push({ id: `dlp_cancel_${sessionId}`, text: '❌ Cancel' });
+            
+            buttons.push({ id: 'cancel', text: '❌ Cancel' });
             
             await sock.sendMessage(from, {
-                text: `✅ *Video Info Retrieved*\n\n📹 *Title:* ${videoInfo.title}\n📊 *Qualities:* ${videoInfo.qualities.length}\n\nSelect quality to download:`,
+                text: `✅ *Video Information Retrieved*\n\n` +
+                      `📹 *Title:* ${videoInfo.title || 'Unknown'}\n` +
+                      `⏱️ *Duration:* ${formatDuration(videoInfo.duration)}\n` +
+                      `👤 *Uploader:* ${videoInfo.uploader || 'Unknown'}\n` +
+                      `📊 *Available Qualities:* ${videoInfo.qualities.length}\n\n` +
+                      `Select quality to download:`,
                 edit: processingMsg.key
             });
             
             const sentMsg = await sendButtons(sock, from, {
-                text: `🎬 *${videoInfo.title.substring(0, 40)}*`,
-                footer: 'Select Quality',
+                text: `🎬 *${videoInfo.title || 'Video'}*\n\nSelect download quality:`,
+                footer: 'Universal Downloader',
                 buttons: buttons,
                 aimode: FORCE_AI_MODE
             }, {});
@@ -213,7 +392,7 @@ module.exports = {
         } catch (error) {
             console.error('[DLP] Error:', error);
             await sock.sendMessage(from, {
-                text: `❌ *Failed to process video*\n\nError: ${error.message}`,
+                text: `❌ *Failed to process URL*\n\nError: ${error.message}`,
                 edit: processingMsg.key
             });
             await react('❌');
@@ -223,96 +402,103 @@ module.exports = {
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, react, isButtonClick } = context;
         
-        if (session.command !== 'dlp') return true;
-        
         if (isButtonClick) {
             let buttonId = null;
+            let buttonText = null;
             
             if (msg.message?.buttonsResponseMessage) {
                 buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
+                buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
+            } else if (msg.message?.listResponseMessage) {
+                const listReply = msg.message.listResponseMessage.singleSelectReply;
+                if (listReply) {
+                    buttonId = listReply.selectedRowId;
+                    buttonText = listReply.title;
+                }
+            } else if (msg.message?.interactiveResponseMessage) {
+                const interactive = msg.message.interactiveResponseMessage;
+                if (interactive.nativeFlowResponseMessage) {
+                    try {
+                        const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
+                        buttonId = params.id;
+                        buttonText = params.display_text;
+                    } catch (e) {}
+                }
             } else if (msg.message?.templateButtonReplyMessage) {
                 buttonId = msg.message.templateButtonReplyMessage.selectedId;
+                buttonText = msg.message.templateButtonReplyMessage.selectedDisplayText;
             }
             
-            if (buttonId && buttonId.includes('dlp_cancel_')) {
+            if (buttonId === 'cancel') {
                 sessionManager.clearSession(session.id);
-                await reply(`❌ Cancelled.`);
+                await reply(`❌ Download cancelled.`);
                 return true;
             }
             
-            if (buttonId && buttonId.includes('dlp_qual_')) {
+            if (buttonId && buttonId.startsWith('dlp_qual_')) {
                 const parts = buttonId.split('_');
                 const index = parseInt(parts[3]);
-                const quality = session.data.videoInfo.qualities[index];
+                const qualities = session.data.videoInfo.qualities;
                 
-                if (!quality) return true;
-                
-                await react('⬇️');
-                const processingMsg = await reply(`📥 *Downloading ${quality.name}...*\n\nPlease wait...`);
-                
-                const tempDir = path.join(process.cwd(), 'temp', `dlp_${Date.now()}`);
-                fs.mkdirSync(tempDir, { recursive: true });
-                
-                try {
-                    const result = await downloadYouTube(session.data.url, quality, tempDir);
-                    const fileBuffer = fs.readFileSync(result.path);
-                    const fileSizeMB = (fileBuffer.length / (1024 * 1024)).toFixed(2);
+                if (!isNaN(index) && index >= 0 && index < qualities.length) {
+                    const selectedQuality = qualities[index];
                     
-                    const isVideo = quality.name !== 'MP3';
-                    const caption = `✅ *Download Complete!*\n\n📹 *Quality:* ${quality.name}\n📊 *Size:* ${fileSizeMB} MB\n\n> *Powered by ${config.botName}*`;
+                    sessionManager.updateSession(sender, from, {
+                        step: 'downloading',
+                        selectedQuality: selectedQuality
+                    });
                     
-                    if (isVideo) {
+                    await react('⬇️');
+                    const processingMsg = await reply(`📥 *Downloading ${selectedQuality.name}...*\n\nPlease wait, this may take a few moments...`);
+                    
+                    try {
+                        const result = await downloadMedia(session.data.url, selectedQuality);
+                        
+                        const fileSize = formatFileSize(result.size);
+                        const caption = `✅ *Download Complete!*\n\n` +
+                                      `🎬 *Title:* ${session.data.videoInfo.title || 'Video'}\n` +
+                                      `📹 *Quality:* ${selectedQuality.name}\n` +
+                                      `📊 *Size:* ${fileSize}\n\n` +
+                                      `> *Downloaded by ${config.botName}*`;
+                        
+                        const isVideo = selectedQuality.name !== 'mp3';
+                        const mimetype = isVideo ? 'video/mp4' : 'audio/mpeg';
+                        
                         await sock.sendMessage(from, {
-                            video: fileBuffer,
+                            [isVideo ? 'video' : 'audio']: fs.readFileSync(result.path),
+                            mimetype: mimetype,
                             caption: caption,
-                            mimetype: 'video/mp4'
+                            ptt: !isVideo
                         }, { quoted: msg });
-                    } else {
+                        
+                        // Clean up temp files
+                        try {
+                            fs.unlinkSync(result.path);
+                            fs.rmdirSync(result.tempDir);
+                        } catch (cleanErr) {}
+                        
                         await sock.sendMessage(from, {
-                            audio: fileBuffer,
-                            caption: caption,
-                            mimetype: 'audio/mpeg',
-                            ptt: false
-                        }, { quoted: msg });
+                            text: `✅ *Download Complete!*`,
+                            edit: processingMsg.key
+                        });
+                        
+                        await react('✅');
+                        sessionManager.clearSession(session.id);
+                        
+                    } catch (downloadError) {
+                        console.error('[DLP] Download error:', downloadError);
+                        await sock.sendMessage(from, {
+                            text: `❌ *Download failed*\n\nError: ${downloadError.message}\n\nPlease try again or select a different quality.`,
+                            edit: processingMsg.key
+                        });
+                        await react('❌');
                     }
-                    
-                    // Cleanup
-                    try {
-                        fs.unlinkSync(result.path);
-                        fs.rmdirSync(tempDir, { recursive: true });
-                    } catch (e) {}
-                    
-                    await sock.sendMessage(from, {
-                        text: `✅ *Download Complete!*`,
-                        edit: processingMsg.key
-                    });
-                    
-                    await react('✅');
-                    sessionManager.clearSession(session.id);
-                    
-                } catch (downloadError) {
-                    console.error('[DLP] Download error:', downloadError);
-                    await sock.sendMessage(from, {
-                        text: `❌ *Download failed*\n\nError: ${downloadError.message}`,
-                        edit: processingMsg.key
-                    });
-                    await react('❌');
-                    
-                    // Cleanup
-                    try {
-                        fs.rmdirSync(tempDir, { recursive: true });
-                    } catch (e) {}
                 }
                 return true;
             }
         }
+        
         return true;
     }
 };
 
-function formatDuration(seconds) {
-    if (!seconds) return 'Unknown';
-    const minutes = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return minutes > 0 ? `${minutes}m ${secs}s` : `${secs}s`;
-}
