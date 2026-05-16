@@ -3,7 +3,7 @@
  * - Displays file size with each quality option
  * - Audio-only option (MP3)
  * - Files > 200MB sent as document, otherwise as media
- * - Validates file before sending
+ * - FIXED: Actually downloads the selected quality
  */
 
 const { exec } = require('child_process');
@@ -152,25 +152,40 @@ async function downloadMedia(url, quality, tempDir) {
         const outputPath = path.join(tempDir, 'output.mp4');
         
         let cmd;
-        if (quality.name === 'MP3' || quality.name === 'mp3') {
+        if (quality.name === 'MP3') {
             cmd = `yt-dlp -f bestaudio -x --audio-format mp3 --audio-quality 0 -o "${outputPath}" "${url}"`;
         } else {
-            cmd = `yt-dlp -f "best[height<=${quality.height}][ext=mp4]/best[height<=${quality.height}]" --merge-output-format mp4 -o "${outputPath}" "${url}"`;
+            // Extract the numeric height from quality name (e.g., "1080p" -> 1080)
+            let height = quality.height;
+            if (!height) {
+                const match = quality.name.match(/(\d+)p/);
+                if (match) height = parseInt(match[1]);
+                else height = 720;
+            }
+            
+            // Download specific quality
+            cmd = `yt-dlp -f "bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${height}][ext=mp4]" --merge-output-format mp4 -o "${outputPath}" "${url}"`;
         }
         
-        console.log('[DLP] Running download command');
+        console.log('[DLP] Downloading with command:', cmd);
         
         exec(cmd, { maxBuffer: 500 * 1024 * 1024 }, (error, stdout, stderr) => {
             if (error) {
                 console.error('[DLP] Download error:', stderr);
-                const fallbackCmd = `yt-dlp -f best -o "${outputPath}" "${url}"`;
-                exec(fallbackCmd, { maxBuffer: 500 * 1024 * 1024 }, (fallbackError) => {
-                    if (fallbackError) {
-                        reject(new Error('Download failed'));
-                    } else {
-                        resolve(outputPath);
-                    }
-                });
+                
+                // Fallback: use format selector by format id if available
+                if (quality.formatId) {
+                    const fallbackCmd = `yt-dlp -f "${quality.formatId}+bestaudio" --merge-output-format mp4 -o "${outputPath}" "${url}"`;
+                    exec(fallbackCmd, { maxBuffer: 500 * 1024 * 1024 }, (fallbackError) => {
+                        if (fallbackError) {
+                            reject(new Error(stderr || 'Download failed'));
+                        } else {
+                            resolve(outputPath);
+                        }
+                    });
+                } else {
+                    reject(new Error(stderr || 'Download failed'));
+                }
             } else {
                 resolve(outputPath);
             }
@@ -184,13 +199,11 @@ async function validateFile(filePath) {
             resolve({ valid: false, reason: 'File not found' });
             return;
         }
-        
         const stats = fs.statSync(filePath);
         if (stats.size < 1024) {
             resolve({ valid: false, reason: 'File too small (corrupted)' });
             return;
         }
-        
         resolve({ valid: true, size: stats.size });
     });
 }
@@ -244,11 +257,9 @@ module.exports = {
             const qualities = [];
             const seenHeights = new Set();
             
-            // First pass - collect all formats with their sizes
-            const formatMap = new Map();
-            
+            // Collect unique qualities with their format IDs
             for (const format of formats) {
-                if (format.vcodec !== 'none' && format.height) {
+                if (format.vcodec !== 'none' && format.height && format.acodec !== 'none') {
                     const height = format.height;
                     let qualityName = '';
                     if (height >= 2160) qualityName = '4K';
@@ -260,40 +271,29 @@ module.exports = {
                     else if (height >= 240) qualityName = '240p';
                     else qualityName = `${height}p`;
                     
-                    const fileSize = format.filesize || format.filesize_approx || 0;
-                    
-                    if (!formatMap.has(qualityName) || formatMap.get(qualityName).height < height) {
-                        formatMap.set(qualityName, {
-                            name: qualityName,
+                    if (!seenHeights.has(height)) {
+                        seenHeights.add(height);
+                        const fileSize = format.filesize || format.filesize_approx || 0;
+                        qualities.push({ 
+                            name: qualityName, 
                             height: height,
+                            formatId: format.format_id,
                             size: fileSize,
-                            sizeText: fileSize > 0 ? formatFileSize(fileSize) : 'Unknown'
+                            sizeText: formatFileSize(fileSize)
                         });
                     }
                 }
             }
             
-            // Convert map to array and sort
-            for (const [name, data] of formatMap) {
-                qualities.push(data);
-            }
             qualities.sort((a, b) => b.height - a.height);
-            
-            // Get audio size separately
-            let audioSize = 0;
-            for (const format of formats) {
-                if (format.vcodec === 'none' && format.acodec !== 'none') {
-                    const size = format.filesize || format.filesize_approx || 0;
-                    if (size > audioSize) audioSize = size;
-                }
-            }
             
             // Add Audio-only option
             qualities.push({ 
                 name: 'MP3', 
                 height: 0,
-                size: audioSize,
-                sizeText: audioSize > 0 ? formatFileSize(audioSize) : 'Unknown'
+                formatId: null,
+                size: 0,
+                sizeText: 'Unknown'
             });
             
             if (qualities.length === 0) {
@@ -342,8 +342,6 @@ module.exports = {
                 buttons.push({ id: `dlp_qual_${sessionId}_${i}`, text: buttonText });
             }
             buttons.push({ id: `dlp_cancel_${sessionId}`, text: '❌ Cancel' });
-            
-            console.log('[DLP] Quality buttons:', buttons.map(b => b.text));
             
             const sentMsg = await sendButtons(sock, from, {
                 text: `Select quality to download:`,
@@ -399,7 +397,7 @@ module.exports = {
                 fs.mkdirSync(tempDir, { recursive: true });
                 
                 try {
-                    // Download the file
+                    // Download the file with the selected quality
                     await downloadMedia(session.data.url, quality, tempDir);
                     
                     // Find the downloaded file
@@ -423,13 +421,13 @@ module.exports = {
                     const fileSizeMB = fileBuffer.length / (1024 * 1024);
                     const fileSizeText = formatFileSize(fileBuffer.length);
                     
-                    console.log(`[DLP] File size: ${fileSizeText}`);
+                    console.log(`[DLP] Downloaded file size: ${fileSizeText} for quality ${quality.name}`);
                     
                     // Create proper filename
                     let baseFilename = session.data.videoInfo.title || 'video';
                     baseFilename = sanitizeFilename(baseFilename);
                     
-                    const isMp3 = quality.name === 'MP3' || quality.name === 'mp3';
+                    const isMp3 = quality.name === 'MP3';
                     const finalFileName = isMp3 ? `${baseFilename}.mp3` : `${baseFilename}_${quality.name}.mp4`;
                     
                     const caption = `✅ *Download Complete!*\n\n` +
@@ -442,10 +440,9 @@ module.exports = {
                     const SIZE_THRESHOLD_MB = 200;
                     const useDocument = fileSizeMB > SIZE_THRESHOLD_MB;
                     
-                    console.log(`[DLP] File size: ${fileSizeMB.toFixed(2)} MB - Sending as ${useDocument ? 'DOCUMENT' : 'MEDIA'}`);
+                    console.log(`[DLP] Sending as ${useDocument ? 'DOCUMENT' : 'MEDIA'}`);
                     
                     if (useDocument) {
-                        // Send as document for large files
                         await sock.sendMessage(from, {
                             document: fileBuffer,
                             mimetype: isMp3 ? 'audio/mpeg' : 'video/mp4',
@@ -453,7 +450,6 @@ module.exports = {
                             caption: caption
                         }, { quoted: msg });
                     } else {
-                        // Send as media for smaller files
                         if (isMp3) {
                             await sock.sendMessage(from, {
                                 audio: fileBuffer,
@@ -476,7 +472,7 @@ module.exports = {
                     } catch (e) {}
                     
                     await sock.sendMessage(from, {
-                        text: `✅ *Download Complete!*\n\nFile saved as: ${finalFileName}\nSent as: ${useDocument ? 'Document' : 'Media'}`,
+                        text: `✅ *Download Complete!*`,
                         edit: processingMsg.key
                     });
                     
