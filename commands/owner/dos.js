@@ -1,6 +1,6 @@
 /**
  * DOS Command - Stress test a URL with multiple requests
- * EXACTLY matching the Python script behavior with detailed error logging
+ * EXACTLY matching the Python script behavior with proper redirect handling
  * WARNING: Only use on your own servers or with permission!
  */
 
@@ -18,26 +18,51 @@ const activeTests = new Map();
 // Track error types
 const errorTypes = new Map();
 
-// Create a session instance that persists cookies (like Python's requests.get)
+// Create a session instance that persists cookies and handles redirects
 const createSession = () => {
+    // Create a cookie jar for persistent cookies
+    const cookieJar = {};
+    
     const session = axios.create({
-        timeout: 30000,  // Increased timeout to 30 seconds
+        timeout: 30000,
+        maxRedirects: 10,  // Allow up to 10 redirects (Python default is 30)
         validateStatus: () => true,
-        maxRedirects: 5,
         headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0'
+            'Upgrade-Insecure-Requests': '1'
         }
     });
+    
+    // Add response interceptor to handle cookies
+    session.interceptors.response.use((response) => {
+        // Store cookies from response
+        const setCookie = response.headers['set-cookie'];
+        if (setCookie) {
+            for (const cookie of setCookie) {
+                const cookieMatch = cookie.match(/^([^=]+)=([^;]+)/);
+                if (cookieMatch) {
+                    cookieJar[cookieMatch[1]] = cookieMatch[2];
+                }
+            }
+        }
+        return response;
+    });
+    
+    // Add request interceptor to send cookies
+    session.interceptors.request.use((config) => {
+        if (Object.keys(cookieJar).length > 0) {
+            const cookieString = Object.entries(cookieJar)
+                .map(([key, value]) => `${key}=${value}`)
+                .join('; ');
+            config.headers['Cookie'] = cookieString;
+        }
+        return config;
+    });
+    
     return session;
 };
 
@@ -206,24 +231,6 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
     // Reset error tracking
     errorTypes.clear();
     
-    // Create a shared session for this test
-    const sharedSession = createSession();
-    
-    // First, do a single test request to see if URL is accessible
-    console.log(`[DOS] Testing single request to: ${targetUrl}`);
-    try {
-        const testResponse = await sharedSession.get(targetUrl);
-        console.log(`[DOS] Test request - Status: ${testResponse.status}, StatusText: ${testResponse.statusText}`);
-        console.log(`[DOS] Response headers:`, JSON.stringify(testResponse.headers, null, 2));
-    } catch (testError) {
-        console.log(`[DOS] Test request FAILED - Error: ${testError.message}`);
-        if (testError.code) console.log(`[DOS] Error code: ${testError.code}`);
-        if (testError.response) {
-            console.log(`[DOS] Response status: ${testError.response.status}`);
-            console.log(`[DOS] Response data:`, testError.response.data);
-        }
-    }
-    
     // Store test info for stopping
     activeTests.set(sender, {
         stop: false,
@@ -258,30 +265,57 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
             }
             
             try {
-                const response = await threadSession.get(targetUrl);
-                successCount++;
+                // Don't follow redirects automatically - let's see where it's redirecting to
+                const response = await threadSession.get(targetUrl, {
+                    maxRedirects: 0,  // Don't auto-follow redirects
+                    validateStatus: () => true
+                });
                 
-                // Log first successful response details
-                if (successCount === 1 && failureCount === 0) {
-                    console.log(`[DOS] First successful response - Status: ${response.status}`);
+                // Check if it's a redirect
+                if (response.status >= 300 && response.status < 400) {
+                    const redirectLocation = response.headers.location;
+                    console.log(`[DOS] Redirect detected: ${response.status} -> ${redirectLocation}`);
+                    
+                    // Follow the redirect manually (like Python's requests)
+                    if (redirectLocation) {
+                        const redirectResponse = await threadSession.get(redirectLocation);
+                        if (redirectResponse.status === 200) {
+                            successCount++;
+                        } else {
+                            failureCount++;
+                            errorTypes.set(`Redirect ${response.status} -> ${redirectResponse.status}`, 
+                                (errorTypes.get(`Redirect ${response.status} -> ${redirectResponse.status}`) || 0) + 1);
+                        }
+                    } else {
+                        failureCount++;
+                        errorTypes.set(`Redirect ${response.status} (no location)`, 
+                            (errorTypes.get(`Redirect ${response.status} (no location)`) || 0) + 1);
+                    }
+                } else if (response.status === 200) {
+                    successCount++;
+                } else {
+                    failureCount++;
+                    errorTypes.set(`HTTP ${response.status}`, (errorTypes.get(`HTTP ${response.status}`) || 0) + 1);
+                    
+                    // Log first few errors
+                    if (failureCount <= 5) {
+                        console.log(`[DOS] Error #${failureCount}: HTTP ${response.status} - ${response.statusText}`);
+                        if (response.data && response.data.length < 500) {
+                            console.log(`[DOS] Response data:`, response.data);
+                        }
+                    }
                 }
             } catch (error) {
                 failureCount++;
                 
-                // Track error types
                 let errorType = error.code || error.message;
-                if (error.response) {
-                    errorType = `HTTP ${error.response.status}`;
-                }
                 errorTypes.set(errorType, (errorTypes.get(errorType) || 0) + 1);
                 
                 // Log first few errors for debugging
                 if (failureCount <= 5) {
                     console.log(`[DOS] Error #${failureCount}:`, {
                         message: error.message,
-                        code: error.code,
-                        status: error.response?.status,
-                        statusText: error.response?.statusText
+                        code: error.code
                     });
                 }
             }
