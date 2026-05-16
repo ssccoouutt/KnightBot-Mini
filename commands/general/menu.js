@@ -1,79 +1,57 @@
 /**
- * Menu Command - Display commands available to users
- * Owners see all commands with categories
- * Subscribed users see only specific commands from Google Drive list (one per line)
+ * Menu Command - Display all available commands
  */
 
-const axios = require('axios');
 const config = require('../../config');
 const database = require('../../database');
 const { loadCommands } = require('../../utils/commandLoader');
-
-// Hardcoded direct download link for subscribed users' commands
-const COMMANDS_LIST_URL = "https://drive.usercontent.google.com/download?id=1bh1iJ12OMb6_-gXI-rpsTZuCXDqTtFGu&export=download&confirm=t";
-
-// Cache for commands list
-let cachedCommands = [];
-let lastFetch = 0;
-const CACHE_TTL = 300000; // 5 minutes
-
-async function fetchCommandsList() {
-    try {
-        // Check cache
-        if (cachedCommands.length > 0 && (Date.now() - lastFetch) < CACHE_TTL) {
-            return cachedCommands;
-        }
-        
-        console.log('[MENU] Fetching commands list from Google Drive...');
-        
-        const response = await axios.get(COMMANDS_LIST_URL, {
-            timeout: 10000,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-        });
-        
-        // Parse the content (one command per line)
-        const content = response.data;
-        const commands = content.split('\n')
-            .map(line => line.trim())
-            .filter(line => line.length > 0 && !line.startsWith('#'));
-        
-        cachedCommands = commands;
-        lastFetch = Date.now();
-        
-        console.log(`[MENU] Loaded ${commands.length} commands from list`);
-        return commands;
-        
-    } catch (error) {
-        console.error('[MENU] Failed to fetch commands list:', error.message);
-        
-        // Return cached commands if available
-        if (cachedCommands.length > 0) {
-            return cachedCommands;
-        }
-        
-        // Fallback commands
-        return [
-            'ping', 'menu', 'status', 'antidelete', 'antivv', 'capture',
-            'groups', 'dlp', 'translate', 'ghibli', 'logo', 'magics', 'sora'
-        ];
-    }
-}
 
 module.exports = {
   name: 'menu',
   aliases: ['help', 'commands'],
   category: 'general',
-  description: 'Show available commands',
+  description: 'Show all available commands',
   usage: '.menu',
   
   async execute(sock, msg, args, extra) {
     try {
-      const { from, sender, reply } = extra;
+      const { from, sender, isGroup, reply } = extra;
       
       // Check if user is owner
       const isUserOwner = database.isOwner(sender);
+      
+      const commands = loadCommands();
+      const categories = {};
+      
+      // Group commands by category
+      commands.forEach((cmd, name) => {
+        if (cmd.name === name) { // Only count main command names, not aliases
+          
+          // Determine if this command should be shown to current user
+          let shouldShow = true;
+          
+          // Owner-only commands: only visible to owner
+          if (cmd.ownerOnly) {
+            shouldShow = isUserOwner;
+          }
+          // Admin-only commands: only visible to owner when self mode is on
+          else if (cmd.adminOnly) {
+            if (config.selfMode && !isUserOwner) {
+              shouldShow = false;
+            } else {
+              shouldShow = true;
+            }
+          }
+          
+          if (shouldShow) {
+            const category = cmd.category || 'general';
+            if (!categories[category]) {
+              categories[category] = [];
+            }
+            categories[category].push(cmd);
+          }
+        }
+      });
       
       const ownerNames = Array.isArray(config.ownerName) ? config.ownerName : [config.ownerName];
       const displayOwner = ownerNames[0] || config.ownerName || 'Bot Owner';
@@ -86,76 +64,130 @@ module.exports = {
       }
       menuText += `━━━━━━━━━━━━━━━━━━━━━\n\n`;
       
-      if (isUserOwner) {
-        // ==================== OWNER MENU (All commands with categories) ====================
-        const commands = loadCommands();
-        const categories = {};
-        
-        // Group commands by category
-        commands.forEach((cmd, name) => {
-          if (cmd.name === name) {
-            const category = cmd.category || 'general';
-            if (!categories[category]) {
-              categories[category] = [];
-            }
-            categories[category].push(cmd);
-          }
+      // General Commands
+      if (categories.general) {
+        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
+        menuText += `┃ 🧭 GENERAL COMMANDS\n`;
+        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
+        categories.general.forEach(cmd => {
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
         });
-        
-        // Define category order and display names
-        const categoryOrder = [
-          { key: 'general', name: '🧭 GENERAL COMMANDS' },
-          { key: 'media', name: '🎞️ MEDIA COMMANDS' },
-          { key: 'fun', name: '🎭 FUN COMMANDS' },
-          { key: 'utility', name: '🔧 UTILITY COMMANDS' },
-          { key: 'ai', name: '🤖 AI COMMANDS' },
-          { key: 'anime', name: '👾 ANIME COMMANDS' },
-          { key: 'textmaker', name: '🖋️ TEXTMAKER COMMANDS' },
-          { key: 'group', name: '🔵 GROUP COMMANDS' },
-          { key: 'admin', name: '🛡️ ADMIN COMMANDS' },
-          { key: 'mod', name: '🛡️ MODERATOR COMMANDS' },
-          { key: 'owner', name: '👑 OWNER COMMANDS' }
-        ];
-        
-        for (const cat of categoryOrder) {
-          if (categories[cat.key] && categories[cat.key].length > 0) {
-            menuText += `┏━━━━━━━━━━━━━━━━━\n`;
-            menuText += `┃ ${cat.name}\n`;
-            menuText += `┗━━━━━━━━━━━━━━━━━\n`;
-            categories[cat.key].forEach(cmd => {
-              menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
-            });
-            menuText += `\n`;
-          }
-        }
-        
-        menuText += `╰━━━━━━━━━━━━━━━━━\n\n`;
-        menuText += `💡 Use .list for usage details\n`;
-        menuText += `🌟 Bot Version: 1.0.0\n`;
-        
-      } else {
-        // ==================== SUBSCRIBED USER MENU (One command per line) ====================
-        const commandsList = await fetchCommandsList();
-        
-        if (commandsList.length === 0) {
-          menuText += `⚠️ No commands available. Please contact owner.\n\n`;
-        } else {
-          // Show ONE command per line (not multiple)
-          for (let i = 0; i < commandsList.length; i++) {
-            const cmd = commandsList[i];
-            menuText += `│ ➜ ${config.prefix}${cmd}\n`;
-          }
-          menuText += `\n`;
-        }
-        
-        menuText += `━━━━━━━━━━━━━━━━━━━━━\n`;
-        menuText += `📊 *Total:* ${commandsList.length} commands\n`;
-        menuText += `💡 Use .list for usage details\n`;
-        menuText += `🌟 Bot Version: 1.0.0\n`;
-        menuText += `╰━━━━━━━━━━━━━━━━━\n\n`;
+        menuText += `\n`;
       }
       
-      menuText += `> *Powered by ${config.botName}*`;
+      // Media Commands
+      if (categories.media) {
+        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
+        menuText += `┃ 🎞️ MEDIA COMMANDS\n`;
+        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
+        categories.media.forEach(cmd => {
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
+        });
+        menuText += `\n`;
+      }
+      
+      // Fun Commands
+      if (categories.fun) {
+        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
+        menuText += `┃ 🎭 FUN COMMANDS\n`;
+        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
+        categories.fun.forEach(cmd => {
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
+        });
+        menuText += `\n`;
+      }
+      
+      // Utility Commands
+      if (categories.utility) {
+        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
+        menuText += `┃ 🔧 UTILITY COMMANDS\n`;
+        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
+        categories.utility.forEach(cmd => {
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
+        });
+        menuText += `\n`;
+      }
+      
+      // AI Commands
+      if (categories.ai) {
+        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
+        menuText += `┃ 🤖 AI COMMANDS\n`;
+        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
+        categories.ai.forEach(cmd => {
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
+        });
+        menuText += `\n`;
+      }
+      
+      // Anime Commands
+      if (categories.anime) {
+        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
+        menuText += `┃ 👾 ANIME COMMANDS\n`;
+        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
+        categories.anime.forEach(cmd => {
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
+        });
+        menuText += `\n`;
+      }
+      
+      // Textmaker Commands
+      if (categories.textmaker) {
+        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
+        menuText += `┃ 🖋️ TEXTMAKER COMMANDS\n`;
+        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
+        categories.textmaker.forEach(cmd => {
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
+        });
+        menuText += `\n`;
+      }
+      
+      // Group Commands - only show to owners when self mode is on
+      if (categories.group && (!config.selfMode || isUserOwner)) {
+        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
+        menuText += `┃ 🔵 GROUP COMMANDS\n`;
+        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
+        categories.group.forEach(cmd => {
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
+        });
+        menuText += `\n`;
+      }
+      
+      // Admin Commands - only show to owners when self mode is on
+      if (categories.admin && (!config.selfMode || isUserOwner)) {
+        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
+        menuText += `┃ 🛡️ ADMIN COMMANDS\n`;
+        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
+        categories.admin.forEach(cmd => {
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
+        });
+        menuText += `\n`;
+      }
+      
+      // Moderator Commands - only show to owners when self mode is on
+      if (categories.mod && (!config.selfMode || isUserOwner)) {
+        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
+        menuText += `┃ 🛡️ MODERATOR COMMANDS\n`;
+        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
+        categories.mod.forEach(cmd => {
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
+        });
+        menuText += `\n`;
+      }
+      
+      // Owner Commands - only show to owners
+      if (categories.owner && isUserOwner) {
+        menuText += `┏━━━━━━━━━━━━━━━━━\n`;
+        menuText += `┃ 👑 OWNER COMMANDS\n`;
+        menuText += `┗━━━━━━━━━━━━━━━━━\n`;
+        categories.owner.forEach(cmd => {
+          menuText += `│ ➜ ${config.prefix}${cmd.name}\n`;
+        });
+        menuText += `\n`;
+      }
+      
+      menuText += `╰━━━━━━━━━━━━━━━━━\n\n`;
+      menuText += `💡 Use .list for usage\n`;
+      menuText += `🌟 Bot Version: 1.0.0\n`;
       
       // Send menu with image
       const fs = require('fs');
