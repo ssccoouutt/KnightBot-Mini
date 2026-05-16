@@ -1,7 +1,7 @@
 /**
  * Menu Command - Display commands available to users
  * Owners see all commands with categories
- * Subscribed users see only specific commands from Google Drive list
+ * Subscribed users see only specific commands from Google Drive list (one per line)
  */
 
 const axios = require('axios');
@@ -134,24 +134,16 @@ module.exports = {
         menuText += `🌟 Bot Version: 1.0.0\n`;
         
       } else {
-        // ==================== SUBSCRIBED USER MENU (Only commands from Google Drive list) ====================
+        // ==================== SUBSCRIBED USER MENU (One command per line) ====================
         const commandsList = await fetchCommandsList();
         
         if (commandsList.length === 0) {
           menuText += `⚠️ No commands available. Please contact owner.\n\n`;
         } else {
-          // Show commands in 2-column layout
-          const commandsPerRow = 2;
-          let row = [];
-          
+          // Show ONE command per line (not multiple)
           for (let i = 0; i < commandsList.length; i++) {
             const cmd = commandsList[i];
-            row.push(`│ ➜ ${config.prefix}${cmd}`);
-            
-            if (row.length === commandsPerRow || i === commandsList.length - 1) {
-              menuText += row.join('  ') + '\n';
-              row = [];
-            }
+            menuText += `│ ➜ ${config.prefix}${cmd}\n`;
           }
           menuText += `\n`;
         }
