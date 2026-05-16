@@ -1,6 +1,6 @@
 /**
  * DLP Command - Universal Video/Audio Downloader using yt-dlp
- * Sends as video type (not document) like ytvideo command
+ * Sends as document with proper filename extension
  */
 
 const { exec } = require('child_process');
@@ -130,7 +130,6 @@ async function downloadMedia(url, quality, tempDir) {
         if (quality.name === 'MP3' || quality.name === 'mp3') {
             cmd = `yt-dlp -f bestaudio -x --audio-format mp3 --audio-quality 0 -o "${outputPath}" "${url}"`;
         } else {
-            // Use best format with video+audio merged (like ytvideo)
             cmd = `yt-dlp -f "best[height<=${quality.height}][ext=mp4]/best[height<=${quality.height}]" --merge-output-format mp4 -o "${outputPath}" "${url}"`;
         }
         
@@ -139,7 +138,6 @@ async function downloadMedia(url, quality, tempDir) {
         exec(cmd, { maxBuffer: 500 * 1024 * 1024 }, async (error, stdout, stderr) => {
             if (error) {
                 console.error('[DLP] Download error:', stderr);
-                // Fallback: just get best format
                 const fallbackCmd = `yt-dlp -f best -o "${outputPath}" "${url}"`;
                 exec(fallbackCmd, { maxBuffer: 500 * 1024 * 1024 }, (fallbackError) => {
                     if (fallbackError) {
@@ -155,7 +153,7 @@ async function downloadMedia(url, quality, tempDir) {
     });
 }
 
-// Sanitize filename
+// Sanitize filename for WhatsApp
 function sanitizeFilename(filename) {
     let sanitized = filename.replace(/[^\w\s\u0600-\u06FF\u4e00-\u9fff]/g, '_');
     sanitized = sanitized.replace(/\s+/g, '_');
@@ -214,7 +212,7 @@ module.exports = {
             const seenHeights = new Set();
             
             for (const format of formats) {
-                if (format.vcodec !== 'none' && format.height && format.acodec !== 'none') {
+                if (format.vcodec !== 'none' && format.height) {
                     const height = format.height;
                     let qualityName = '';
                     if (height >= 2160) qualityName = '4K';
@@ -256,7 +254,7 @@ module.exports = {
             
             const sessionId = session.id.split(':').pop();
             
-            // Send thumbnail (like ytvideo)
+            // Send thumbnail
             if (videoInfo.thumbnail) {
                 try {
                     const caption = `🎬 *${videoInfo.title || 'Video'}*\n` +
@@ -337,33 +335,31 @@ module.exports = {
                     const fileBuffer = fs.readFileSync(downloadedFile);
                     const fileSizeMB = (fileBuffer.length / (1024 * 1024)).toFixed(2);
                     
-                    // Create proper filename (like ytvideo)
+                    // Create proper filename with .mp4 extension
                     let baseFilename = session.data.videoInfo.title || 'video';
                     baseFilename = sanitizeFilename(baseFilename);
                     
                     const isMp3 = quality.name === 'MP3' || quality.name === 'mp3';
+                    let finalFileName;
+                    if (isMp3) {
+                        finalFileName = `${baseFilename}.mp3`;
+                    } else {
+                        finalFileName = `${baseFilename}_${quality.name}.mp4`;
+                    }
                     
-                    const caption = `🎬 *${session.data.videoInfo.title}*\n\n` +
+                    const caption = `✅ *Download Complete!*\n\n` +
                                    `📹 *Quality:* ${quality.name}\n` +
-                                   `📊 *Size:* ${fileSizeMB} MB\n\n` +
+                                   `📊 *Size:* ${fileSizeMB} MB\n` +
+                                   `📁 *File:* ${finalFileName}\n\n` +
                                    `> *Downloaded by ${config.botName}*`;
                     
-                    if (isMp3) {
-                        // Send as audio for MP3
-                        await sock.sendMessage(from, {
-                            audio: fileBuffer,
-                            mimetype: 'audio/mpeg',
-                            ptt: false,
-                            caption: caption
-                        }, { quoted: msg });
-                    } else {
-                        // Send as VIDEO (not document) - exactly like ytvideo command
-                        await sock.sendMessage(from, {
-                            video: fileBuffer,
-                            mimetype: 'video/mp4',
-                            caption: caption
-                        }, { quoted: msg });
-                    }
+                    // Send as DOCUMENT with PROPER .mp4 extension
+                    await sock.sendMessage(from, {
+                        document: fileBuffer,
+                        mimetype: isMp3 ? 'audio/mpeg' : 'video/mp4',
+                        fileName: finalFileName,
+                        caption: caption
+                    }, { quoted: msg });
                     
                     // Cleanup
                     try {
@@ -371,7 +367,7 @@ module.exports = {
                     } catch (e) {}
                     
                     await sock.sendMessage(from, {
-                        text: `✅ *Download Complete!*`,
+                        text: `✅ *Download Complete!*\n\nFile saved as: ${finalFileName}`,
                         edit: processingMsg.key
                     });
                     
