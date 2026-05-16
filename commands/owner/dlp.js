@@ -1,6 +1,6 @@
 /**
  * DLP Command - Universal Video/Audio Downloader using yt-dlp
- * Auto-installs dependencies, ensures proper audio-video merging, sends as document with correct filename
+ * Sends as video type (not document) like ytvideo command
  */
 
 const { exec } = require('child_process');
@@ -13,7 +13,6 @@ const { sendButtons } = giftedBtns;
 
 const FORCE_AI_MODE = true;
 
-// Track if setup is complete
 let setupComplete = false;
 let setupInProgress = false;
 
@@ -27,7 +26,6 @@ async function ensureYtDlpInstalled() {
                 resolve(true);
                 return;
             }
-            
             console.log('[DLP] Installing yt-dlp...');
             exec('pip install -q yt-dlp', (installError) => {
                 if (installError) {
@@ -50,10 +48,8 @@ async function ensureDenoInstalled() {
                 resolve(true);
                 return;
             }
-            
             console.log('[DLP] Installing Deno...');
             const installCmd = 'curl -fsSL https://deno.land/install.sh | sh && export PATH="$HOME/.deno/bin:$PATH"';
-            
             exec(installCmd, { shell: '/bin/bash', timeout: 60000 }, (installError) => {
                 if (installError) {
                     resolve(false);
@@ -75,7 +71,6 @@ async function ensureFfmpegInstalled() {
                 resolve(true);
                 return;
             }
-            
             console.log('[DLP] Installing ffmpeg...');
             exec('apt-get update -qq && apt-get install -y -qq ffmpeg', { timeout: 60000 }, (installError) => {
                 if (installError) {
@@ -92,17 +87,14 @@ async function ensureFfmpegInstalled() {
 
 async function runSetup() {
     if (setupComplete || setupInProgress) return setupComplete;
-    
     setupInProgress = true;
     console.log('[DLP] Running setup...');
-    
     try {
         await ensureYtDlpInstalled();
         await ensureDenoInstalled();
         await ensureFfmpegInstalled();
         setupComplete = true;
         setupInProgress = false;
-        console.log('[DLP] Setup complete');
         return true;
     } catch (error) {
         console.error('[DLP] Setup failed:', error);
@@ -111,63 +103,11 @@ async function runSetup() {
     }
 }
 
-// ==================== VALIDATE VIDEO FILE ====================
-
-async function validateVideoFile(filePath) {
-    return new Promise((resolve) => {
-        if (!fs.existsSync(filePath)) {
-            resolve({ valid: false, reason: 'File not found' });
-            return;
-        }
-        
-        const stats = fs.statSync(filePath);
-        if (stats.size < 1024) {
-            resolve({ valid: false, reason: 'File too small (corrupted)' });
-            return;
-        }
-        
-        const probeCmd = `ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 "${filePath}"`;
-        
-        exec(probeCmd, (error, stdout) => {
-            const hasVideo = !error && stdout.trim() === 'video';
-            
-            const audioProbeCmd = `ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 "${filePath}"`;
-            
-            exec(audioProbeCmd, (audioError, audioStdout) => {
-                const hasAudio = !audioError && audioStdout.trim() === 'audio';
-                
-                resolve({ 
-                    valid: true, 
-                    hasVideo, 
-                    hasAudio, 
-                    size: stats.size 
-                });
-            });
-        });
-    });
-}
-
-// Sanitize filename for WhatsApp
-function sanitizeFilename(filename) {
-    // Remove invalid characters
-    let sanitized = filename.replace(/[^\w\s\u0600-\u06FF\u0750-\u077F\u0800-\u083F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF\u4e00-\u9fff\u3400-\u4dbf\uac00-\ud7af]/g, '_');
-    // Replace spaces with underscores
-    sanitized = sanitized.replace(/\s+/g, '_');
-    // Remove multiple underscores
-    sanitized = sanitized.replace(/_+/g, '_');
-    // Trim to reasonable length (max 100 chars)
-    if (sanitized.length > 100) {
-        sanitized = sanitized.substring(0, 100);
-    }
-    return sanitized;
-}
-
 // ==================== YT-DLP FUNCTIONS ====================
 
 async function getVideoInfo(url) {
     return new Promise((resolve, reject) => {
         const cmd = `yt-dlp --no-warnings --dump-json "${url}" 2>&1`;
-        
         exec(cmd, { maxBuffer: 50 * 1024 * 1024 }, (error, stdout, stderr) => {
             if (error) {
                 reject(new Error(stderr || error.message));
@@ -182,73 +122,46 @@ async function getVideoInfo(url) {
     });
 }
 
-async function downloadAndMergeMedia(url, quality, tempDir) {
+async function downloadMedia(url, quality, tempDir) {
     return new Promise((resolve, reject) => {
         const outputPath = path.join(tempDir, 'output.mp4');
-        const tempVideo = path.join(tempDir, 'video.mp4');
-        const tempAudio = path.join(tempDir, 'audio.mp3');
         
         let cmd;
-        
         if (quality.name === 'MP3' || quality.name === 'mp3') {
-            cmd = `yt-dlp -f bestaudio -x --audio-format mp3 --audio-quality 0 -o "${tempDir}/audio.%(ext)s" "${url}"`;
+            cmd = `yt-dlp -f bestaudio -x --audio-format mp3 --audio-quality 0 -o "${outputPath}" "${url}"`;
         } else {
-            cmd = `yt-dlp -f "bestvideo[height<=${quality.height}]" -o "${tempVideo}" "${url}" && ` +
-                  `yt-dlp -f bestaudio -x --audio-format mp3 -o "${tempAudio}" "${url}" && ` +
-                  `ffmpeg -i "${tempVideo}" -i "${tempAudio}" -c:v copy -c:a aac -map 0:v:0 -map 1:a:0 -shortest "${outputPath}" -y`;
+            // Use best format with video+audio merged (like ytvideo)
+            cmd = `yt-dlp -f "best[height<=${quality.height}][ext=mp4]/best[height<=${quality.height}]" --merge-output-format mp4 -o "${outputPath}" "${url}"`;
         }
         
-        console.log('[DLP] Running download/merge command');
+        console.log('[DLP] Running download command');
         
         exec(cmd, { maxBuffer: 500 * 1024 * 1024 }, async (error, stdout, stderr) => {
             if (error) {
                 console.error('[DLP] Download error:', stderr);
-                
-                const fallbackCmd = `yt-dlp -f "best[height<=${quality.height}]" --merge-output-format mp4 -o "${outputPath}" "${url}"`;
-                
-                exec(fallbackCmd, { maxBuffer: 500 * 1024 * 1024 }, async (fallbackError) => {
+                // Fallback: just get best format
+                const fallbackCmd = `yt-dlp -f best -o "${outputPath}" "${url}"`;
+                exec(fallbackCmd, { maxBuffer: 500 * 1024 * 1024 }, (fallbackError) => {
                     if (fallbackError) {
                         reject(new Error(stderr || 'Download failed'));
                     } else {
-                        const validation = await validateVideoFile(outputPath);
-                        if (validation.valid && validation.hasVideo) {
-                            resolve(outputPath);
-                        } else {
-                            reject(new Error('Downloaded file has no video stream'));
-                        }
+                        resolve(outputPath);
                     }
                 });
                 return;
             }
-            
-            if (quality.name === 'MP3' || quality.name === 'mp3') {
-                const files = fs.readdirSync(tempDir);
-                const audioFile = files.find(f => f.endsWith('.mp3'));
-                if (audioFile) {
-                    resolve(path.join(tempDir, audioFile));
-                } else {
-                    reject(new Error('No audio file found'));
-                }
-                return;
-            }
-            
-            const validation = await validateVideoFile(outputPath);
-            
-            if (!validation.valid) {
-                reject(new Error(`File validation failed: ${validation.reason}`));
-                return;
-            }
-            
-            if (!validation.hasVideo) {
-                reject(new Error('Merged file has no video stream'));
-                return;
-            }
-            
-            console.log(`[DLP] File validated - Video: ${validation.hasVideo}, Audio: ${validation.hasAudio}, Size: ${(validation.size / 1024 / 1024).toFixed(2)} MB`);
-            
             resolve(outputPath);
         });
     });
+}
+
+// Sanitize filename
+function sanitizeFilename(filename) {
+    let sanitized = filename.replace(/[^\w\s\u0600-\u06FF\u4e00-\u9fff]/g, '_');
+    sanitized = sanitized.replace(/\s+/g, '_');
+    sanitized = sanitized.replace(/_+/g, '_');
+    if (sanitized.length > 80) sanitized = sanitized.substring(0, 80);
+    return sanitized;
 }
 
 // ==================== COMMAND ====================
@@ -266,9 +179,7 @@ module.exports = {
         
         if (args.length === 0) {
             return reply(`🎬 *Universal Media Downloader*\n\n` +
-                       `*Usage:* \`${config.prefix}dlp <url>\`\n\n` +
-                       `*Supports:* YouTube, Instagram, Twitter, Facebook, TikTok\n` +
-                       `*First run will auto-install dependencies*`);
+                       `*Usage:* \`${config.prefix}dlp <url>\``);
         }
         
         const url = args[0];
@@ -280,11 +191,11 @@ module.exports = {
         await react('🔍');
         
         if (!setupComplete) {
-            const setupMsg = await reply(`⚙️ *First time setup...*\n\nInstalling dependencies...\nPlease wait...`);
+            const setupMsg = await reply(`⚙️ *First time setup...*\nInstalling dependencies...`);
             const setupSuccess = await runSetup();
             if (!setupSuccess) {
                 await sock.sendMessage(from, {
-                    text: `❌ *Setup failed*\n\nPlease install manually:\n\`pip install -U yt-dlp\`\n\`apt-get install ffmpeg\``,
+                    text: `❌ *Setup failed*\nPlease install manually: pip install -U yt-dlp && apt-get install ffmpeg`,
                     edit: setupMsg.key
                 });
                 await react('❌');
@@ -303,7 +214,7 @@ module.exports = {
             const seenHeights = new Set();
             
             for (const format of formats) {
-                if (format.vcodec !== 'none' && format.height) {
+                if (format.vcodec !== 'none' && format.height && format.acodec !== 'none') {
                     const height = format.height;
                     let qualityName = '';
                     if (height >= 2160) qualityName = '4K';
@@ -345,11 +256,17 @@ module.exports = {
             
             const sessionId = session.id.split(':').pop();
             
+            // Send thumbnail (like ytvideo)
             if (videoInfo.thumbnail) {
                 try {
+                    const caption = `🎬 *${videoInfo.title || 'Video'}*\n` +
+                                   `⏱️ Duration: ${formatDuration(videoInfo.duration)}\n` +
+                                   `📥 Select quality to download:\n\n` +
+                                   `> *Powered by ${config.botName}*`;
+                    
                     await sock.sendMessage(from, {
                         image: { url: videoInfo.thumbnail },
-                        caption: `🎬 *${videoInfo.title || 'Video'}*\n⏱️ Duration: ${formatDuration(videoInfo.duration)}`
+                        caption: caption
                     }, { quoted: msg });
                 } catch (e) {}
             }
@@ -361,18 +278,14 @@ module.exports = {
             }
             buttons.push({ id: `dlp_cancel_${sessionId}`, text: '❌ Cancel' });
             
-            await sock.sendMessage(from, {
-                text: `✅ *Video Info Retrieved*\n\n📹 *Title:* ${videoInfo.title}\n📊 *Qualities:* ${qualities.length}\n\nSelect quality to download:`,
-                edit: processingMsg.key
-            });
-            
             const sentMsg = await sendButtons(sock, from, {
-                text: `🎬 *${videoInfo.title.substring(0, 40)}*`,
-                footer: 'Select Quality',
+                text: `Select quality to download:`,
+                footer: 'Universal Downloader',
                 buttons: buttons,
                 aimode: FORCE_AI_MODE
             }, {});
             
+            await sock.sendMessage(from, { delete: processingMsg.key });
             sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'dlp');
             
         } catch (error) {
@@ -413,41 +326,44 @@ module.exports = {
                 if (!quality) return true;
                 
                 await react('⬇️');
-                const processingMsg = await reply(`📥 *Downloading ${quality.name}...*\n\nThis may take a few minutes...`);
+                const processingMsg = await reply(`📥 *Downloading ${quality.name}...*\n\nPlease wait...`);
                 
                 const tempDir = path.join(process.cwd(), 'temp', `dlp_${Date.now()}`);
                 fs.mkdirSync(tempDir, { recursive: true });
                 
                 try {
-                    const downloadedFile = await downloadAndMergeMedia(session.data.url, quality, tempDir);
+                    const downloadedFile = await downloadMedia(session.data.url, quality, tempDir);
                     
                     const fileBuffer = fs.readFileSync(downloadedFile);
                     const fileSizeMB = (fileBuffer.length / (1024 * 1024)).toFixed(2);
-                    const fileExt = path.extname(downloadedFile);
                     
-                    // IMPORTANT: Create proper filename with extension
+                    // Create proper filename (like ytvideo)
                     let baseFilename = session.data.videoInfo.title || 'video';
                     baseFilename = sanitizeFilename(baseFilename);
                     
-                    let finalFileName;
-                    if (quality.name === 'MP3' || quality.name === 'mp3') {
-                        finalFileName = `${baseFilename}.mp3`;
-                    } else {
-                        finalFileName = `${baseFilename}_${quality.name}.mp4`;
-                    }
-                    
-                    console.log(`[DLP] Sending file as: ${finalFileName}`);
-                    
                     const isMp3 = quality.name === 'MP3' || quality.name === 'mp3';
-                    const caption = `✅ *Download Complete!*\n\n📹 *Quality:* ${quality.name}\n📊 *Size:* ${fileSizeMB} MB\n📁 *File:* ${finalFileName}\n\n> *Powered by ${config.botName}*`;
                     
-                    // Send as DOCUMENT with PROPER filename extension
-                    await sock.sendMessage(from, {
-                        document: fileBuffer,
-                        mimetype: isMp3 ? 'audio/mpeg' : 'video/mp4',
-                        fileName: finalFileName,
-                        caption: caption
-                    }, { quoted: msg });
+                    const caption = `🎬 *${session.data.videoInfo.title}*\n\n` +
+                                   `📹 *Quality:* ${quality.name}\n` +
+                                   `📊 *Size:* ${fileSizeMB} MB\n\n` +
+                                   `> *Downloaded by ${config.botName}*`;
+                    
+                    if (isMp3) {
+                        // Send as audio for MP3
+                        await sock.sendMessage(from, {
+                            audio: fileBuffer,
+                            mimetype: 'audio/mpeg',
+                            ptt: false,
+                            caption: caption
+                        }, { quoted: msg });
+                    } else {
+                        // Send as VIDEO (not document) - exactly like ytvideo command
+                        await sock.sendMessage(from, {
+                            video: fileBuffer,
+                            mimetype: 'video/mp4',
+                            caption: caption
+                        }, { quoted: msg });
+                    }
                     
                     // Cleanup
                     try {
@@ -455,7 +371,7 @@ module.exports = {
                     } catch (e) {}
                     
                     await sock.sendMessage(from, {
-                        text: `✅ *Download Complete!*\n\nFile saved as: ${finalFileName}`,
+                        text: `✅ *Download Complete!*`,
                         edit: processingMsg.key
                     });
                     
