@@ -1,6 +1,6 @@
 /**
  * DLP Command - Universal Video/Audio Downloader using yt-dlp
- * Shows all available formats with sizes, handles YouTube video-only+audio merging
+ * Shows all available formats with sizes
  */
 
 const { exec } = require('child_process');
@@ -9,7 +9,7 @@ const path = require('path');
 const config = require('../../config');
 const sessionManager = require('../../utils/sessionManager');
 const giftedBtns = require('gifted-btns');
-const { sendButtons, sendInteractiveMessage } = giftedBtns;
+const { sendButtons } = giftedBtns;
 
 const FORCE_AI_MODE = true;
 
@@ -87,35 +87,39 @@ async function getAvailableFormats(url) {
                 const isYoutube = url.includes('youtube.com') || url.includes('youtu.be');
                 
                 const allFormats = [];
+                const seenResolutions = new Set();
                 
-                // First, collect video formats
                 for (const fmt of formats) {
                     const height = fmt.height || 0;
+                    if (height === 0) continue;
+                    
                     const filesize = fmt.filesize || fmt.filesize_approx || 0;
                     const sizeText = formatFileSize(filesize);
                     const formatId = fmt.format_id;
-                    const vcodec = fmt.vcodec || 'none';
                     const acodec = fmt.acodec || 'none';
                     const hasAudio = acodec !== 'none';
-                    const isVideoOnly = vcodec !== 'none' && acodec === 'none';
                     
-                    if (vcodec !== 'none') {
-                        let qualityName = '';
-                        if (height >= 2160) qualityName = '4K';
-                        else if (height >= 1440) qualityName = '2K';
-                        else if (height >= 1080) qualityName = '1080p';
-                        else if (height >= 720) qualityName = '720p';
-                        else if (height >= 480) qualityName = '480p';
-                        else if (height >= 360) qualityName = '360p';
-                        else if (height >= 240) qualityName = '240p';
-                        else if (height > 0) qualityName = `${height}p`;
-                        else continue;
+                    let qualityName = '';
+                    if (height >= 2160) qualityName = '4K';
+                    else if (height >= 1440) qualityName = '2K';
+                    else if (height >= 1080) qualityName = '1080p';
+                    else if (height >= 720) qualityName = '720p';
+                    else if (height >= 480) qualityName = '480p';
+                    else if (height >= 360) qualityName = '360p';
+                    else if (height >= 240) qualityName = '240p';
+                    else qualityName = `${height}p`;
+                    
+                    // Only add best quality per resolution
+                    if (!seenResolutions.has(height)) {
+                        seenResolutions.add(height);
                         
                         let label;
-                        if (isYoutube && isVideoOnly) {
-                            label = `📹 ${qualityName} (video only) ${sizeText !== 'Unknown' ? `- ${sizeText}` : ''}`;
+                        if (hasAudio) {
+                            label = `${qualityName}${sizeText !== 'Unknown' ? ` (${sizeText})` : ''}`;
+                        } else if (isYoutube) {
+                            label = `📹 ${qualityName} (video only)${sizeText !== 'Unknown' ? ` - ${sizeText}` : ''}`;
                         } else {
-                            label = `${qualityName} ${sizeText !== 'Unknown' ? `- ${sizeText}` : ''}`;
+                            label = `${qualityName}${sizeText !== 'Unknown' ? ` (${sizeText})` : ''}`;
                         }
                         
                         allFormats.push({
@@ -124,8 +128,8 @@ async function getAvailableFormats(url) {
                             height: height,
                             filesize: filesize,
                             sizeText: sizeText,
-                            isVideoOnly: isVideoOnly,
-                            hasAudio: hasAudio
+                            hasAudio: hasAudio,
+                            isVideoOnly: !hasAudio && isYoutube
                         });
                     }
                 }
@@ -133,63 +137,53 @@ async function getAvailableFormats(url) {
                 // Sort by height (highest first)
                 allFormats.sort((a, b) => b.height - a.height);
                 
-                // Remove duplicates (keep best quality per resolution)
-                const uniqueFormats = [];
-                const seenHeights = new Set();
-                for (const fmt of allFormats) {
-                    if (!seenHeights.has(fmt.height)) {
-                        seenHeights.add(fmt.height);
-                        uniqueFormats.push(fmt);
-                    }
-                }
+                // Add Best Quality option
+                allFormats.unshift({
+                    id: 'best',
+                    label: '🎯 Best Quality',
+                    height: 9999,
+                    filesize: 0,
+                    sizeText: 'Unknown',
+                    hasAudio: true,
+                    isVideoOnly: false
+                });
                 
-                // Add audio-only formats for YouTube
+                // Add Audio-only options for YouTube
                 if (isYoutube) {
                     for (const fmt of formats) {
                         if (fmt.vcodec === 'none' && fmt.acodec !== 'none') {
                             const filesize = fmt.filesize || fmt.filesize_approx || 0;
                             const sizeText = formatFileSize(filesize);
                             const bitrate = fmt.abr || 0;
-                            const label = `🎵 Audio ${bitrate}kbps ${sizeText !== 'Unknown' ? `- ${sizeText}` : ''}`;
+                            const label = `🎵 Audio ${bitrate}kbps${sizeText !== 'Unknown' ? ` (${sizeText})` : ''}`;
                             
-                            uniqueFormats.push({
+                            allFormats.push({
                                 id: fmt.format_id,
                                 label: label,
                                 height: 0,
                                 filesize: filesize,
                                 sizeText: sizeText,
-                                isVideoOnly: false,
                                 hasAudio: true,
+                                isVideoOnly: false,
                                 isAudioOnly: true
                             });
                         }
                     }
                 }
                 
-                // Add Best Quality option
-                uniqueFormats.unshift({
-                    id: 'best',
-                    label: '🎯 Best Quality',
-                    height: 9999,
-                    filesize: 0,
-                    sizeText: 'Unknown',
-                    isVideoOnly: false,
-                    hasAudio: true
-                });
-                
                 // Add Smallest option
-                uniqueFormats.push({
+                allFormats.push({
                     id: 'worst',
                     label: '📦 Smallest File',
                     height: 0,
                     filesize: 0,
                     sizeText: 'Unknown',
-                    isVideoOnly: false,
-                    hasAudio: true
+                    hasAudio: true,
+                    isVideoOnly: false
                 });
                 
                 resolve({
-                    formats: uniqueFormats,
+                    formats: allFormats,
                     title: info.title,
                     duration: info.duration,
                     thumbnail: info.thumbnail,
@@ -205,34 +199,27 @@ async function getAvailableFormats(url) {
 
 async function downloadVideo(url, formatInfo, tempDir, isYoutube) {
     return new Promise((resolve, reject) => {
-        let formatSpec;
         let cmd;
         
         if (formatInfo.id === 'best') {
-            formatSpec = 'best';
+            cmd = `yt-dlp -f best -o "${tempDir}/%(title)s.%(ext)s" "${url}"`;
         } else if (formatInfo.id === 'worst') {
-            formatSpec = 'worst';
+            cmd = `yt-dlp -f worst -o "${tempDir}/%(title)s.%(ext)s" "${url}"`;
         } else if (isYoutube && formatInfo.isVideoOnly) {
             // For YouTube video-only formats, merge with best audio
-            formatSpec = `${formatInfo.id}+bestaudio`;
-            cmd = `yt-dlp -f "${formatSpec}" --merge-output-format mp4 -o "${tempDir}/%(title)s.%(ext)s" "${url}"`;
+            cmd = `yt-dlp -f "${formatInfo.id}+bestaudio" --merge-output-format mp4 -o "${tempDir}/%(title)s.%(ext)s" "${url}"`;
         } else if (formatInfo.isAudioOnly) {
-            formatSpec = formatInfo.id;
-            cmd = `yt-dlp -f "${formatSpec}" -x --audio-format mp3 --audio-quality 0 -o "${tempDir}/%(title)s.%(ext)s" "${url}"`;
+            cmd = `yt-dlp -f "${formatInfo.id}" -x --audio-format mp3 --audio-quality 0 -o "${tempDir}/%(title)s.%(ext)s" "${url}"`;
         } else {
-            formatSpec = formatInfo.id;
-            cmd = `yt-dlp -f "${formatSpec}" -o "${tempDir}/%(title)s.%(ext)s" "${url}"`;
+            cmd = `yt-dlp -f "${formatInfo.id}" -o "${tempDir}/%(title)s.%(ext)s" "${url}"`;
         }
         
-        if (!cmd) {
-            cmd = `yt-dlp -f "${formatSpec}" -o "${tempDir}/%(title)s.%(ext)s" "${url}"`;
-        }
-        
-        console.log('[DLP] Downloading with format:', formatSpec);
+        console.log('[DLP] Downloading with:', cmd);
         
         exec(cmd, { maxBuffer: 500 * 1024 * 1024 }, (error, stdout, stderr) => {
             if (error) {
-                // Fallback: try with best format
+                console.error('[DLP] Error:', stderr);
+                // Fallback: download best
                 const fallbackCmd = `yt-dlp -f best -o "${tempDir}/%(title)s.%(ext)s" "${url}"`;
                 exec(fallbackCmd, { maxBuffer: 500 * 1024 * 1024 }, (fallbackError) => {
                     if (fallbackError) {
@@ -272,6 +259,10 @@ function findAndResolveFile(tempDir, resolve, reject) {
     }
 }
 
+function sanitizeFilename(filename) {
+    return filename.replace(/[^a-zA-Z0-9\u0600-\u06FF]/g, '_').substring(0, 50);
+}
+
 // ==================== COMMAND ====================
 
 module.exports = {
@@ -299,13 +290,10 @@ module.exports = {
         await react('🔍');
         
         if (!setupComplete) {
-            const setupMsg = await reply(`⚙️ *Setting up...*\nInstalling dependencies...`);
+            const setupMsg = await reply(`⚙️ *Setting up...*`);
             const setupSuccess = await runSetup();
             if (!setupSuccess) {
-                await sock.sendMessage(from, {
-                    text: `❌ *Setup failed*`,
-                    edit: setupMsg.key
-                });
+                await sock.sendMessage(from, { text: `❌ *Setup failed*`, edit: setupMsg.key });
                 await react('❌');
                 return;
             }
@@ -321,22 +309,24 @@ module.exports = {
                 throw new Error('No formats found');
             }
             
-            // Store in download manager
-            const managerId = `${sender}_${Date.now()}`;
-            downloadManagers.set(managerId, {
+            // Clear old sessions
+            const existingSessions = sessionManager.getUserSessions(sender, from);
+            for (const sess of existingSessions) {
+                if (sess.command === 'dlp') {
+                    sessionManager.clearSession(sess.id);
+                }
+            }
+            
+            // Create session
+            const session = sessionManager.createSession(sender, from, 'dlp', {
                 url: url,
                 formats: formats,
                 title: title,
                 isYoutube: isYoutube,
-                timestamp: Date.now()
+                step: 'selecting'
             });
             
-            // Clean up old managers (older than 5 minutes)
-            for (const [id, manager] of downloadManagers) {
-                if (Date.now() - manager.timestamp > 300000) {
-                    downloadManagers.delete(id);
-                }
-            }
+            const sessionId = session.id.split(':').pop();
             
             // Send thumbnail
             if (thumbnail) {
@@ -348,16 +338,20 @@ module.exports = {
                 } catch (e) {}
             }
             
-            // Create format buttons (show up to 12 formats)
+            // Create format buttons (show up to 10 formats)
             const buttons = [];
-            for (let i = 0; i < Math.min(formats.length, 12); i++) {
+            for (let i = 0; i < Math.min(formats.length, 10); i++) {
                 const fmt = formats[i];
+                let buttonText = fmt.label;
+                if (buttonText.length > 35) {
+                    buttonText = buttonText.substring(0, 32) + '...';
+                }
                 buttons.push({
-                    id: `dlp_fmt_${managerId}_${i}`,
-                    text: fmt.label.length > 30 ? fmt.label.substring(0, 27) + '...' : fmt.label
+                    id: `dlp_fmt_${sessionId}_${i}`,
+                    text: buttonText
                 });
             }
-            buttons.push({ id: `dlp_cancel_${managerId}`, text: '❌ Cancel' });
+            buttons.push({ id: `dlp_cancel_${sessionId}`, text: '❌ Cancel' });
             
             const infoMsg = `📥 *Available Formats*\n\n` +
                            `🎬 *Title:* ${title || 'Unknown'}\n` +
@@ -371,7 +365,7 @@ module.exports = {
             
             const sentMsg = await sendButtons(sock, from, {
                 text: `Select download format:`,
-                footer: 'Universal Downloader',
+                footer: 'Downloader',
                 buttons: buttons,
                 aimode: FORCE_AI_MODE
             }, {});
@@ -381,7 +375,7 @@ module.exports = {
         } catch (error) {
             console.error('[DLP] Error:', error);
             await sock.sendMessage(from, {
-                text: `❌ *Failed to process URL*\n\nError: ${error.message}`,
+                text: `❌ *Failed*\n\nError: ${error.message}`,
                 edit: processingMsg.key
             });
             await react('❌');
@@ -391,39 +385,59 @@ module.exports = {
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, react, isButtonClick } = context;
         
+        console.log('[DLP] handleSession called, isButtonClick:', isButtonClick);
+        
+        if (session.command !== 'dlp') return true;
+        
         if (isButtonClick) {
             let buttonId = null;
+            let buttonText = null;
             
+            // Extract button ID from different message types
             if (msg.message?.buttonsResponseMessage) {
                 buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
+                buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
+                console.log('[DLP] Button from buttonsResponseMessage:', buttonId, buttonText);
+            } else if (msg.message?.interactiveResponseMessage) {
+                const interactive = msg.message.interactiveResponseMessage;
+                if (interactive.nativeFlowResponseMessage) {
+                    try {
+                        const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
+                        buttonId = params.id;
+                        buttonText = params.display_text;
+                        console.log('[DLP] Button from interactive:', buttonId, buttonText);
+                    } catch (e) {}
+                }
             } else if (msg.message?.templateButtonReplyMessage) {
                 buttonId = msg.message.templateButtonReplyMessage.selectedId;
+                buttonText = msg.message.templateButtonReplyMessage.selectedDisplayText;
+                console.log('[DLP] Button from template:', buttonId, buttonText);
             }
             
-            if (!buttonId) return true;
+            if (!buttonId) {
+                console.log('[DLP] No button ID found');
+                return true;
+            }
             
-            // Cancel button
+            // Handle Cancel
             if (buttonId.includes('dlp_cancel_')) {
                 sessionManager.clearSession(session.id);
                 await reply(`❌ Cancelled.`);
                 return true;
             }
             
-            // Format selection
+            // Handle Format Selection
             if (buttonId.includes('dlp_fmt_')) {
                 const parts = buttonId.split('_');
-                const managerId = parts[3];
-                const index = parseInt(parts[4]);
+                const index = parseInt(parts[parts.length - 1]);
+                const selectedFormat = session.data.formats[index];
                 
-                const manager = downloadManagers.get(managerId);
-                if (!manager) {
-                    await reply(`❌ *Session expired*\n\nPlease start again with \`.dlp ${manager?.url || 'url'}\``);
-                    sessionManager.clearSession(session.id);
+                if (!selectedFormat) {
+                    console.log('[DLP] Invalid format index:', index);
                     return true;
                 }
                 
-                const selectedFormat = manager.formats[index];
-                if (!selectedFormat) return true;
+                console.log('[DLP] Selected format:', selectedFormat.label);
                 
                 await react('⬇️');
                 const processingMsg = await reply(`📥 *Downloading...*\n\nFormat: ${selectedFormat.label}\n\nPlease wait...`);
@@ -432,15 +446,20 @@ module.exports = {
                 fs.mkdirSync(tempDir, { recursive: true });
                 
                 try {
-                    const downloadedFile = await downloadVideo(manager.url, selectedFormat, tempDir, manager.isYoutube);
+                    const downloadedFile = await downloadVideo(
+                        session.data.url, 
+                        selectedFormat, 
+                        tempDir, 
+                        session.data.isYoutube
+                    );
                     
                     const fileBuffer = fs.readFileSync(downloadedFile);
                     const fileSizeMB = fileBuffer.length / (1024 * 1024);
                     const fileExt = path.extname(downloadedFile);
                     const isMp3 = fileExt === '.mp3';
                     
-                    let fileName = (manager.title || 'video').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50);
-                    if (selectedFormat.isAudioOnly || isMp3) {
+                    let fileName = sanitizeFilename(session.data.title || 'video');
+                    if (isMp3) {
                         fileName = `${fileName}.mp3`;
                     } else {
                         fileName = `${fileName}_${selectedFormat.label.replace(/[^a-zA-Z0-9]/g, '_')}.mp4`;
@@ -489,7 +508,6 @@ module.exports = {
                     });
                     
                     await react('✅');
-                    downloadManagers.delete(managerId);
                     sessionManager.clearSession(session.id);
                     
                 } catch (error) {
@@ -507,6 +525,7 @@ module.exports = {
                 return true;
             }
         }
+        
         return true;
     }
 };
