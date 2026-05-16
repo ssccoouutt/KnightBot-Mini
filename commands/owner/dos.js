@@ -50,17 +50,12 @@ module.exports = {
                        `*Examples:*\n` +
                        `• \`${config.prefix}dos http://localhost:5000\`\n` +
                        `• \`${config.prefix}dos https://your-server.com 5000 250\`\n\n` +
-                       `*Parameters:*\n` +
-                       `• \`url\` - Target URL (required)\n` +
-                       `• \`requests\` - Total requests (default: 1000)\n` +
-                       `• \`threads\` - Concurrent threads (default: 100)\n\n` +
-                       `*⚠️ WARNING:* This can overwhelm servers! Use responsibly!\n\n` +
                        `> *Powered by ${config.botName}*`);
         }
         
         let url = args[0];
-        let totalRequests = 10000;
-        let threads = 500;
+        let totalRequests = 1000;
+        let threads = 100;
         
         // Parse parameters
         if (args[1] && !isNaN(parseInt(args[1]))) {
@@ -87,7 +82,25 @@ module.exports = {
         
         await react('⚠️');
         
-        // Confirm with user about the risk
+        // Clear any existing sessions
+        const existingSessions = sessionManager.getUserSessions(sender, from);
+        for (const sess of existingSessions) {
+            if (sess.command === 'dos_confirm') {
+                sessionManager.clearSession(sess.id);
+            }
+        }
+        
+        // Create confirmation session
+        const session = sessionManager.createSession(sender, from, 'dos_confirm', {
+            url: url,
+            totalRequests: totalRequests,
+            threads: threads,
+            step: 'confirming'
+        });
+        
+        const sessionId = session.id.split(':').pop();
+        
+        // Send confirmation buttons
         const confirmMsg = await sendButtons(sock, from, {
             text: `⚠️ *WARNING: STRESS TEST*\n\n` +
                   `Target: \`${url}\`\n` +
@@ -98,42 +111,56 @@ module.exports = {
                   `Only proceed if this is YOUR own server!`,
             footer: '⚠️ WARNING',
             buttons: [
-                { id: 'dos_confirm', text: '⚠️ I CONFIRM - PROCEED' },
-                { id: 'dos_cancel', text: '❌ Cancel' }
+                { id: `dos_confirm_${sessionId}`, text: '⚠️ I CONFIRM - PROCEED' },
+                { id: `dos_cancel_${sessionId}`, text: '❌ Cancel' }
             ],
             aimode: FORCE_AI_MODE
         }, { quoted: msg });
         
         sessionManager.addPendingMessage(sender, from, confirmMsg.key.id, 'dos_confirm');
-        
-        // Store test parameters for confirmation
-        sessionManager.createSession(sender, from, 'dos_confirm', {
-            url: url,
-            totalRequests: totalRequests,
-            threads: threads,
-            step: 'confirming'
-        });
     },
     
     async handleSession(sock, msg, session, context) {
         const { from, sender, reply, react, isButtonClick } = context;
         
-        if (session.command === 'dos_confirm' && isButtonClick) {
+        if (session.command !== 'dos_confirm') return true;
+        
+        if (isButtonClick) {
             let buttonId = null;
+            let buttonText = null;
             
+            // Extract button ID from different message types
             if (msg.message?.buttonsResponseMessage) {
                 buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
+                buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
+                console.log('[DOS] Button from buttonsResponseMessage:', buttonId, buttonText);
+            } else if (msg.message?.interactiveResponseMessage) {
+                const interactive = msg.message.interactiveResponseMessage;
+                if (interactive.nativeFlowResponseMessage) {
+                    try {
+                        const params = JSON.parse(interactive.nativeFlowResponseMessage.paramsJson);
+                        buttonId = params.id;
+                        buttonText = params.display_text;
+                        console.log('[DOS] Button from interactive:', buttonId, buttonText);
+                    } catch (e) {}
+                }
             } else if (msg.message?.templateButtonReplyMessage) {
                 buttonId = msg.message.templateButtonReplyMessage.selectedId;
+                buttonText = msg.message.templateButtonReplyMessage.selectedDisplayText;
+                console.log('[DOS] Button from template:', buttonId, buttonText);
             }
             
-            if (buttonId === 'dos_cancel') {
+            if (!buttonId) return true;
+            
+            // Handle Cancel
+            if (buttonId.includes('dos_cancel_')) {
                 sessionManager.clearSession(session.id);
                 await reply(`❌ Test cancelled.`);
                 return true;
             }
             
-            if (buttonId === 'dos_confirm') {
+            // Handle Confirm
+            if (buttonId.includes('dos_confirm_')) {
                 sessionManager.clearSession(session.id);
                 
                 const { url, totalRequests, threads } = session.data;
@@ -185,7 +212,7 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
             try {
                 const response = await axios.get(targetUrl, {
                     timeout: 10000,
-                    validateStatus: () => true // Don't throw on any status
+                    validateStatus: () => true
                 });
                 successCount++;
             } catch (error) {
