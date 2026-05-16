@@ -10,7 +10,7 @@ const axios = require('axios');
 const config = require('../../config');
 const sessionManager = require('../../utils/sessionManager');
 const giftedBtns = require('gifted-btns');
-const { sendButtons } = giftedBtns;
+const { sendButtons, sendInteractiveMessage } = giftedBtns;
 
 // Force AI mode ON for gifted buttons
 const FORCE_AI_MODE = true;
@@ -145,15 +145,12 @@ async function getAvailableQualities(url) {
                                        height >= 360 ? '360p' :
                                        height >= 240 ? '240p' : '144p';
                         
-                        // Get filesize from format
-                        let filesize = format.filesize || format.filesize_approx || 0;
-                        
                         if (!qualities.has(quality) || height > (qualities.get(quality)?.height || 0)) {
                             qualities.set(quality, {
                                 formatId: format.format_id,
                                 height: height,
                                 ext: format.ext,
-                                filesize: filesize,
+                                filesize: format.filesize,
                                 vcodec: format.vcodec,
                                 acodec: format.acodec
                             });
@@ -161,20 +158,12 @@ async function getAvailableQualities(url) {
                     }
                 }
                 
-                // Add audio-only option with size from best audio format
-                let audioFilesize = 0;
-                for (const format of formats) {
-                    if (format.vcodec === 'none' && format.acodec !== 'none') {
-                        const size = format.filesize || format.filesize_approx || 0;
-                        if (size > audioFilesize) audioFilesize = size;
-                    }
-                }
-                
+                // Add audio-only option
                 qualities.set('mp3', {
                     formatId: 'bestaudio',
                     height: 0,
                     ext: 'mp3',
-                    filesize: audioFilesize,
+                    filesize: null,
                     vcodec: 'none',
                     acodec: 'mp4a'
                 });
@@ -272,7 +261,7 @@ async function downloadMedia(url, qualityInfo) {
 }
 
 function formatFileSize(bytes) {
-    if (!bytes || bytes === 0) return 'Unknown';
+    if (bytes === 0) return '0 B';
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
@@ -297,7 +286,7 @@ function formatDuration(seconds) {
 
 module.exports = {
     name: 'dlp',
-    aliases: ['download', 'get'],
+    aliases: [],
     description: 'Download videos/audio from any supported website',
     usage: '.dlp <url>',
     category: 'media',
@@ -344,6 +333,12 @@ module.exports = {
                 return;
             }
             
+            // Clear existing sessions
+            const existingSessions = sessionManager.getUserSessions(sender, from);
+            for (const sess of existingSessions) {
+                if (sess.command === 'dlp') sessionManager.clearSession(sess.id);
+            }
+            
             const session = sessionManager.createSession(sender, from, 'dlp', {
                 url: url,
                 videoInfo: videoInfo,
@@ -367,7 +362,7 @@ module.exports = {
             for (let i = 0; i < videoInfo.qualities.length; i++) {
                 const q = videoInfo.qualities[i];
                 let buttonText = q.name;
-                if (q.filesize && q.filesize > 0) {
+                if (q.filesize) {
                     buttonText += ` (${formatFileSize(q.filesize)})`;
                 }
                 buttons.push({
@@ -464,33 +459,34 @@ module.exports = {
                         const result = await downloadMedia(session.data.url, selectedQuality);
                         
                         const fileSize = formatFileSize(result.size);
+                        const fileSizeMB = result.size / (1024 * 1024);
+                        const isVideo = selectedQuality.name !== 'mp3';
+                        
                         const caption = `✅ *Download Complete!*\n\n` +
                                       `🎬 *Title:* ${session.data.videoInfo.title || 'Video'}\n` +
                                       `📹 *Quality:* ${selectedQuality.name}\n` +
                                       `📊 *Size:* ${fileSize}\n\n` +
                                       `> *Downloaded by ${config.botName}*`;
                         
-                        const isVideo = selectedQuality.name !== 'mp3';
-                        const mimetype = isVideo ? 'video/mp4' : 'audio/mpeg';
+                        const finalFileName = `${(session.data.videoInfo.title || 'video').replace(/[^a-zA-Z0-9]/g, '_')}_${selectedQuality.name}.${isVideo ? 'mp4' : 'mp3'}`;
                         
-                        // Check file size for sending method (200MB threshold)
+                        // Send based on file size (200MB threshold)
                         const SIZE_THRESHOLD_MB = 200;
-                        const fileSizeMB = result.size / (1024 * 1024);
+                        const useDocument = fileSizeMB > SIZE_THRESHOLD_MB;
                         
-                        if (fileSizeMB > SIZE_THRESHOLD_MB) {
+                        if (useDocument) {
                             // Send as document for large files
-                            const fileName = `${(session.data.videoInfo.title || 'video').replace(/[^a-zA-Z0-9]/g, '_')}_${selectedQuality.name}.${isVideo ? 'mp4' : 'mp3'}`;
                             await sock.sendMessage(from, {
                                 document: fs.readFileSync(result.path),
-                                mimetype: mimetype,
-                                fileName: fileName,
+                                mimetype: isVideo ? 'video/mp4' : 'audio/mpeg',
+                                fileName: finalFileName,
                                 caption: caption
                             }, { quoted: msg });
                         } else {
                             // Send as media for smaller files
                             await sock.sendMessage(from, {
                                 [isVideo ? 'video' : 'audio']: fs.readFileSync(result.path),
-                                mimetype: mimetype,
+                                mimetype: isVideo ? 'video/mp4' : 'audio/mpeg',
                                 caption: caption,
                                 ptt: !isVideo
                             }, { quoted: msg });
