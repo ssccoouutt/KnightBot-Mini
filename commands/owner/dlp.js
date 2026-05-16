@@ -1,6 +1,6 @@
 /**
  * DLP Command - Universal Video/Audio Downloader using yt-dlp
- * Auto-installs dependencies, ensures proper audio-video merging, sends as document
+ * Auto-installs dependencies, ensures proper audio-video merging, sends as document with correct filename
  */
 
 const { exec } = require('child_process');
@@ -115,20 +115,17 @@ async function runSetup() {
 
 async function validateVideoFile(filePath) {
     return new Promise((resolve) => {
-        // Check if file exists
         if (!fs.existsSync(filePath)) {
             resolve({ valid: false, reason: 'File not found' });
             return;
         }
         
-        // Check file size
         const stats = fs.statSync(filePath);
-        if (stats.size < 1024) { // Less than 1KB
+        if (stats.size < 1024) {
             resolve({ valid: false, reason: 'File too small (corrupted)' });
             return;
         }
         
-        // Use ffprobe to check if file has both video and audio streams
         const probeCmd = `ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 "${filePath}"`;
         
         exec(probeCmd, (error, stdout) => {
@@ -148,6 +145,21 @@ async function validateVideoFile(filePath) {
             });
         });
     });
+}
+
+// Sanitize filename for WhatsApp
+function sanitizeFilename(filename) {
+    // Remove invalid characters
+    let sanitized = filename.replace(/[^\w\s\u0600-\u06FF\u0750-\u077F\u0800-\u083F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF\u4e00-\u9fff\u3400-\u4dbf\uac00-\ud7af]/g, '_');
+    // Replace spaces with underscores
+    sanitized = sanitized.replace(/\s+/g, '_');
+    // Remove multiple underscores
+    sanitized = sanitized.replace(/_+/g, '_');
+    // Trim to reasonable length (max 100 chars)
+    if (sanitized.length > 100) {
+        sanitized = sanitized.substring(0, 100);
+    }
+    return sanitized;
 }
 
 // ==================== YT-DLP FUNCTIONS ====================
@@ -179,10 +191,8 @@ async function downloadAndMergeMedia(url, quality, tempDir) {
         let cmd;
         
         if (quality.name === 'MP3' || quality.name === 'mp3') {
-            // Audio only
             cmd = `yt-dlp -f bestaudio -x --audio-format mp3 --audio-quality 0 -o "${tempDir}/audio.%(ext)s" "${url}"`;
         } else {
-            // Download best video and best audio separately, then merge with ffmpeg
             cmd = `yt-dlp -f "bestvideo[height<=${quality.height}]" -o "${tempVideo}" "${url}" && ` +
                   `yt-dlp -f bestaudio -x --audio-format mp3 -o "${tempAudio}" "${url}" && ` +
                   `ffmpeg -i "${tempVideo}" -i "${tempAudio}" -c:v copy -c:a aac -map 0:v:0 -map 1:a:0 -shortest "${outputPath}" -y`;
@@ -194,14 +204,12 @@ async function downloadAndMergeMedia(url, quality, tempDir) {
             if (error) {
                 console.error('[DLP] Download error:', stderr);
                 
-                // Fallback: try best format directly
                 const fallbackCmd = `yt-dlp -f "best[height<=${quality.height}]" --merge-output-format mp4 -o "${outputPath}" "${url}"`;
                 
                 exec(fallbackCmd, { maxBuffer: 500 * 1024 * 1024 }, async (fallbackError) => {
                     if (fallbackError) {
                         reject(new Error(stderr || 'Download failed'));
                     } else {
-                        // Validate the file
                         const validation = await validateVideoFile(outputPath);
                         if (validation.valid && validation.hasVideo) {
                             resolve(outputPath);
@@ -213,7 +221,6 @@ async function downloadAndMergeMedia(url, quality, tempDir) {
                 return;
             }
             
-            // For MP3 downloads
             if (quality.name === 'MP3' || quality.name === 'mp3') {
                 const files = fs.readdirSync(tempDir);
                 const audioFile = files.find(f => f.endsWith('.mp3'));
@@ -225,7 +232,6 @@ async function downloadAndMergeMedia(url, quality, tempDir) {
                 return;
             }
             
-            // Validate merged file
             const validation = await validateVideoFile(outputPath);
             
             if (!validation.valid) {
@@ -273,12 +279,9 @@ module.exports = {
         
         await react('🔍');
         
-        // Run setup if needed
         if (!setupComplete) {
             const setupMsg = await reply(`⚙️ *First time setup...*\n\nInstalling dependencies...\nPlease wait...`);
-            
             const setupSuccess = await runSetup();
-            
             if (!setupSuccess) {
                 await sock.sendMessage(from, {
                     text: `❌ *Setup failed*\n\nPlease install manually:\n\`pip install -U yt-dlp\`\n\`apt-get install ffmpeg\``,
@@ -287,11 +290,7 @@ module.exports = {
                 await react('❌');
                 return;
             }
-            
-            await sock.sendMessage(from, {
-                text: `✅ *Setup complete!*`,
-                edit: setupMsg.key
-            });
+            await sock.sendMessage(from, { text: `✅ *Setup complete!*`, edit: setupMsg.key });
         }
         
         const processingMsg = await reply(`🔍 *Analyzing URL...*\n\n${url}\n\nPlease wait...`);
@@ -330,7 +329,6 @@ module.exports = {
                 throw new Error('No downloadable formats found');
             }
             
-            // Clear existing sessions
             const existingSessions = sessionManager.getUserSessions(sender, from);
             for (const sess of existingSessions) {
                 if (sess.command === 'dlp') sessionManager.clearSession(sess.id);
@@ -347,7 +345,6 @@ module.exports = {
             
             const sessionId = session.id.split(':').pop();
             
-            // Send thumbnail
             if (videoInfo.thumbnail) {
                 try {
                     await sock.sendMessage(from, {
@@ -427,16 +424,28 @@ module.exports = {
                     const fileBuffer = fs.readFileSync(downloadedFile);
                     const fileSizeMB = (fileBuffer.length / (1024 * 1024)).toFixed(2);
                     const fileExt = path.extname(downloadedFile);
-                    const fileName = `${(session.data.videoInfo.title || 'video').replace(/[^a-zA-Z0-9]/g, '_')}_${quality.name}${fileExt}`;
+                    
+                    // IMPORTANT: Create proper filename with extension
+                    let baseFilename = session.data.videoInfo.title || 'video';
+                    baseFilename = sanitizeFilename(baseFilename);
+                    
+                    let finalFileName;
+                    if (quality.name === 'MP3' || quality.name === 'mp3') {
+                        finalFileName = `${baseFilename}.mp3`;
+                    } else {
+                        finalFileName = `${baseFilename}_${quality.name}.mp4`;
+                    }
+                    
+                    console.log(`[DLP] Sending file as: ${finalFileName}`);
                     
                     const isMp3 = quality.name === 'MP3' || quality.name === 'mp3';
-                    const caption = `✅ *Download Complete!*\n\n📹 *Quality:* ${quality.name}\n📊 *Size:* ${fileSizeMB} MB\n\n> *Powered by ${config.botName}*`;
+                    const caption = `✅ *Download Complete!*\n\n📹 *Quality:* ${quality.name}\n📊 *Size:* ${fileSizeMB} MB\n📁 *File:* ${finalFileName}\n\n> *Powered by ${config.botName}*`;
                     
-                    // Send as DOCUMENT (not media) to avoid playback issues
+                    // Send as DOCUMENT with PROPER filename extension
                     await sock.sendMessage(from, {
                         document: fileBuffer,
                         mimetype: isMp3 ? 'audio/mpeg' : 'video/mp4',
-                        fileName: fileName,
+                        fileName: finalFileName,
                         caption: caption
                     }, { quoted: msg });
                     
@@ -446,7 +455,7 @@ module.exports = {
                     } catch (e) {}
                     
                     await sock.sendMessage(from, {
-                        text: `✅ *Download Complete!*`,
+                        text: `✅ *Download Complete!*\n\nFile saved as: ${finalFileName}`,
                         edit: processingMsg.key
                     });
                     
@@ -461,7 +470,6 @@ module.exports = {
                     });
                     await react('❌');
                     
-                    // Cleanup
                     try {
                         fs.rmSync(tempDir, { recursive: true, force: true });
                     } catch (e) {}
