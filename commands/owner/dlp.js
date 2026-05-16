@@ -119,123 +119,220 @@ async function downloadCookies() {
 
 async function getAvailableQualities(url) {
     return new Promise((resolve, reject) => {
-        const cookieArg = (cookiesPath && fs.existsSync(cookiesPath)) ? `--cookies "${cookiesPath}"` : '';
-        const cmd = `yt-dlp ${cookieArg} --no-warnings --dump-json "${url}"`;
+        // First, list all formats to see what's available
+        const listCmd = `yt-dlp --cookies "${cookiesPath}" --list-formats "${url}" 2>&1`;
         
-        console.log('[DLP] Fetching video info...');
-        console.log('[DLP] Command:', cmd);
+        console.log('[DLP] Listing available formats...');
         
-        exec(cmd, { maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
-            if (error) {
-                console.error('[DLP] yt-dlp error:', error.message);
-                console.error('[DLP] stderr:', stderr);
-                reject(new Error('Failed to fetch video info: ' + error.message));
-                return;
-            }
+        exec(listCmd, { maxBuffer: 50 * 1024 * 1024 }, (listError, listStdout, listStderr) => {
+            const output = listStdout + listStderr;
+            console.log('[DLP] Format list output:', output.substring(0, 500));
             
-            try {
-                const info = JSON.parse(stdout);
-                console.log('[DLP] Video title:', info.title);
-                console.log('[DLP] Duration:', info.duration);
-                console.log('[DLP] Total formats:', info.formats?.length || 0);
-                
-                const formats = info.formats || [];
-                const videoFormats = [];
-                const audioFormats = [];
-                
-                // Separate video and audio formats
-                for (const format of formats) {
-                    if (format.vcodec !== 'none' && format.acodec !== 'none') {
-                        // Formats with both video and audio
-                        videoFormats.push(format);
-                    } else if (format.vcodec !== 'none' && format.acodec === 'none') {
-                        // Video-only formats
-                        videoFormats.push({...format, videoOnly: true});
-                    } else if (format.vcodec === 'none' && format.acodec !== 'none') {
-                        // Audio-only formats
-                        audioFormats.push(format);
+            // Now get JSON info without format restrictions
+            const cookieArg = (cookiesPath && fs.existsSync(cookiesPath)) ? `--cookies "${cookiesPath}"` : '';
+            const infoCmd = `yt-dlp ${cookieArg} --no-warnings --ignore-errors --dump-json "${url}"`;
+            
+            console.log('[DLP] Fetching video info with command:', infoCmd);
+            
+            exec(infoCmd, { maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+                if (error) {
+                    console.error('[DLP] yt-dlp error:', error.message);
+                    console.error('[DLP] stderr:', stderr);
+                    
+                    // Try to extract info from list output if JSON fails
+                    if (output.includes('ID') && output.includes('EXT')) {
+                        console.log('[DLP] Falling back to format list parsing...');
+                        parseFormatList(output, url, resolve, reject);
+                        return;
                     }
+                    
+                    reject(new Error('Failed to fetch video info: ' + error.message));
+                    return;
                 }
                 
-                console.log('[DLP] Video+Audio formats:', videoFormats.filter(f => !f.videoOnly).length);
-                console.log('[DLP] Video-only formats:', videoFormats.filter(f => f.videoOnly).length);
-                console.log('[DLP] Audio-only formats:', audioFormats.length);
-                
-                const qualities = new Map();
-                
-                // Process video formats (prefer those with audio)
-                for (const format of videoFormats) {
-                    const height = format.height || 0;
-                    const quality = height >= 2160 ? '4K' :
-                                   height >= 1440 ? '2K' :
-                                   height >= 1080 ? '1080p' :
-                                   height >= 720 ? '720p' :
-                                   height >= 480 ? '480p' :
-                                   height >= 360 ? '360p' :
-                                   height >= 240 ? '240p' : '144p';
+                try {
+                    const info = JSON.parse(stdout);
+                    console.log('[DLP] Video title:', info.title);
+                    console.log('[DLP] Duration:', info.duration);
+                    console.log('[DLP] Total formats:', info.formats?.length || 0);
                     
-                    const hasAudio = format.acodec !== 'none';
+                    const formats = info.formats || [];
+                    const qualities = new Map();
                     
-                    if (!qualities.has(quality) || height > (qualities.get(quality)?.height || 0)) {
-                        qualities.set(quality, {
-                            formatId: format.format_id,
-                            height: height,
-                            ext: format.ext,
-                            filesize: format.filesize,
-                            vcodec: format.vcodec,
-                            acodec: format.acodec,
-                            hasAudio: hasAudio,
-                            videoOnly: format.videoOnly || false,
-                            tbr: format.tbr || 0
+                    // Process video formats
+                    for (const format of formats) {
+                        if (format.vcodec !== 'none') {
+                            const height = format.height || 0;
+                            const quality = height >= 2160 ? '4K' :
+                                           height >= 1440 ? '2K' :
+                                           height >= 1080 ? '1080p' :
+                                           height >= 720 ? '720p' :
+                                           height >= 480 ? '480p' :
+                                           height >= 360 ? '360p' :
+                                           height >= 240 ? '240p' : 
+                                           height > 0 ? `${height}p` : 'Unknown';
+                            
+                            const hasAudio = format.acodec !== 'none';
+                            const filesize = format.filesize || format.filesize_approx || 0;
+                            
+                            if (!qualities.has(quality) || (height > (qualities.get(quality)?.height || 0))) {
+                                qualities.set(quality, {
+                                    formatId: format.format_id,
+                                    height: height,
+                                    ext: format.ext,
+                                    filesize: filesize,
+                                    vcodec: format.vcodec,
+                                    acodec: format.acodec,
+                                    hasAudio: hasAudio,
+                                    tbr: format.tbr || 0
+                                });
+                            }
+                        }
+                    }
+                    
+                    // Add audio-only option if available
+                    const audioFormats = formats.filter(f => f.vcodec === 'none' && f.acodec !== 'none');
+                    if (audioFormats.length > 0) {
+                        qualities.set('mp3', {
+                            formatId: 'bestaudio',
+                            height: 0,
+                            ext: 'mp3',
+                            filesize: audioFormats[0].filesize || 0,
+                            vcodec: 'none',
+                            acodec: 'mp4a',
+                            hasAudio: true
                         });
                     }
-                }
-                
-                // Add audio-only option
-                qualities.set('mp3', {
-                    formatId: 'bestaudio',
-                    height: 0,
-                    ext: 'mp3',
-                    filesize: null,
-                    vcodec: 'none',
-                    acodec: 'mp4a',
-                    hasAudio: true,
-                    videoOnly: false
-                });
-                
-                // Sort qualities by height
-                const qualityOrder = ['4K', '2K', '1080p', '720p', '480p', '360p', '240p', '144p', 'mp3'];
-                const sortedQualities = [];
-                
-                for (const q of qualityOrder) {
-                    if (qualities.has(q)) {
-                        const qualInfo = qualities.get(q);
-                        // Mark formats that need audio merging
-                        qualInfo.needAudioMerge = !qualInfo.hasAudio && !qualInfo.videoOnly;
-                        sortedQualities.push({
-                            name: q,
-                            ...qualInfo
-                        });
+                    
+                    // Sort qualities by height
+                    const qualityOrder = ['4K', '2K', '1080p', '720p', '480p', '360p', '240p', '144p', 'Unknown', 'mp3'];
+                    const sortedQualities = [];
+                    
+                    for (const q of qualityOrder) {
+                        if (qualities.has(q)) {
+                            const qualInfo = qualities.get(q);
+                            sortedQualities.push({
+                                name: q,
+                                ...qualInfo
+                            });
+                        }
                     }
+                    
+                    if (sortedQualities.length === 0) {
+                        reject(new Error('No downloadable formats found'));
+                        return;
+                    }
+                    
+                    console.log('[DLP] Available qualities:', sortedQualities.map(q => `${q.name} (${q.height}p, hasAudio:${q.hasAudio})`));
+                    
+                    resolve({
+                        title: info.title,
+                        duration: info.duration,
+                        thumbnail: info.thumbnail,
+                        webpage_url: info.webpage_url,
+                        uploader: info.uploader,
+                        qualities: sortedQualities
+                    });
+                    
+                } catch (parseError) {
+                    console.error('[DLP] Parse error:', parseError);
+                    reject(new Error('Failed to parse video info'));
                 }
-                
-                console.log('[DLP] Available qualities:', sortedQualities.map(q => `${q.name} (hasAudio:${q.hasAudio}, needMerge:${q.needAudioMerge})`));
-                
-                resolve({
-                    title: info.title,
-                    duration: info.duration,
-                    thumbnail: info.thumbnail,
-                    webpage_url: info.webpage_url,
-                    uploader: info.uploader,
-                    qualities: sortedQualities
-                });
-                
-            } catch (parseError) {
-                console.error('[DLP] Parse error:', parseError);
-                reject(new Error('Failed to parse video info'));
-            }
+            });
         });
     });
+}
+
+function parseFormatList(output, url, resolve, reject) {
+    try {
+        const lines = output.split('\n');
+        const qualities = new Map();
+        let title = 'Unknown Video';
+        
+        // Try to extract title
+        const titleMatch = output.match(/title:\s*(.+)/i);
+        if (titleMatch) title = titleMatch[1].trim();
+        
+        // Parse format lines
+        for (const line of lines) {
+            // Look for format lines with resolution
+            const formatMatch = line.match(/^\s*(\d+)\s+(\w+)\s+(\d+x\d+|\w+)\s+(\d+)kbps/i);
+            if (formatMatch) {
+                const formatId = formatMatch[1];
+                const ext = formatMatch[2];
+                const resolution = formatMatch[3];
+                const bitrate = formatMatch[4];
+                
+                let height = 0;
+                if (resolution.includes('x')) {
+                    height = parseInt(resolution.split('x')[1]);
+                }
+                
+                const quality = height >= 2160 ? '4K' :
+                               height >= 1440 ? '2K' :
+                               height >= 1080 ? '1080p' :
+                               height >= 720 ? '720p' :
+                               height >= 480 ? '480p' :
+                               height >= 360 ? '360p' :
+                               height >= 240 ? '240p' : 
+                               height > 0 ? `${height}p` : resolution;
+                
+                if (height > 0 && !qualities.has(quality)) {
+                    qualities.set(quality, {
+                        formatId: formatId,
+                        height: height,
+                        ext: ext,
+                        filesize: 0,
+                        vcodec: 'h264',
+                        acodec: 'aac',
+                        hasAudio: true
+                    });
+                }
+            }
+        }
+        
+        // Add audio-only fallback
+        qualities.set('mp3', {
+            formatId: 'bestaudio',
+            height: 0,
+            ext: 'mp3',
+            filesize: 0,
+            vcodec: 'none',
+            acodec: 'mp4a',
+            hasAudio: true
+        });
+        
+        const qualityOrder = ['4K', '2K', '1080p', '720p', '480p', '360p', '240p', '144p', 'mp3'];
+        const sortedQualities = [];
+        
+        for (const q of qualityOrder) {
+            if (qualities.has(q)) {
+                sortedQualities.push({
+                    name: q,
+                    ...qualities.get(q)
+                });
+            }
+        }
+        
+        if (sortedQualities.length === 0) {
+            reject(new Error('No downloadable formats found'));
+            return;
+        }
+        
+        console.log('[DLP] Available qualities (from list):', sortedQualities.map(q => q.name));
+        
+        resolve({
+            title: title,
+            duration: 0,
+            thumbnail: null,
+            webpage_url: url,
+            uploader: 'Unknown',
+            qualities: sortedQualities
+        });
+        
+    } catch (err) {
+        reject(new Error('Failed to parse format list: ' + err.message));
+    }
 }
 
 async function downloadMedia(url, qualityInfo) {
@@ -252,88 +349,82 @@ async function downloadMedia(url, qualityInfo) {
             // Audio-only download
             cmd = `yt-dlp ${cookieArg} -f bestaudio -x --audio-format mp3 --audio-quality 0 -o "${outputTemplate}" "${url}"`;
             console.log('[DLP] Downloading as MP3...');
-        } else if (qualityInfo.needAudioMerge || qualityInfo.videoOnly) {
-            // Download best video and best audio separately, then merge
-            console.log('[DLP] Downloading video and audio separately (need merge)...');
-            const videoOutput = path.join(tempDir, 'video.%(ext)s');
-            const audioOutput = path.join(tempDir, 'audio.%(ext)s');
-            const finalOutput = path.join(tempDir, '%(title)s_merged.%(ext)s');
-            
-            // Download best video
-            const videoCmd = `yt-dlp ${cookieArg} -f bestvideo[height<=${qualityInfo.height}] -o "${videoOutput}" "${url}"`;
-            // Download best audio
-            const audioCmd = `yt-dlp ${cookieArg} -f bestaudio -x --audio-format mp3 -o "${audioOutput}" "${url}"`;
-            // Merge using ffmpeg
-            const mergeCmd = `ffmpeg -i "${videoOutput.replace('%(ext)s', '*')}" -i "${audioOutput.replace('%(ext)s', '*')}" -c:v copy -c:a aac -map 0:v:0 -map 1:a:0 "${finalOutput.replace('%(ext)s', 'mp4')}"`;
-            
-            cmd = `${videoCmd} && ${audioCmd} && ${mergeCmd}`;
         } else {
-            // Direct download with best format
+            // Try to download best format for this quality
             const formatSpec = qualityInfo.formatId;
             cmd = `yt-dlp ${cookieArg} -f "${formatSpec}+bestaudio[ext=m4a]/best[height<=${qualityInfo.height}]" --merge-output-format mp4 -o "${outputTemplate}" "${url}"`;
-            console.log('[DLP] Direct download format:', formatSpec);
+            console.log('[DLP] Download command:', cmd);
         }
-        
-        console.log('[DLP] Download command:', cmd);
         
         exec(cmd, { maxBuffer: 100 * 1024 * 1024 }, (error, stdout, stderr) => {
             if (error) {
                 console.error('[DLP] Download error:', error.message);
                 console.error('[DLP] stderr:', stderr);
-                // Clean up temp dir on error
-                try {
-                    if (fs.existsSync(tempDir)) {
-                        fs.rmSync(tempDir, { recursive: true, force: true });
+                
+                // Fallback: Try simple download without format specification
+                console.log('[DLP] Retrying with best format...');
+                const fallbackCmd = `yt-dlp ${cookieArg} -f best -o "${outputTemplate}" "${url}"`;
+                
+                exec(fallbackCmd, { maxBuffer: 100 * 1024 * 1024 }, (fallbackError, fallbackStdout, fallbackStderr) => {
+                    if (fallbackError) {
+                        try {
+                            if (fs.existsSync(tempDir)) {
+                                fs.rmSync(tempDir, { recursive: true, force: true });
+                            }
+                        } catch (e) {}
+                        reject(new Error(`Download failed: ${fallbackError.message}`));
+                        return;
                     }
-                } catch (e) {}
-                reject(new Error(`Download failed: ${error.message}`));
+                    
+                    processDownloadedFile(tempDir, resolve, reject);
+                });
                 return;
             }
             
-            console.log('[DLP] Download stdout:', stdout);
-            if (stderr) console.log('[DLP] Download stderr:', stderr);
-            
-            // Find the downloaded file
-            try {
-                const files = fs.readdirSync(tempDir);
-                console.log('[DLP] Files in temp dir:', files);
-                
-                if (files.length === 0) {
-                    reject(new Error('No file downloaded'));
-                    return;
-                }
-                
-                // Find video/mp4 file or audio file
-                let downloadedFile = null;
-                for (const file of files) {
-                    if (file.endsWith('.mp4') || file.endsWith('.mkv') || file.endsWith('.webm')) {
-                        downloadedFile = path.join(tempDir, file);
-                        break;
-                    } else if (file.endsWith('.mp3') && !downloadedFile) {
-                        downloadedFile = path.join(tempDir, file);
-                    }
-                }
-                
-                if (!downloadedFile) {
-                    downloadedFile = path.join(tempDir, files[0]);
-                }
-                
-                const stats = fs.statSync(downloadedFile);
-                console.log('[DLP] Downloaded file:', downloadedFile);
-                console.log('[DLP] File size:', stats.size, 'bytes');
-                
-                resolve({
-                    path: downloadedFile,
-                    filename: path.basename(downloadedFile),
-                    size: stats.size,
-                    tempDir: tempDir
-                });
-            } catch (err) {
-                console.error('[DLP] File locate error:', err);
-                reject(new Error(`Failed to locate downloaded file: ${err.message}`));
-            }
+            processDownloadedFile(tempDir, resolve, reject);
         });
     });
+}
+
+function processDownloadedFile(tempDir, resolve, reject) {
+    try {
+        const files = fs.readdirSync(tempDir);
+        console.log('[DLP] Files in temp dir:', files);
+        
+        if (files.length === 0) {
+            reject(new Error('No file downloaded'));
+            return;
+        }
+        
+        // Find video/mp4 file or audio file
+        let downloadedFile = null;
+        for (const file of files) {
+            if (file.endsWith('.mp4') || file.endsWith('.mkv') || file.endsWith('.webm')) {
+                downloadedFile = path.join(tempDir, file);
+                break;
+            } else if (file.endsWith('.mp3') && !downloadedFile) {
+                downloadedFile = path.join(tempDir, file);
+            }
+        }
+        
+        if (!downloadedFile) {
+            downloadedFile = path.join(tempDir, files[0]);
+        }
+        
+        const stats = fs.statSync(downloadedFile);
+        console.log('[DLP] Downloaded file:', downloadedFile);
+        console.log('[DLP] File size:', stats.size, 'bytes');
+        
+        resolve({
+            path: downloadedFile,
+            filename: path.basename(downloadedFile),
+            size: stats.size,
+            tempDir: tempDir
+        });
+    } catch (err) {
+        console.error('[DLP] File locate error:', err);
+        reject(new Error(`Failed to locate downloaded file: ${err.message}`));
+    }
 }
 
 function formatFileSize(bytes) {
@@ -436,7 +527,7 @@ module.exports = {
             for (let i = 0; i < videoInfo.qualities.length; i++) {
                 const q = videoInfo.qualities[i];
                 let buttonText = q.name;
-                if (q.filesize) {
+                if (q.filesize && q.filesize > 0) {
                     buttonText += ` (${formatFileSize(q.filesize)})`;
                 }
                 buttons.push({
@@ -523,13 +614,10 @@ module.exports = {
                 const qualities = session.data.videoInfo.qualities;
                 
                 console.log('[DLP] Selected index:', index);
-                console.log('[DLP] Available qualities:', qualities.map(q => q.name));
+                console.log('[DLP] Selected quality:', qualities[index]?.name);
                 
                 if (!isNaN(index) && index >= 0 && index < qualities.length) {
                     const selectedQuality = qualities[index];
-                    console.log('[DLP] Selected quality:', selectedQuality.name);
-                    console.log('[DLP] Need audio merge:', selectedQuality.needAudioMerge);
-                    console.log('[DLP] Has audio:', selectedQuality.hasAudio);
                     
                     sessionManager.updateSession(sender, from, {
                         step: 'downloading',
@@ -545,7 +633,6 @@ module.exports = {
                         const fileSize = formatFileSize(result.size);
                         console.log('[DLP] Download complete! File:', result.path);
                         console.log('[DLP] File size:', result.size);
-                        console.log('[DLP] File exists:', fs.existsSync(result.path));
                         
                         const isVideo = selectedQuality.name !== 'mp3';
                         const caption = `✅ *Download Complete!*\n\n` +
@@ -555,15 +642,10 @@ module.exports = {
                                       `> *Downloaded by ${config.botName}*`;
                         
                         const fileBuffer = fs.readFileSync(result.path);
-                        console.log('[DLP] File buffer size:', fileBuffer.length);
+                        const fileExtension = path.extname(result.filename) || (isVideo ? '.mp4' : '.mp3');
+                        const fileName = `${(session.data.videoInfo.title || 'video').replace(/[^a-zA-Z0-9._-]/g, '_')}_${selectedQuality.name}${fileExtension}`;
                         
-                        // Send as document instead of media to avoid playback issues
-                        const fileExtension = result.filename.endsWith('.mp4') ? '.mp4' : 
-                                             (result.filename.endsWith('.mp3') ? '.mp3' : 
-                                             path.extname(result.filename) || '.mp4');
-                        const fileName = `${session.data.videoInfo.title || 'video'}_${selectedQuality.name}${fileExtension}`.replace(/[^a-zA-Z0-9._-]/g, '_');
-                        
-                        console.log('[DLP] Sending as document:', fileName);
+                        console.log('[DLP] Sending file:', fileName);
                         
                         await sock.sendMessage(from, {
                             document: fileBuffer,
@@ -574,17 +656,9 @@ module.exports = {
                         
                         // Clean up temp files
                         try {
-                            if (fs.existsSync(result.path)) {
-                                fs.unlinkSync(result.path);
-                                console.log('[DLP] Deleted temp file:', result.path);
-                            }
-                            if (fs.existsSync(result.tempDir)) {
-                                fs.rmdirSync(result.tempDir, { recursive: true });
-                                console.log('[DLP] Deleted temp dir:', result.tempDir);
-                            }
-                        } catch (cleanErr) {
-                            console.log('[DLP] Cleanup error:', cleanErr.message);
-                        }
+                            if (fs.existsSync(result.path)) fs.unlinkSync(result.path);
+                            if (fs.existsSync(result.tempDir)) fs.rmdirSync(result.tempDir, { recursive: true });
+                        } catch (cleanErr) {}
                         
                         await sock.sendMessage(from, {
                             text: `✅ *Download Complete!*`,
@@ -597,7 +671,7 @@ module.exports = {
                     } catch (downloadError) {
                         console.error('[DLP] Download error:', downloadError);
                         await sock.sendMessage(from, {
-                            text: `❌ *Download failed*\n\nError: ${downloadError.message}\n\nPlease try again or select a different quality.`,
+                            text: `❌ *Download failed*\n\nError: ${downloadError.message}\n\nPlease try again.`,
                             edit: processingMsg.key
                         });
                         await react('❌');
