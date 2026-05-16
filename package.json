@@ -8,7 +8,7 @@
         "start": "node index.js",
         "dev": "nodemon index.js",
         "install:no-puppeteer": "PUPPETEER_SKIP_DOWNLOAD=true PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm install",
-        "postinstall": "npx playwright install chromium && pip install -U yt-dlp && curl -fsSL https://deno.land/install.sh | sh"
+        "postinstall": "npx playwright install chromium"
     },
     "keywords": [
         "whatsapp bot",
@@ -44,7 +44,6 @@
         "qrcode": "^1.5.3",
         "qrcode-terminal": "^0.12.0",
         "ruhend-scraper": "^9.0.8",
-        "selenium-webdriver": "^4.15.0",
         "sharp": "^0.33.4",
         "yt-search": "^2.13.1",
         "ytdl-core": "^4.11.5",
