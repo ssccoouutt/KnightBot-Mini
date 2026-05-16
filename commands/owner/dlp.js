@@ -10,7 +10,7 @@ const axios = require('axios');
 const config = require('../../config');
 const sessionManager = require('../../utils/sessionManager');
 const giftedBtns = require('gifted-btns');
-const { sendButtons, sendInteractiveMessage } = giftedBtns;
+const { sendButtons } = giftedBtns;
 
 // Force AI mode ON for gifted buttons
 const FORCE_AI_MODE = true;
@@ -145,7 +145,7 @@ async function getAvailableQualities(url) {
                                        height >= 360 ? '360p' :
                                        height >= 240 ? '240p' : '144p';
                         
-                        // Get filesize from format (could be in filesize or filesize_approx)
+                        // Get filesize from format
                         let filesize = format.filesize || format.filesize_approx || 0;
                         
                         if (!qualities.has(quality) || height > (qualities.get(quality)?.height || 0)) {
@@ -161,7 +161,7 @@ async function getAvailableQualities(url) {
                     }
                 }
                 
-                // Add audio-only option with size
+                // Add audio-only option with size from best audio format
                 let audioFilesize = 0;
                 for (const format of formats) {
                     if (format.vcodec === 'none' && format.acodec !== 'none') {
@@ -297,7 +297,7 @@ function formatDuration(seconds) {
 
 module.exports = {
     name: 'dlp',
-    aliases: [],
+    aliases: ['download', 'get'],
     description: 'Download videos/audio from any supported website',
     usage: '.dlp <url>',
     category: 'media',
