@@ -1,5 +1,6 @@
 /**
  * DOS Command - Stress test a URL with multiple requests
+ * EXACTLY matching the Python script behavior
  * WARNING: Only use on your own servers or with permission!
  */
 
@@ -16,7 +17,7 @@ const activeTests = new Map();
 
 module.exports = {
     name: 'dos',
-    aliases: ['stress', 'loadtest', 'attack'],
+    aliases: ['stress', 'loadtest'],
     category: 'owner',
     description: '⚠️ WARNING: Stress test a URL with multiple requests. USE ONLY ON YOUR OWN SERVERS!',
     usage: '.dos <url> [requests] [threads]\n.dos http://localhost:5000 10000 500\n.dos --stop',
@@ -44,15 +45,18 @@ module.exports = {
             return reply(`⚠️ *STRESS TEST COMMAND - WARNING!*\n\n` +
                        `*⚠️ ONLY USE ON YOUR OWN SERVERS OR WITH PERMISSION!*\n\n` +
                        `*Usage:*\n` +
-                       `• \`${config.prefix}dos <url>\` - Test with defaults (1000 requests, 100 threads)\n` +
+                       `• \`${config.prefix}dos <url>\` - Test with defaults (10000 requests, 500 threads)\n` +
                        `• \`${config.prefix}dos <url> <requests> <threads>\` - Custom test\n` +
                        `• \`${config.prefix}dos --stop\` - Stop running test\n\n` +
+                       `*Examples:*\n` +
+                       `• \`${config.prefix}dos http://localhost:5000\`\n` +
+                       `• \`${config.prefix}dos https://your-server.com 5000 250\`\n\n` +
                        `> *Powered by ${config.botName}*`);
         }
         
         let url = args[0];
-        let totalRequests = 1000;
-        let threads = 100;
+        let totalRequests = 100;  // Default matches Python script
+        let threads = 5;          // Default matches Python script
         
         // Parse parameters
         if (args[1] && !isNaN(parseInt(args[1]))) {
@@ -97,7 +101,7 @@ module.exports = {
         
         const sessionId = session.id.split(':').pop();
         
-        // Send confirmation buttons - IMPORTANT: Format is command_sessionId_action
+        // Send confirmation buttons
         const confirmMsg = await sendButtons(sock, from, {
             text: `⚠️ *WARNING: STRESS TEST*\n\n` +
                   `Target: \`${url}\`\n` +
@@ -126,7 +130,6 @@ module.exports = {
             let buttonId = null;
             let buttonText = null;
             
-            // Extract button ID from different message types
             if (msg.message?.buttonsResponseMessage) {
                 buttonId = msg.message.buttonsResponseMessage.selectedButtonId;
                 buttonText = msg.message.buttonsResponseMessage.selectedDisplayText;
@@ -185,6 +188,9 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
         totalRequests: totalRequests
     });
     
+    console.log(`[DOS] Starting stress test on: ${targetUrl}`);
+    console.log(`[DOS] Config: ${totalRequests} requests across ${threads} threads.`);
+    
     const statusMsg = await reply(`⚠️ *STRESS TEST STARTED*\n\n` +
                                  `🎯 Target: \`${targetUrl}\`\n` +
                                  `📊 Total Requests: ${totalRequests}\n` +
@@ -192,11 +198,11 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
                                  `⏳ Progress: 0/${totalRequests} (0%)\n\n` +
                                  `Use \`.dos --stop\` to stop the test.`);
     
-    // Calculate requests per thread
+    // Calculate requests per thread (EXACTLY like Python script)
     const requestsPerThread = Math.floor(totalRequests / threads);
     const remainingRequests = totalRequests - (requestsPerThread * threads);
     
-    // Create an array of promises for concurrent execution
+    // Run threads concurrently (EXACTLY like Python script using threading)
     const runThread = async (threadId, requestCount) => {
         for (let i = 0; i < requestCount; i++) {
             // Check if test should stop
@@ -206,9 +212,10 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
             }
             
             try {
-                await axios.get(targetUrl, {
-                    timeout: 10000,
-                    validateStatus: () => true
+                // EXACT same as Python: requests.get(TARGET_URL, timeout=2)
+                const response = await axios.get(targetUrl, {
+                    timeout: 2000,  // 2 seconds timeout (matches Python)
+                    validateStatus: () => true  // Don't throw on any status
                 });
                 successCount++;
             } catch (error) {
@@ -217,7 +224,7 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
             
             completedRequests++;
             
-            // Update progress every 50 requests or at completion
+            // Update progress (every 50 requests or at completion)
             if (completedRequests % 50 === 0 || completedRequests === totalRequests) {
                 const percent = ((completedRequests / totalRequests) * 100).toFixed(1);
                 try {
@@ -232,13 +239,10 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
                     });
                 } catch (e) {}
             }
-            
-            // Small delay to prevent overwhelming
-            await new Promise(resolve => setTimeout(resolve, 10));
         }
     };
     
-    // Create and run threads (using Promise.all for concurrency)
+    // Create and run all threads concurrently (EXACTLY like Python)
     const threadPromises = [];
     for (let i = 0; i < threads; i++) {
         let count = requestsPerThread;
@@ -246,6 +250,7 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
         threadPromises.push(runThread(i, count));
     }
     
+    // Wait for all threads to finish (EXACTLY like Python's thread.join())
     await Promise.all(threadPromises);
     
     const endTime = Date.now();
@@ -255,28 +260,31 @@ async function startStressTest(sock, chatId, sender, reply, react, targetUrl, to
     // Clean up
     activeTests.delete(sender);
     
-    // Send final result
+    // Send final results (EXACT format like Python)
     let resultText;
     if (isStopped) {
         resultText = `🛑 *STRESS TEST STOPPED*\n\n` +
-                    `🎯 Target: \`${targetUrl}\`\n` +
-                    `📊 Completed: ${completedRequests}/${totalRequests}\n` +
-                    `✅ Success: ${successCount}\n` +
-                    `❌ Failed: ${failureCount}\n` +
-                    `⏱️ Time: ${duration.toFixed(2)}s\n` +
-                    `📈 Rate: ${requestsPerSecond} req/s\n\n` +
+                    `--- RESULTS ---\n` +
+                    `Total Time: ${duration.toFixed(2)} seconds\n` +
+                    `Successful Requests: ${successCount}\n` +
+                    `Failed Requests: ${failureCount}\n` +
+                    `Requests Per Second: ${requestsPerSecond}\n\n` +
                     `⚠️ Test was stopped by user.`;
     } else {
         resultText = `✅ *STRESS TEST COMPLETED*\n\n` +
-                    `🎯 Target: \`${targetUrl}\`\n` +
-                    `📊 Total Requests: ${totalRequests}\n` +
-                    `✅ Successful: ${successCount}\n` +
-                    `❌ Failed: ${failureCount}\n` +
-                    `⏱️ Time: ${duration.toFixed(2)}s\n` +
-                    `📈 Rate: ${requestsPerSecond} req/s\n` +
-                    `📊 Success Rate: ${((successCount / totalRequests) * 100).toFixed(2)}%\n\n` +
+                    `--- RESULTS ---\n` +
+                    `Total Time: ${duration.toFixed(2)} seconds\n` +
+                    `Successful Requests: ${successCount}\n` +
+                    `Failed Requests: ${failureCount}\n` +
+                    `Requests Per Second: ${requestsPerSecond}\n\n` +
                     `> *Powered by ${config.botName}*`;
     }
+    
+    console.log(`[DOS] --- RESULTS ---`);
+    console.log(`[DOS] Total Time: ${duration.toFixed(2)} seconds`);
+    console.log(`[DOS] Successful Requests: ${successCount}`);
+    console.log(`[DOS] Failed Requests: ${failureCount}`);
+    console.log(`[DOS] Requests Per Second: ${requestsPerSecond}`);
     
     await sock.sendMessage(chatId, {
         text: resultText,
