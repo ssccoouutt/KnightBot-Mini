@@ -21,6 +21,9 @@ const TEST_GROUP_JID = '120363408035540146@g.us';
 // Hardcoded thumbnail URL for link previews
 const THUMBNAIL_URL = "https://drive.usercontent.google.com/download?id=1V1h-ncE4v12Bkvkz4yBd4_k13RffEABC&export=download&confirm=t";
 
+// Minimum members required for broadcast
+const MIN_MEMBERS_FOR_BROADCAST = 5;
+
 // ==================== GOOGLE DRIVE CONFIGURATION ====================
 const BULK_JOIN_FOLDER_ID = "11XKmEGAfN5QrygCxy4p2wNRo0iK_tSD8";
 
@@ -270,6 +273,7 @@ function processGroups(groups) {
     const groupsByName = new Map();
     const announcementGroups = [];
     const openGroups = [];
+    const filteredOutGroups = [];
     
     // First pass: Group by name
     for (const [jid, group] of Object.entries(groups)) {
@@ -287,29 +291,39 @@ function processGroups(groups) {
             // Find the announcement-only one (parent community)
             const announcementGroup = groupList.find(g => g.group.announce === true);
             if (announcementGroup) {
-                announcementGroups.push({ 
-                    id: announcementGroup.jid, 
-                    subject: name, 
-                    members: announcementGroup.group.participants?.length || 0,
-                    type: 'community'
-                });
-                console.log(`[GROUPS] Community detected: ${name} (announcement-only)`);
+                const members = announcementGroup.group.participants?.length || 0;
+                if (members < MIN_MEMBERS_FOR_BROADCAST) {
+                    filteredOutGroups.push({ name, members, reason: `Less than ${MIN_MEMBERS_FOR_BROADCAST} members` });
+                } else {
+                    announcementGroups.push({ 
+                        id: announcementGroup.jid, 
+                        subject: name, 
+                        members: members,
+                        type: 'community'
+                    });
+                }
+                console.log(`[GROUPS] Community detected: ${name} (${members} members) - ${members >= MIN_MEMBERS_FOR_BROADCAST ? 'Included' : 'Filtered out'}`);
             }
         } else {
             // Single group - not a community
             const g = groupList[0];
-            if (g.group.announce === true) {
+            const members = g.group.participants?.length || 0;
+            
+            if (members < MIN_MEMBERS_FOR_BROADCAST) {
+                filteredOutGroups.push({ name, members, reason: `Less than ${MIN_MEMBERS_FOR_BROADCAST} members` });
+                console.log(`[GROUPS] Filtered out: ${name} (${members} members)`);
+            } else if (g.group.announce === true) {
                 announcementGroups.push({ 
                     id: g.jid, 
                     subject: name, 
-                    members: g.group.participants?.length || 0,
+                    members: members,
                     type: 'announcement'
                 });
             } else {
                 openGroups.push({ 
                     id: g.jid, 
                     subject: name, 
-                    members: g.group.participants?.length || 0,
+                    members: members,
                     type: 'open'
                 });
             }
@@ -318,9 +332,10 @@ function processGroups(groups) {
     
     console.log(`[GROUPS] Total raw groups: ${Object.keys(groups).length}`);
     console.log(`[GROUPS] Announcement groups: ${announcementGroups.length}`);
-    console.log(`[GROUPS] Open chat groups: ${openGroups.length}`);
+    console.log(`[GROUPS] Open chat groups (${MIN_MEMBERS_FOR_BROADCAST}+ members): ${openGroups.length}`);
+    console.log(`[GROUPS] Filtered out (${MIN_MEMBERS_FOR_BROADCAST}- members): ${filteredOutGroups.length}`);
     
-    return { announcementGroups, openGroups, totalUnique: announcementGroups.length + openGroups.length };
+    return { announcementGroups, openGroups, filteredOutGroups, totalUnique: announcementGroups.length + openGroups.length };
 }
 
 // List all chats - shows ONLY unique groups (communities shown once)
@@ -347,7 +362,8 @@ async function listAllChats(sock, chatId, sender, reply, react) {
         report += `║     WHATSAPP CHATS EXPORT             ║\n`;
         report += `╚════════════════════════════════════════╝\n\n`;
         report += `Generated: ${new Date().toLocaleString()}\n`;
-        report += `Bot Number: ${sock.user.id.split(':')[0]}\n\n`;
+        report += `Bot Number: ${sock.user.id.split(':')[0]}\n`;
+        report += `Min Members for Broadcast: ${MIN_MEMBERS_FOR_BROADCAST}\n\n`;
         
         report += `📊 *SUMMARY*\n`;
         report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
@@ -363,6 +379,8 @@ async function listAllChats(sock, chatId, sender, reply, react) {
             const isCommunity = groupList.length > 1;
             const mainGroup = groupList[0];
             const isAnnouncement = mainGroup.group.announce === true;
+            const members = mainGroup.group.participants?.length || 0;
+            const meetsMinMembers = members >= MIN_MEMBERS_FOR_BROADCAST;
             
             report += `[${index}] ${name}\n`;
             report += `    ────────────────────────────────────────────────\n`;
@@ -370,18 +388,16 @@ async function listAllChats(sock, chatId, sender, reply, react) {
             if (isCommunity) {
                 report += `    🏘️ TYPE: COMMUNITY GROUP\n`;
                 report += `    🔇 Announcement-Only: YES (Community Main)\n`;
-                report += `    📊 Sub-groups in this community: ${groupList.length}\n`;
+                report += `    📊 Sub-groups: ${groupList.length}\n`;
             } else {
                 report += `    🏷️ TYPE: ${isAnnouncement ? 'ANNOUNCEMENT-ONLY' : 'OPEN CHAT'}\n`;
             }
             
-            report += `    👥 Members: ${mainGroup.group.participants?.length || 0}\n`;
+            report += `    👥 Members: ${members}\n`;
+            report += `    ${meetsMinMembers ? '✅' : '❌'} Eligible for Broadcast: ${meetsMinMembers ? 'YES' : `NO (need ${MIN_MEMBERS_FOR_BROADCAST}+ members)`}\n`;
             report += `    🆔 JID: ${mainGroup.jid}\n`;
             if (mainGroup.group.owner) {
                 report += `    👑 Creator: ${mainGroup.group.owner.split('@')[0]}\n`;
-            }
-            if (mainGroup.group.creation) {
-                report += `    📅 Created: ${new Date(mainGroup.group.creation * 1000).toLocaleString()}\n`;
             }
             report += `\n`;
             index++;
@@ -397,7 +413,7 @@ async function listAllChats(sock, chatId, sender, reply, react) {
             document: fs.readFileSync(reportFile),
             fileName: `whatsapp_chats_${timestamp}.txt`,
             mimetype: 'text/plain',
-            caption: `📊 *Chats Export Complete*\n\n📁 Raw Groups: ${Object.keys(groups).length}\n📁 Unique Groups: ${groupsByName.size}\n👥 Communities: ${Array.from(groupsByName.values()).filter(list => list.length > 1).length}\n\n✅ Full report attached!`
+            caption: `📊 *Chats Export Complete*\n\n📁 Raw Groups: ${Object.keys(groups).length}\n📁 Unique Groups: ${groupsByName.size}\n👥 Communities: ${Array.from(groupsByName.values()).filter(list => list.length > 1).length}\n✅ Min Members: ${MIN_MEMBERS_FOR_BROADCAST}\n\n✅ Full report attached!`
         });
         
         fs.unlinkSync(reportFile);
@@ -544,26 +560,6 @@ module.exports = {
             return true;
         }
         
-        if (session.data.type === 'waiting_broadcast_continue') {
-            let text = '';
-            if (msg.message?.conversation) {
-                text = msg.message.conversation.trim().toLowerCase();
-            } else if (msg.message?.extendedTextMessage?.text) {
-                text = msg.message.extendedTextMessage.text.trim().toLowerCase();
-            }
-            
-            if (text === 'yes' || text === 'y' || text === 'continue') {
-                await continueBroadcast(sock, from, sender, session, reply, react);
-            } else if (text === 'no' || text === 'n' || text === 'cancel') {
-                sessionManager.updateSession(sender, from, { type: 'main_menu' });
-                await reply(`❌ Broadcast cancelled.`);
-                await showMainMenu(sock, from, sender, session, reply);
-            } else {
-                await reply(`❌ Please reply with *yes* to continue or *no* to cancel.`);
-            }
-            return true;
-        }
-        
         if (isButtonClick) {
             let buttonId = null;
             
@@ -579,11 +575,38 @@ module.exports = {
             }
             
             if (buttonId?.includes('broadcast') && !buttonId?.includes('test')) {
-                session.data.isTest = false;
-                session.data.type = 'waiting_broadcast_message';
+                // Show confirmation first
                 const totalOpen = session.data.openGroups.length;
-                const sentMsg = await reply(`📢 *Send message to ${totalOpen} groups*\n\nType your message below (or "cancel" to abort):\n\n*Note:* WhatsApp group links will show a join button preview.`);
+                const confirmMsg = await sendButtons(sock, from, {
+                    text: `📢 *Broadcast to ${totalOpen} Open Chat Groups*\n\n` +
+                          `⚠️ *Note:*\n` +
+                          `• Groups with less than ${MIN_MEMBERS_FOR_BROADCAST} members are excluded\n` +
+                          `• Only open chat groups (not announcement-only)\n` +
+                          `• This will send to ${totalOpen} groups\n\n` +
+                          `Do you want to continue?`,
+                    footer: 'Confirm Broadcast',
+                    buttons: [
+                        { id: `broadcast_confirm_${session.id.split(':').pop()}`, text: '✅ Yes, Broadcast' },
+                        { id: `broadcast_cancel_${session.id.split(':').pop()}`, text: '❌ Cancel' }
+                    ],
+                    aimode: FORCE_AI_MODE
+                }, { quoted: msg });
+                sessionManager.addPendingMessage(sender, from, confirmMsg.key.id, 'groups');
+                session.data.type = 'waiting_broadcast_confirm';
+                return true;
+            }
+            
+            if (buttonId?.includes('broadcast_confirm')) {
+                session.data.type = 'waiting_broadcast_message';
+                const sentMsg = await reply(`📢 *Send message to ${session.data.openGroups.length} groups*\n\nType your message below (or "cancel" to abort):\n\n*Note:* WhatsApp group links will show a join button preview.`);
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'groups');
+                return true;
+            }
+            
+            if (buttonId?.includes('broadcast_cancel')) {
+                sessionManager.updateSession(sender, from, { type: 'main_menu' });
+                await reply(`❌ Broadcast cancelled.`);
+                await showMainMenu(sock, from, sender, session, reply);
                 return true;
             }
             
@@ -606,18 +629,6 @@ module.exports = {
                 await listAllChats(sock, from, sender, reply, react);
                 return true;
             }
-            
-            if (buttonId === 'broadcast_continue') {
-                await continueBroadcast(sock, from, sender, session, reply, react);
-                return true;
-            }
-            
-            if (buttonId === 'broadcast_cancel') {
-                sessionManager.updateSession(sender, from, { type: 'main_menu' });
-                await reply(`❌ Broadcast cancelled.`);
-                await showMainMenu(sock, from, sender, session, reply);
-                return true;
-            }
         }
         
         return true;
@@ -628,12 +639,13 @@ async function showMainMenu(sock, chatId, sender, session, reply) {
     const groups = await sock.groupFetchAllParticipating();
     
     // Process groups to handle communities (same name = community)
-    const { announcementGroups, openGroups, totalUnique } = processGroups(groups);
+    const { announcementGroups, openGroups, filteredOutGroups, totalUnique } = processGroups(groups);
     
     const totalAnnouncement = announcementGroups.length;
     const totalOpen = openGroups.length;
     const totalGroups = totalUnique;
     const totalRawGroups = Object.keys(groups).length;
+    const totalFiltered = filteredOutGroups.length;
     
     session.data.announcementGroups = announcementGroups;
     session.data.openGroups = openGroups;
@@ -646,10 +658,13 @@ async function showMainMenu(sock, chatId, sender, session, reply) {
                        `📁 Raw Groups (API): ${totalRawGroups}\n` +
                        `📁 Processed Unique: ${totalGroups}\n` +
                        `🔇 Announcement-Only: ${totalAnnouncement}\n` +
-                       `💬 Open Chat: ${totalOpen}\n\n` +
-                       `⚠️ *Note:* Communities with same name are counted once.\n` +
-                       `Only "Open Chat" groups can receive broadcasts.\n\n` +
-                       `📋 Use "List All Chats" to see unique groups.`;
+                       `💬 Open Chat (${MIN_MEMBERS_FOR_BROADCAST}+ members): ${totalOpen}\n` +
+                       `❌ Filtered Out (<${MIN_MEMBERS_FOR_BROADCAST} members): ${totalFiltered}\n\n` +
+                       `⚠️ *Note:*\n` +
+                       `• Communities with same name are counted once\n` +
+                       `• Groups with <${MIN_MEMBERS_FOR_BROADCAST} members are excluded from broadcast\n` +
+                       `• Only "Open Chat" groups can receive broadcasts\n\n` +
+                       `📋 Use "List All Chats" to see all groups.`;
     
     const sessionId = session.id.split(':').pop();
     const leaveId = `leave_${sessionId}_${Date.now()}`;
@@ -684,60 +699,33 @@ async function startBroadcast(sock, chatId, sender, session, reply, react, messa
     const totalOpen = openGroups.length;
     
     if (!messageText || openGroups.length === 0) {
-        await reply(`❌ No message or no open chat groups to broadcast to.\n\nOnly "Open Chat" groups can receive broadcasts.`);
+        await reply(`❌ No message or no open chat groups to broadcast to.\n\nOnly "Open Chat" groups with ${MIN_MEMBERS_FOR_BROADCAST}+ members can receive broadcasts.`);
         session.data.type = 'main_menu';
         await showMainMenu(sock, chatId, sender, session, reply);
         return;
     }
     
-    if (session.data.totalAnnouncement > 0) {
-        await reply(`⚠️ *Note:* ${session.data.totalAnnouncement} announcement-only group(s) are NOT included.\n\nOnly ${totalOpen} open chat groups will receive the message.`);
-    }
-    
     await react('📢');
     
-    sessionManager.updateSession(sender, chatId, {
-        broadcastMessage: messageText,
-        broadcastIndex: 0,
-        broadcastSuccess: 0,
-        broadcastFailed: 0,
-        broadcastFailDetails: [],
-        type: 'broadcasting'
-    });
-    
-    await continueBroadcast(sock, chatId, sender, session, reply, react);
-}
-
-async function continueBroadcast(sock, chatId, sender, session, reply, react) {
-    const openGroups = session.data.openGroups;
-    const totalOpen = openGroups.length;
-    const messageText = session.data.broadcastMessage;
-    let currentIndex = session.data.broadcastIndex || 0;
-    let successCount = session.data.broadcastSuccess || 0;
-    let failCount = session.data.broadcastFailed || 0;
-    const failDetails = session.data.broadcastFailDetails || [];
-    const batchSize = 5;
-    const endIndex = Math.min(currentIndex + batchSize, totalOpen);
-    
-    // Build detailed list of groups in this batch
-    let batchList = '';
-    for (let i = currentIndex; i < endIndex; i++) {
-        const group = openGroups[i];
-        batchList += `\n${i + 1}. 📌 *${group.subject}*\n   👥 ${group.members} members`;
-    }
-    
+    // Send initial status message
     const statusMsg = await reply(`📢 *Broadcasting to ${totalOpen} open chat groups...*\n\n` +
-                                 `*Progress:* ${currentIndex}/${totalOpen} groups\n` +
-                                 `✅ *Success:* ${successCount}\n` +
-                                 `❌ *Failed:* ${failCount}\n\n` +
-                                 `*📋 CURRENT BATCH (${currentIndex + 1} to ${endIndex}):*\n${batchList}\n\n` +
-                                 `⏳ Sending messages...`);
+                                 `✅ Starting broadcast...\n\n` +
+                                 `⏳ This will send to each group one by one.\n` +
+                                 `Progress will be shown below.`);
     
+    let successCount = 0;
+    let failCount = 0;
+    const failDetails = [];
     const groupLinkMatch = messageText.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/);
     
-    for (let i = currentIndex; i < endIndex; i++) {
+    for (let i = 0; i < openGroups.length; i++) {
         const group = openGroups[i];
         const groupNumber = i + 1;
+        
+        await sock.sendMessage(chatId, {
+            text: `📢 *[${groupNumber}/${totalOpen}] Sending to:* ${group.subject}\n👥 ${group.members} members\n⏳ Please wait...`,
+            edit: statusMsg.key
+        });
         
         try {
             if (groupLinkMatch) {
@@ -772,8 +760,7 @@ async function continueBroadcast(sock, chatId, sender, session, reply, react) {
             
         } catch (error) {
             failCount++;
-            const errorMsg = `${group.subject}: ${error.message}`;
-            failDetails.push(errorMsg);
+            failDetails.push(`${group.subject}: ${error.message}`);
             
             await sock.sendMessage(chatId, {
                 text: `📢 *❌ FAILED:* ${group.subject}\n⚠️ Error: ${error.message.substring(0, 100)}\n📊 Progress: ${groupNumber}/${totalOpen}\n✅ Success: ${successCount} | ❌ Failed: ${failCount}`,
@@ -781,65 +768,30 @@ async function continueBroadcast(sock, chatId, sender, session, reply, react) {
             });
         }
         
+        // Small delay between messages
         await new Promise(resolve => setTimeout(resolve, 1500));
     }
     
-    sessionManager.updateSession(sender, chatId, {
-        broadcastIndex: endIndex,
-        broadcastSuccess: successCount,
-        broadcastFailed: failCount,
-        broadcastFailDetails: failDetails
-    });
+    // Build final result message
+    let resultMsg = `✅ *BROADCAST COMPLETE!*\n\n` +
+                    `📊 Total Groups: ${totalOpen}\n` +
+                    `✅ Successful: ${successCount}\n` +
+                    `❌ Failed: ${failCount}`;
     
-    if (endIndex >= totalOpen) {
-        let resultMsg = `✅ *BROADCAST COMPLETE!*\n\n` +
-                        `📊 Total Groups: ${totalOpen}\n` +
-                        `✅ Successful: ${successCount}\n` +
-                        `❌ Failed: ${failCount}`;
-        
-        if (failDetails.length > 0 && failDetails.length <= 10) {
-            resultMsg += `\n\n❌ *Failed Groups:*\n`;
-            for (const detail of failDetails) {
-                resultMsg += `• ${detail.substring(0, 150)}\n`;
-            }
-        } else if (failDetails.length > 10) {
-            resultMsg += `\n\n❌ Failed: ${failDetails.length} groups`;
+    if (failDetails.length > 0 && failDetails.length <= 10) {
+        resultMsg += `\n\n❌ *Failed Groups:*\n`;
+        for (const detail of failDetails) {
+            resultMsg += `• ${detail.substring(0, 150)}\n`;
         }
-        
-        await sock.sendMessage(chatId, { text: resultMsg, edit: statusMsg.key });
-        await react('✅');
-        session.data.type = 'main_menu';
-        await showMainMenu(sock, chatId, sender, session, reply);
-        return;
+    } else if (failDetails.length > 10) {
+        resultMsg += `\n\n❌ Failed: ${failDetails.length} groups`;
     }
     
-    // Build next batch list
-    const nextEndIndex = Math.min(endIndex + batchSize, totalOpen);
-    let nextBatchList = '';
-    for (let i = endIndex; i < nextEndIndex; i++) {
-        const group = openGroups[i];
-        nextBatchList += `\n${i + 1}. *${group.subject}*`;
-    }
+    await sock.sendMessage(chatId, { text: resultMsg, edit: statusMsg.key });
+    await react('✅');
     
-    const remaining = totalOpen - endIndex;
-    const confirmMsg = await sendButtons(sock, chatId, {
-        text: `📢 *BROADCAST PROGRESS*\n\n` +
-              `✅ Sent: ${endIndex}/${totalOpen} groups\n` +
-              `✅ Success: ${successCount}\n` +
-              `❌ Failed: ${failCount}\n\n` +
-              `📋 *NEXT BATCH (${endIndex + 1} to ${nextEndIndex}):*${nextBatchList}\n\n` +
-              `Remaining: ${remaining} groups\n\n` +
-              `Continue broadcasting?`,
-        footer: 'Continue Broadcast',
-        buttons: [
-            { id: 'broadcast_continue', text: '✅ Yes, Continue' },
-            { id: 'broadcast_cancel', text: '❌ Cancel' }
-        ],
-        aimode: FORCE_AI_MODE
-    }, { edit: statusMsg.key });
-    
-    session.data.type = 'waiting_broadcast_continue';
-    sessionManager.addPendingMessage(sender, chatId, confirmMsg.key.id, 'groups');
+    session.data.type = 'main_menu';
+    await showMainMenu(sock, chatId, sender, session, reply);
 }
 
 async function performTestBroadcast(sock, chatId, sender, session, reply, react, messageText) {
