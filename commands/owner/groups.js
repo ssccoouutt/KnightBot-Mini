@@ -264,63 +264,127 @@ async function loadInvalidLinksCache(folderId) {
     return invalidLinksCache;
 }
 
-// Process groups to handle community duplicates
+// Process groups to handle community duplicates based on parentGroupId
 function processGroups(groups) {
-    const groupMap = new Map();
-    
-    // First pass: Group by name to identify communities
-    for (const [jid, group] of Object.entries(groups)) {
-        const name = group.subject;
-        if (!groupMap.has(name)) {
-            groupMap.set(name, []);
-        }
-        groupMap.get(name).push({ jid, group });
-    }
-    
-    // Second pass: Identify communities (groups with same name)
+    const communityParentIds = new Set();
     const announcementGroups = [];
     const openGroups = [];
     
-    for (const [name, groupList] of groupMap) {
-        if (groupList.length > 1) {
-            // This is a community - multiple groups with same name
-            const announcementGroup = groupList.find(g => g.group.announce === true);
-            const openGroup = groupList.find(g => g.group.announce === false);
-            
-            if (announcementGroup) {
-                announcementGroups.push({ 
-                    id: announcementGroup.jid, 
-                    subject: name, 
-                    members: announcementGroup.group.participants?.length || 0 
-                });
-            }
-            if (openGroup) {
-                openGroups.push({ 
-                    id: openGroup.jid, 
-                    subject: name, 
-                    members: openGroup.group.participants?.length || 0 
-                });
-            }
-        } else {
-            // Single group - not a community
-            const g = groupList[0];
-            if (g.group.announce === true) {
-                announcementGroups.push({ 
-                    id: g.jid, 
-                    subject: name, 
-                    members: g.group.participants?.length || 0 
-                });
-            } else {
-                openGroups.push({ 
-                    id: g.jid, 
-                    subject: name, 
-                    members: g.group.participants?.length || 0 
-                });
-            }
+    // First pass: Identify community subgroups (groups with parentGroupId)
+    for (const [jid, group] of Object.entries(groups)) {
+        if (group.parentGroupId) {
+            communityParentIds.add(group.parentGroupId);
+            console.log(`[GROUPS] Found community subgroup: ${group.subject} (parent: ${group.parentGroupId})`);
         }
     }
     
+    // Second pass: Categorize groups
+    for (const [jid, group] of Object.entries(groups)) {
+        // Skip if this group is a community subgroup (has parentGroupId)
+        if (group.parentGroupId) {
+            continue;
+        }
+        
+        // If this group is a parent of a community group
+        if (communityParentIds.has(jid)) {
+            announcementGroups.push({ 
+                id: group.id, 
+                subject: group.subject, 
+                members: group.participants?.length || 0,
+                type: 'community_parent'
+            });
+            console.log(`[GROUPS] Community parent (announcement-only): ${group.subject}`);
+        } 
+        // Regular announcement-only groups
+        else if (group.announce === true) {
+            announcementGroups.push({ 
+                id: group.id, 
+                subject: group.subject, 
+                members: group.participants?.length || 0,
+                type: 'announcement'
+            });
+        } 
+        // Regular open chat groups
+        else {
+            openGroups.push({ 
+                id: group.id, 
+                subject: group.subject, 
+                members: group.participants?.length || 0,
+                type: 'open'
+            });
+        }
+    }
+    
+    console.log(`[GROUPS] Total groups: ${Object.keys(groups).length}`);
+    console.log(`[GROUPS] Community parents: ${communityParentIds.size}`);
+    console.log(`[GROUPS] Announcement groups: ${announcementGroups.length}`);
+    console.log(`[GROUPS] Open chat groups: ${openGroups.length}`);
+    
     return { announcementGroups, openGroups, totalUnique: announcementGroups.length + openGroups.length };
+}
+
+// List all chats function
+async function listAllChats(sock, chatId, sender, reply, react) {
+    await react('📋');
+    const statusMsg = await reply(`📋 *Fetching all chats...*\n⏳ This may take a moment...`);
+    
+    try {
+        const groups = await sock.groupFetchAllParticipating();
+        const groupList = Object.values(groups);
+        
+        // Build report
+        let report = `╔════════════════════════════════════════╗\n`;
+        report += `║     WHATSAPP CHATS EXPORT             ║\n`;
+        report += `╚════════════════════════════════════════╝\n\n`;
+        report += `Generated: ${new Date().toLocaleString()}\n`;
+        report += `Bot Number: ${sock.user.id.split(':')[0]}\n\n`;
+        
+        report += `📊 *SUMMARY*\n`;
+        report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        report += `Total Groups: ${groupList.length}\n`;
+        report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+        
+        report += `👥 *ALL GROUPS (${groupList.length})*\n`;
+        report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+        
+        for (let i = 0; i < groupList.length; i++) {
+            const g = groupList[i];
+            report += `[${i + 1}] ${g.subject}\n`;
+            report += `    ────────────────────────────────────────────────\n`;
+            report += `    🆔 JID: ${g.id}\n`;
+            report += `    👥 Members: ${g.participants?.length || 0}\n`;
+            report += `    🔇 Announce: ${g.announce ? 'YES (Announcement-Only)' : 'NO (Open Messaging)'}\n`;
+            report += `    🔒 Restrict: ${g.restrict ? 'YES' : 'NO'}\n`;
+            report += `    👑 Creator: ${g.owner?.split('@')[0] || 'Unknown'}\n`;
+            report += `    📅 Created: ${g.creation ? new Date(g.creation * 1000).toLocaleString() : 'Unknown'}\n`;
+            if (g.parentGroupId) {
+                report += `    🏘️ PARENT GROUP ID: ${g.parentGroupId}\n`;
+                report += `    ⚠️ THIS IS A COMMUNITY SUBGROUP!\n`;
+            }
+            report += `\n`;
+        }
+        
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const tempDir = path.join(process.cwd(), 'temp');
+        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+        const reportFile = path.join(tempDir, `chats_${timestamp}.txt`);
+        fs.writeFileSync(reportFile, report);
+        
+        await sock.sendMessage(chatId, {
+            document: fs.readFileSync(reportFile),
+            fileName: `whatsapp_chats_${timestamp}.txt`,
+            mimetype: 'text/plain',
+            caption: `📊 *Chats Export Complete*\n\n👥 Total Groups: ${groupList.length}\n\n✅ Full report attached!`
+        });
+        
+        fs.unlinkSync(reportFile);
+        await react('✅');
+        
+    } catch (error) {
+        console.error('[GROUPS] List chats error:', error);
+        await reply(`❌ Failed to fetch chats: ${error.message}`);
+        await react('❌');
+    }
 }
 
 module.exports = {
@@ -515,6 +579,11 @@ module.exports = {
                 return true;
             }
             
+            if (buttonId?.includes('listchats')) {
+                await listAllChats(sock, from, sender, reply, react);
+                return true;
+            }
+            
             if (buttonId === 'broadcast_continue') {
                 await continueBroadcast(sock, from, sender, session, reply, react);
                 return true;
@@ -541,6 +610,7 @@ async function showMainMenu(sock, chatId, sender, session, reply) {
     const totalAnnouncement = announcementGroups.length;
     const totalOpen = openGroups.length;
     const totalGroups = totalUnique;
+    const totalRawGroups = Object.keys(groups).length;
     
     session.data.announcementGroups = announcementGroups;
     session.data.openGroups = openGroups;
@@ -550,17 +620,20 @@ async function showMainMenu(sock, chatId, sender, session, reply) {
     session.data.type = 'main_menu';
     
     let statusMessage = `📊 *GROUP STATISTICS*\n\n` +
-                       `📁 Total Groups: ${totalGroups}\n` +
+                       `📁 Raw Groups (API): ${totalRawGroups}\n` +
+                       `📁 Processed Unique: ${totalGroups}\n` +
                        `🔇 Announcement-Only: ${totalAnnouncement}\n` +
                        `💬 Open Chat: ${totalOpen}\n\n` +
                        `⚠️ *Note:* Only "Open Chat" groups can receive broadcasts.\n` +
-                       `Announcement-only groups require bot to be admin.`;
+                       `Community subgroups have been filtered out.\n\n` +
+                       `📋 Use "List All Chats" to see raw group data.`;
     
     const sessionId = session.id.split(':').pop();
     const leaveId = `leave_${sessionId}_${Date.now()}`;
     const broadcastId = `broadcast_${sessionId}_${Date.now()}`;
     const testBroadcastId = `test_broadcast_${sessionId}_${Date.now()}`;
     const bulkJoinId = `bulk_join_${sessionId}_${Date.now()}`;
+    const listChatsId = `listchats_${sessionId}_${Date.now()}`;
     
     const buttons = [];
     if (announcementGroups.length > 0) {
@@ -571,6 +644,7 @@ async function showMainMenu(sock, chatId, sender, session, reply) {
         buttons.push({ id: testBroadcastId, text: `🧪 Test Broadcast` });
     }
     buttons.push({ id: bulkJoinId, text: `📥 Bulk Join from Links` });
+    buttons.push({ id: listChatsId, text: `📋 List All Chats (Raw Data)` });
     
     const sentMsg = await sendButtons(sock, chatId, {
         text: statusMessage,
