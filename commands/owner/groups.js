@@ -263,37 +263,89 @@ async function loadInvalidLinksCache(folderId) {
     return invalidLinksCache;
 }
 
-// Helper function to detect if a group is a Community group
-function isCommunityGroup(group) {
-    // Community groups typically have 'parentGroupId' property
-    // Or they have 'announce: true' and also appear as a subgroup
-    return group.parentGroupId !== undefined && group.parentGroupId !== null;
-}
-
-// Helper function to get unique groups (remove community duplicates)
-function getUniqueGroups(groups) {
-    const uniqueMap = new Map();
-    const communityGroupIds = new Set();
+// Process groups to handle community duplicates
+function processGroups(groups) {
+    const groupMap = new Map();
+    const communityGroups = new Map(); // Store community info by name
     
-    // First pass: identify community groups (announcement-only groups that are likely communities)
+    // First pass: Group by name to identify communities
     for (const [jid, group] of Object.entries(groups)) {
-        if (group.announce === true && isCommunityGroup(group)) {
-            communityGroupIds.add(jid);
+        const name = group.subject;
+        if (!groupMap.has(name)) {
+            groupMap.set(name, []);
+        }
+        groupMap.get(name).push({ jid, group });
+    }
+    
+    // Second pass: Identify communities (groups with same name, different announce status)
+    const uniqueGroups = [];
+    const processedNames = new Set();
+    
+    for (const [name, groupList] of groupMap) {
+        if (groupList.length > 1) {
+            // This is a community - multiple groups with same name
+            // Find the announcement-only one (community main) and open one (subgroup)
+            const announcementGroup = groupList.find(g => g.group.announce === true);
+            const openGroup = groupList.find(g => g.group.announce === false);
+            
+            if (announcementGroup && openGroup) {
+                // This is a community - add as one entry (announcement-only for leave, open for broadcast?)
+                // Actually, community main is announcement-only, subgroup is open but it's the same community
+                // For leave: leave both? For broadcast: cannot broadcast to community main
+                // Add as special community type
+                uniqueGroups.push({
+                    id: announcementGroup.jid,
+                    subject: name,
+                    type: 'community',
+                    announce: true,
+                    members: announcementGroup.group.participants?.length || 0,
+                    openSubgroup: openGroup.jid,
+                    openSubgroupName: name,
+                    participants: announcementGroup.group.participants || []
+                });
+                processedNames.add(name);
+            } else {
+                // Just add all as separate
+                for (const g of groupList) {
+                    uniqueGroups.push({
+                        id: g.jid,
+                        subject: name,
+                        type: g.group.announce ? 'announcement' : 'open',
+                        announce: g.group.announce,
+                        members: g.group.participants?.length || 0,
+                        participants: g.group.participants || []
+                    });
+                }
+                processedNames.add(name);
+            }
+        } else {
+            // Single group - not a community
+            const g = groupList[0];
+            uniqueGroups.push({
+                id: g.jid,
+                subject: name,
+                type: g.group.announce ? 'announcement' : 'open',
+                announce: g.group.announce,
+                members: g.group.participants?.length || 0,
+                participants: g.group.participants || []
+            });
+            processedNames.add(name);
         }
     }
     
-    // Second pass: only add groups that are NOT community duplicates
-    for (const [jid, group] of Object.entries(groups)) {
-        // Skip if this is a community main group (announcement-only)
-        if (communityGroupIds.has(jid)) {
-            continue;
+    // Separate into announcement-only and open chat groups
+    const announcementGroups = [];
+    const openGroups = [];
+    
+    for (const group of uniqueGroups) {
+        if (group.type === 'community' || group.announce === true) {
+            announcementGroups.push({ id: group.id, subject: group.subject, members: group.members });
+        } else {
+            openGroups.push({ id: group.id, subject: group.subject, members: group.members });
         }
-        
-        // Store unique group
-        uniqueMap.set(jid, group);
     }
     
-    return uniqueMap;
+    return { announcementGroups, openGroups, totalUnique: uniqueGroups.length };
 }
 
 module.exports = {
@@ -507,28 +559,14 @@ module.exports = {
 
 async function showMainMenu(sock, chatId, sender, session, reply) {
     const groups = await sock.groupFetchAllParticipating();
+    const groupList = Object.values(groups);
     
-    // Get unique groups (remove community duplicates)
-    const uniqueGroups = getUniqueGroups(groups);
-    const groupList = Object.values(uniqueGroups);
-    
-    const announcementGroups = [];
-    const openGroups = [];
-    
-    for (const group of groupList) {
-        // Community groups are always announcement-only
-        // But we already filtered them out in getUniqueGroups()
-        if (group.announce === true) {
-            announcementGroups.push({ id: group.id, subject: group.subject });
-        } else {
-            openGroups.push({ id: group.id, subject: group.subject });
-        }
-    }
+    // Process groups to handle community duplicates
+    const { announcementGroups, openGroups, totalUnique } = processGroups(groups);
     
     const totalAnnouncement = announcementGroups.length;
     const totalOpen = openGroups.length;
-    const totalGroups = groupList.length;
-    const totalCommunityGroups = Object.keys(groups).length - totalGroups;
+    const totalGroups = totalUnique;
     
     session.data.announcementGroups = announcementGroups;
     session.data.openGroups = openGroups;
@@ -540,10 +578,9 @@ async function showMainMenu(sock, chatId, sender, session, reply) {
     let statusMessage = `📊 *GROUP STATISTICS*\n\n` +
                        `📁 Total Groups: ${totalGroups}\n` +
                        `🔇 Announcement-Only: ${totalAnnouncement}\n` +
-                       `💬 Open Chat: ${totalOpen}\n` +
-                       `🏘️ Community Groups (filtered): ${totalCommunityGroups}\n\n` +
-                       `⚠️ *Note:* Community groups are announcement-only.\n` +
-                       `Only "Open Chat" groups can receive broadcasts.`;
+                       `💬 Open Chat: ${totalOpen}\n\n` +
+                       `⚠️ *Note:* Only "Open Chat" groups can receive broadcasts.\n` +
+                       `Announcement-only groups require bot to be admin.`;
     
     const sessionId = session.id.split(':').pop();
     const leaveId = `leave_${sessionId}_${Date.now()}`;
@@ -558,8 +595,6 @@ async function showMainMenu(sock, chatId, sender, session, reply) {
     if (openGroups.length > 0) {
         buttons.push({ id: broadcastId, text: `📢 Broadcast to Open Chats (${totalOpen})` });
         buttons.push({ id: testBroadcastId, text: `🧪 Test Broadcast` });
-    } else {
-        buttons.push({ id: broadcastId, text: `📢 Broadcast to Open Chats (0)`, disabled: true });
     }
     buttons.push({ id: bulkJoinId, text: `📥 Bulk Join from Links` });
     
@@ -584,14 +619,12 @@ async function startBroadcast(sock, chatId, sender, session, reply, react, messa
         return;
     }
     
-    // Show warning about announcement-only groups
     if (session.data.totalAnnouncement > 0) {
-        await reply(`⚠️ *Note:* ${session.data.totalAnnouncement} announcement-only group(s) are NOT included in this broadcast.\n\nOnly ${totalOpen} open chat groups will receive the message.`);
+        await reply(`⚠️ *Note:* ${session.data.totalAnnouncement} announcement-only group(s) are NOT included.\n\nOnly ${totalOpen} open chat groups will receive the message.`);
     }
     
     await react('📢');
     
-    // Store broadcast data in session
     sessionManager.updateSession(sender, chatId, {
         broadcastMessage: messageText,
         broadcastIndex: 0,
@@ -601,7 +634,6 @@ async function startBroadcast(sock, chatId, sender, session, reply, react, messa
         type: 'broadcasting'
     });
     
-    // Start broadcasting first batch
     await continueBroadcast(sock, chatId, sender, session, reply, react);
 }
 
@@ -616,9 +648,6 @@ async function continueBroadcast(sock, chatId, sender, session, reply, react) {
     const batchSize = 10;
     const endIndex = Math.min(currentIndex + batchSize, totalOpen);
     
-    console.log('[BROADCAST DEBUG] Total open chat groups:', totalOpen);
-    console.log('[BROADCAST DEBUG] Current index:', currentIndex);
-    
     const statusMsg = await reply(`📢 *Broadcasting to ${totalOpen} open chat groups...*\n\n` +
                                  `Progress: ${currentIndex}/${totalOpen} groups\n` +
                                  `✅ Success: ${successCount}\n` +
@@ -631,18 +660,11 @@ async function continueBroadcast(sock, chatId, sender, session, reply, react) {
         const group = openGroups[i];
         const groupNumber = i + 1;
         
-        console.log(`[BROADCAST DEBUG] Sending to open chat group ${groupNumber}: ${group.id} - ${group.subject}`);
-        
         try {
-            if (!group.id || !group.id.endsWith('@g.us')) {
-                throw new Error(`Invalid group ID: ${group.id}`);
-            }
-            
             if (groupLinkMatch) {
                 const inviteCode = groupLinkMatch[1];
                 try {
                     const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
-                    
                     await sock.sendMessage(group.id, {
                         text: messageText,
                         contextInfo: {
@@ -656,14 +678,11 @@ async function continueBroadcast(sock, chatId, sender, session, reply, react) {
                             }
                         }
                     });
-                    console.log(`[BROADCAST DEBUG] ✅ Sent with preview to ${group.subject}`);
                 } catch (e) {
                     await sock.sendMessage(group.id, { text: messageText });
-                    console.log(`[BROADCAST DEBUG] ✅ Sent plain text to ${group.subject}`);
                 }
             } else {
                 await sock.sendMessage(group.id, { text: messageText });
-                console.log(`[BROADCAST DEBUG] ✅ Sent plain text to ${group.subject}`);
             }
             successCount++;
             
@@ -672,25 +691,21 @@ async function continueBroadcast(sock, chatId, sender, session, reply, react) {
                     text: `📢 *Broadcasting...*\n\n` +
                           `Progress: ${groupNumber}/${totalOpen} groups\n` +
                           `✅ Success: ${successCount}\n` +
-                          `❌ Failed: ${failCount}\n\n` +
-                          `Last sent: ${group.subject}`,
+                          `❌ Failed: ${failCount}`,
                     edit: statusMsg.key
                 });
             }
             
         } catch (error) {
             failCount++;
-            const errorMsg = `Group: ${group.subject} (${group.id}) - Error: ${error.message}`;
-            failDetails.push(errorMsg);
-            console.error(`[BROADCAST DEBUG] ❌ Failed to send to ${group.id}:`, error.message);
+            failDetails.push(`${group.subject}: ${error.message}`);
             
             await sock.sendMessage(chatId, {
                 text: `📢 *Broadcasting...*\n\n` +
                       `Progress: ${groupNumber}/${totalOpen} groups\n` +
                       `✅ Success: ${successCount}\n` +
                       `❌ Failed: ${failCount}\n\n` +
-                      `⚠️ Failed to send to: ${group.subject}\n` +
-                      `Error: ${error.message.substring(0, 100)}`,
+                      `⚠️ Failed: ${group.subject}`,
                 edit: statusMsg.key
             });
         }
@@ -707,30 +722,20 @@ async function continueBroadcast(sock, chatId, sender, session, reply, react) {
     
     if (endIndex >= totalOpen) {
         let resultMsg = `✅ *Broadcast Complete!*\n\n` +
-                        `📊 Total Open Chat Groups: ${totalOpen}\n` +
-                        `✅ Successful: ${successCount}\n` +
+                        `📊 Total Groups: ${totalOpen}\n` +
+                        `✅ Success: ${successCount}\n` +
                         `❌ Failed: ${failCount}`;
         
         if (failDetails.length > 0 && failDetails.length <= 10) {
             resultMsg += `\n\n❌ *Failed Groups:*\n`;
             for (const detail of failDetails) {
-                resultMsg += `• ${detail.substring(0, 150)}\n`;
+                resultMsg += `• ${detail.substring(0, 100)}\n`;
             }
         } else if (failDetails.length > 10) {
             resultMsg += `\n\n❌ Failed: ${failDetails.length} groups`;
         }
         
-        await sock.sendMessage(chatId, {
-            text: resultMsg,
-            edit: statusMsg.key
-        });
-        
-        console.log('[BROADCAST DEBUG] Final results:', {
-            total: totalOpen,
-            success: successCount,
-            failed: failCount
-        });
-        
+        await sock.sendMessage(chatId, { text: resultMsg, edit: statusMsg.key });
         await react('✅');
         session.data.type = 'main_menu';
         await showMainMenu(sock, chatId, sender, session, reply);
@@ -742,15 +747,14 @@ async function continueBroadcast(sock, chatId, sender, session, reply, react) {
     
     const confirmMsg = await sendButtons(sock, chatId, {
         text: `📢 *Broadcast Progress*\n\n` +
-              `✅ Sent: ${endIndex}/${totalOpen} groups\n` +
+              `✅ Sent: ${endIndex}/${totalOpen}\n` +
               `✅ Success: ${successCount}\n` +
               `❌ Failed: ${failCount}\n\n` +
               `Remaining: ${remaining} groups\n` +
-              `Next batch: Groups ${endIndex + 1} to ${nextBatchEnd}\n\n` +
-              `Do you want to continue?`,
-        footer: 'Continue Broadcast',
+              `Next: ${endIndex + 1} to ${nextBatchEnd}\n\nContinue?`,
+        footer: 'Continue',
         buttons: [
-            { id: 'broadcast_continue', text: '✅ Yes, Continue' },
+            { id: 'broadcast_continue', text: '✅ Continue' },
             { id: 'broadcast_cancel', text: '❌ Cancel' }
         ],
         aimode: FORCE_AI_MODE
@@ -762,7 +766,6 @@ async function continueBroadcast(sock, chatId, sender, session, reply, react) {
 
 async function performTestBroadcast(sock, chatId, sender, session, reply, react, messageText) {
     await react('🧪');
-    
     const statusMsg = await reply(`🧪 *Sending test message...*`);
     
     try {
@@ -772,7 +775,6 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react,
             const inviteCode = groupLinkMatch[1];
             try {
                 const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
-                
                 await sock.sendMessage(TEST_GROUP_JID, {
                     text: messageText,
                     contextInfo: {
@@ -793,18 +795,10 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react,
             await sock.sendMessage(TEST_GROUP_JID, { text: messageText });
         }
         
-        await sock.sendMessage(chatId, {
-            text: `✅ *Test sent successfully!*\n\n📤 To: ${TEST_GROUP_JID}`,
-            edit: statusMsg.key
-        });
-        
+        await sock.sendMessage(chatId, { text: `✅ *Test sent!*\n\n📤 To: ${TEST_GROUP_JID}`, edit: statusMsg.key });
         await react('✅');
-        
     } catch (error) {
-        await sock.sendMessage(chatId, {
-            text: `❌ *Test failed!*\n\nError: ${error.message}`,
-            edit: statusMsg.key
-        });
+        await sock.sendMessage(chatId, { text: `❌ *Test failed!*\n\nError: ${error.message}`, edit: statusMsg.key });
         await react('❌');
     }
     
@@ -814,8 +808,7 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react,
 
 async function performBulkJoin(sock, chatId, sender, session, reply, react, fileContent, fileName) {
     await react('📥');
-    
-    const statusMsg = await reply(`📥 *Processing bulk join...*\n\nLoading invalid links cache...`);
+    const statusMsg = await reply(`📥 *Processing bulk join...*\n\nLoading cache...`);
     
     await ensureDriveFileExists(BULK_JOIN_FOLDER_ID, FAILED_LINKS_FILE);
     await ensureDriveFileExists(BULK_JOIN_FOLDER_ID, ANNOUNCEMENT_ONLY_FILE);
@@ -836,39 +829,12 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
     const skippedCount = originalCount - links.length;
     
     await sock.sendMessage(chatId, {
-        text: `📥 *Links loaded*\n\nTotal: ${originalCount}\nSkipped (already failed): ${skippedCount}\nTo process: ${links.length}`,
+        text: `📥 *Links loaded*\n\nTotal: ${originalCount}\nSkipped: ${skippedCount}\nTo process: ${links.length}`,
         edit: statusMsg.key
     });
     
     if (links.length === 0) {
-        await sock.sendMessage(chatId, {
-            text: `❌ *No new links to process!*`,
-            edit: statusMsg.key
-        });
-        
-        const tempDir = path.join(process.cwd(), 'temp');
-        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-        const reportPath = path.join(tempDir, `bulk_join_report_${Date.now()}.txt`);
-        
-        let reportContent = `📊 BULK JOIN REPORT\n`;
-        reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-        reportContent += `📅 Date: ${new Date().toLocaleString()}\n`;
-        reportContent += `📄 Source: ${fileName}\n`;
-        reportContent += `📊 Total Links: ${originalCount}\n`;
-        reportContent += `⏭️ Skipped (already failed): ${skippedCount}\n`;
-        reportContent += `❌ No new links to process.\n`;
-        
-        fs.writeFileSync(reportPath, reportContent);
-        
-        await sock.sendMessage(chatId, {
-            document: fs.readFileSync(reportPath),
-            fileName: `bulk_join_report_${Date.now()}.txt`,
-            mimetype: 'text/plain',
-            caption: `📊 *Bulk Join Report*`
-        });
-        
-        fs.unlinkSync(reportPath);
-        
+        await sock.sendMessage(chatId, { text: `❌ *No new links to process!*`, edit: statusMsg.key });
         session.data.type = 'main_menu';
         await showMainMenu(sock, chatId, sender, session, reply);
         return;
@@ -878,114 +844,50 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
     const announcementOnlyGroups = [];
     const openChatGroups = [];
     const unknownGroups = [];
-    
     let successCount = 0;
     let failCount = 0;
     
     for (let i = 0; i < links.length; i++) {
         const link = links[i];
-        const linkNumber = i + 1;
-        
-        await sock.sendMessage(chatId, {
-            text: `📥 *Processing ${linkNumber}/${links.length}...*`,
-            edit: statusMsg.key
-        });
+        await sock.sendMessage(chatId, { text: `📥 *Processing ${i+1}/${links.length}...*`, edit: statusMsg.key });
         
         try {
-            let inviteCode = link;
-            if (link.includes('chat.whatsapp.com/')) {
-                inviteCode = link.split('chat.whatsapp.com/')[1].split('?')[0].split('/')[0].trim();
-            }
+            let inviteCode = link.includes('chat.whatsapp.com/') ? link.split('chat.whatsapp.com/')[1].split('?')[0].split('/')[0].trim() : link;
+            if (!inviteCode || inviteCode.length < 20) throw new Error('Invalid invite code');
             
-            if (!inviteCode || inviteCode.length < 20) {
-                failedGroups.push({ link: link, reason: 'Invalid invite code format' });
-                failCount++;
-                await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, FAILED_LINKS_FILE, link);
-                invalidLinksCache.add(link);
-                continue;
-            }
-            
-            let inviteInfo = null;
-            try {
-                inviteInfo = await sock.groupGetInviteInfo(inviteCode);
-            } catch (e) {
-                failedGroups.push({ link: link, reason: 'Cannot fetch group info - ' + e.message });
-                failCount++;
-                await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, FAILED_LINKS_FILE, link);
-                invalidLinksCache.add(link);
-                continue;
-            }
-            
+            const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
             let groupJid;
+            
             try {
                 groupJid = await sock.groupAcceptInvite(inviteCode);
             } catch (joinError) {
                 if (joinError.message?.includes('already-exists') || joinError.data === 304) {
-                    try {
-                        const metadata = await sock.groupMetadata(inviteInfo.id);
-                        if (metadata.announce === true) {
-                            announcementOnlyGroups.push(link);
-                            await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, ANNOUNCEMENT_ONLY_FILE, link);
-                        } else {
-                            openChatGroups.push(link);
-                            await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, OPEN_CHAT_FILE, link);
-                        }
-                        successCount++;
-                    } catch (e) {
-                        unknownGroups.push(link);
-                        await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, UNKNOWN_FILE, link);
-                        successCount++;
-                    }
-                    continue;
-                }
-                
-                if (joinError.message?.includes('conflict') || joinError.data === 409) {
-                    unknownGroups.push(link);
-                    await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, UNKNOWN_FILE, link);
+                    const metadata = await sock.groupMetadata(inviteInfo.id);
+                    if (metadata.announce === true) announcementOnlyGroups.push(link);
+                    else openChatGroups.push(link);
                     successCount++;
                     continue;
                 }
-                
-                failedGroups.push({ link: link, reason: joinError.message });
-                failCount++;
-                await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, FAILED_LINKS_FILE, link);
-                invalidLinksCache.add(link);
-                continue;
+                if (joinError.message?.includes('conflict') || joinError.data === 409) {
+                    unknownGroups.push(link);
+                    successCount++;
+                    continue;
+                }
+                throw joinError;
             }
             
             await new Promise(resolve => setTimeout(resolve, 2000));
-            
-            try {
-                const metadata = await sock.groupMetadata(groupJid);
-                if (metadata.announce === true) {
-                    announcementOnlyGroups.push(link);
-                    await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, ANNOUNCEMENT_ONLY_FILE, link);
-                } else {
-                    openChatGroups.push(link);
-                    await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, OPEN_CHAT_FILE, link);
-                }
-                successCount++;
-            } catch (e) {
-                if (inviteInfo.announce === true) {
-                    announcementOnlyGroups.push(link);
-                    await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, ANNOUNCEMENT_ONLY_FILE, link);
-                } else if (inviteInfo.announce === false) {
-                    openChatGroups.push(link);
-                    await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, OPEN_CHAT_FILE, link);
-                } else {
-                    unknownGroups.push(link);
-                    await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, UNKNOWN_FILE, link);
-                }
-                successCount++;
-            }
+            const metadata = await sock.groupMetadata(groupJid);
+            if (metadata.announce === true) announcementOnlyGroups.push(link);
+            else openChatGroups.push(link);
+            successCount++;
             
         } catch (error) {
-            failedGroups.push({ link: link, reason: error.message });
+            failedGroups.push({ link, reason: error.message });
             failCount++;
             await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, FAILED_LINKS_FILE, link);
             invalidLinksCache.add(link);
         }
-        
         await new Promise(resolve => setTimeout(resolve, 3000));
     }
     
@@ -993,7 +895,6 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
     if (combinedOpenUnknown.length > 0) {
         await saveMultipleLinksToDriveFile(BULK_JOIN_FOLDER_ID, COMBINED_OPEN_UNKNOWN_FILE, combinedOpenUnknown);
     }
-    
     const combinedAllExceptFailed = [...announcementOnlyGroups, ...openChatGroups, ...unknownGroups];
     if (combinedAllExceptFailed.length > 0) {
         await saveMultipleLinksToDriveFile(BULK_JOIN_FOLDER_ID, COMBINED_ALL_EXCEPT_FAILED_FILE, combinedAllExceptFailed);
@@ -1002,76 +903,28 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
     const tempDir = path.join(process.cwd(), 'temp');
     if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
     const reportPath = path.join(tempDir, `bulk_join_report_${Date.now()}.txt`);
+    let reportContent = `📊 BULK JOIN REPORT\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n📅 Date: ${new Date().toLocaleString()}\n📄 Source: ${fileName}\n📊 Total: ${originalCount} | Skipped: ${skippedCount} | Processed: ${links.length}\n✅ Success: ${successCount} | ❌ Failed: ${failCount}\n\n`;
     
-    let reportContent = `📊 BULK JOIN REPORT\n`;
-    reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-    reportContent += `📅 Date: ${new Date().toLocaleString()}\n`;
-    reportContent += `📄 Source: ${fileName}\n`;
-    reportContent += `📊 Total Links: ${originalCount}\n`;
-    reportContent += `⏭️ Skipped (already failed): ${skippedCount}\n`;
-    reportContent += `🔄 Processed: ${links.length}\n`;
-    reportContent += `✅ Successful: ${successCount}\n`;
-    reportContent += `❌ Failed: ${failCount}\n`;
-    reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n\n`;
-    
-    reportContent += `❌ FAILED GROUPS (${failedGroups.length})\n`;
-    reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-    for (const group of failedGroups) {
-        reportContent += `Link: ${group.link}\n`;
-        reportContent += `Reason: ${group.reason}\n`;
-        reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-    }
-    reportContent += `\n\n\n`;
-    
-    reportContent += `🔇 ANNOUNCEMENT-ONLY GROUPS (${announcementOnlyGroups.length})\n`;
-    reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-    for (const link of announcementOnlyGroups) {
-        reportContent += `${link}\n`;
-    }
-    reportContent += `\n\n\n`;
-    
-    reportContent += `💬 OPEN CHAT GROUPS (${openChatGroups.length})\n`;
-    reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-    for (const link of openChatGroups) {
-        reportContent += `${link}\n`;
-    }
-    reportContent += `\n\n\n`;
-    
-    reportContent += `❓ UNKNOWN/REQUEST SENT (${unknownGroups.length})\n`;
-    reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-    for (const link of unknownGroups) {
-        reportContent += `${link}\n`;
-    }
+    reportContent += `❌ FAILED (${failedGroups.length})\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    for (const f of failedGroups) reportContent += `Link: ${f.link}\nReason: ${f.reason}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    reportContent += `\n\n\n🔇 ANNOUNCEMENT-ONLY (${announcementOnlyGroups.length})\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${announcementOnlyGroups.join('\n')}\n\n\n`;
+    reportContent += `💬 OPEN CHAT (${openChatGroups.length})\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${openChatGroups.join('\n')}\n\n\n`;
+    reportContent += `❓ UNKNOWN (${unknownGroups.length})\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${unknownGroups.join('\n')}\n`;
     
     fs.writeFileSync(reportPath, reportContent);
     
-    let summary = `✅ *BULK JOIN COMPLETED!*\n\n`;
-    summary += `━━━━━━━━━━━━━━━━━━\n`;
-    summary += `📊 Processed: ${links.length} | ✅ ${successCount} | ❌ ${failCount}\n`;
-    summary += `━━━━━━━━━━━━━━━━━━\n\n`;
-    summary += `📋 *Categories:*\n`;
-    summary += `🔇 Announcement-Only: ${announcementOnlyGroups.length}\n`;
-    summary += `💬 Open Chat: ${openChatGroups.length}\n`;
-    summary += `❓ Unknown: ${unknownGroups.length}\n`;
-    summary += `❌ Failed: ${failedGroups.length}\n\n`;
-    summary += `📄 *Detailed report attached below.*`;
-    
     await sock.sendMessage(chatId, {
-        text: summary,
+        text: `✅ *BULK JOIN COMPLETED!*\n\n📊 Processed: ${links.length} | ✅ ${successCount} | ❌ ${failCount}\n\n📋 Categories:\n🔇 ${announcementOnlyGroups.length} | 💬 ${openChatGroups.length} | ❓ ${unknownGroups.length} | ❌ ${failedGroups.length}\n\n📄 Report attached.`,
         edit: statusMsg.key
     });
-    
     await sock.sendMessage(chatId, {
         document: fs.readFileSync(reportPath),
         fileName: `bulk_join_report_${Date.now()}.txt`,
         mimetype: 'text/plain',
-        caption: `📊 *Bulk Join Report*`
+        caption: `📊 Bulk Join Report`
     });
-    
     fs.unlinkSync(reportPath);
-    
     await react('✅');
-    
     session.data.type = 'main_menu';
     await showMainMenu(sock, chatId, sender, session, reply);
 }
@@ -1086,7 +939,6 @@ async function performLeave(sock, chatId, sender, session, reply, react) {
     }
     
     await react('🚪');
-    
     const statusMsg = await reply(`🚪 *Leaving ${totalAnnouncement} groups...*\n\n0/${totalAnnouncement} left`);
     
     let successCount = 0;
@@ -1094,29 +946,17 @@ async function performLeave(sock, chatId, sender, session, reply, react) {
     
     for (let i = 0; i < announcementGroups.length; i++) {
         const group = announcementGroups[i];
-        
         try {
             await sock.groupLeave(group.id);
             successCount++;
-            
-            await sock.sendMessage(chatId, {
-                text: `🚪 *Leaving...*\n\n✅ ${successCount}/${totalAnnouncement} left\n❌ Failed: ${failCount}`,
-                edit: statusMsg.key
-            });
-            
+            await sock.sendMessage(chatId, { text: `🚪 *Leaving...*\n\n✅ ${successCount}/${totalAnnouncement} left\n❌ Failed: ${failCount}`, edit: statusMsg.key });
             await new Promise(resolve => setTimeout(resolve, 800));
-            
         } catch (error) {
             failCount++;
         }
     }
     
-    await sock.sendMessage(chatId, {
-        text: `✅ *Leave Complete!*\n\n✅ Left: ${successCount}\n❌ Failed: ${failCount}`,
-        edit: statusMsg.key
-    });
-    
+    await sock.sendMessage(chatId, { text: `✅ *Leave Complete!*\n\n✅ Left: ${successCount}\n❌ Failed: ${failCount}`, edit: statusMsg.key });
     await react('✅');
-    
     await showMainMenu(sock, chatId, sender, session, reply);
 }
