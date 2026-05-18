@@ -264,75 +264,85 @@ async function loadInvalidLinksCache(folderId) {
     return invalidLinksCache;
 }
 
-// Process groups to handle community duplicates based on parentGroupId
+// Process groups - communities are identified by duplicate names
 function processGroups(groups) {
-    const communityParentIds = new Set();
+    // Group by name to find communities (same name appears twice)
+    const groupsByName = new Map();
     const announcementGroups = [];
     const openGroups = [];
     
-    // First pass: Identify community subgroups (groups with parentGroupId)
+    // First pass: Group by name
     for (const [jid, group] of Object.entries(groups)) {
-        if (group.parentGroupId) {
-            communityParentIds.add(group.parentGroupId);
-            console.log(`[GROUPS] Found community subgroup: ${group.subject} (parent: ${group.parentGroupId})`);
+        const name = group.subject;
+        if (!groupsByName.has(name)) {
+            groupsByName.set(name, []);
+        }
+        groupsByName.get(name).push({ jid, group });
+    }
+    
+    // Second pass: Process each name group
+    for (const [name, groupList] of groupsByName) {
+        if (groupList.length > 1) {
+            // This is a community - same name appears multiple times
+            // Find the announcement-only one (parent community)
+            const announcementGroup = groupList.find(g => g.group.announce === true);
+            if (announcementGroup) {
+                announcementGroups.push({ 
+                    id: announcementGroup.jid, 
+                    subject: name, 
+                    members: announcementGroup.group.participants?.length || 0,
+                    type: 'community'
+                });
+                console.log(`[GROUPS] Community detected: ${name} (announcement-only)`);
+            }
+        } else {
+            // Single group - not a community
+            const g = groupList[0];
+            if (g.group.announce === true) {
+                announcementGroups.push({ 
+                    id: g.jid, 
+                    subject: name, 
+                    members: g.group.participants?.length || 0,
+                    type: 'announcement'
+                });
+            } else {
+                openGroups.push({ 
+                    id: g.jid, 
+                    subject: name, 
+                    members: g.group.participants?.length || 0,
+                    type: 'open'
+                });
+            }
         }
     }
     
-    // Second pass: Categorize groups
-    for (const [jid, group] of Object.entries(groups)) {
-        // Skip if this group is a community subgroup (has parentGroupId)
-        if (group.parentGroupId) {
-            continue;
-        }
-        
-        // If this group is a parent of a community group
-        if (communityParentIds.has(jid)) {
-            announcementGroups.push({ 
-                id: group.id, 
-                subject: group.subject, 
-                members: group.participants?.length || 0,
-                type: 'community_parent'
-            });
-            console.log(`[GROUPS] Community parent (announcement-only): ${group.subject}`);
-        } 
-        // Regular announcement-only groups
-        else if (group.announce === true) {
-            announcementGroups.push({ 
-                id: group.id, 
-                subject: group.subject, 
-                members: group.participants?.length || 0,
-                type: 'announcement'
-            });
-        } 
-        // Regular open chat groups
-        else {
-            openGroups.push({ 
-                id: group.id, 
-                subject: group.subject, 
-                members: group.participants?.length || 0,
-                type: 'open'
-            });
-        }
-    }
-    
-    console.log(`[GROUPS] Total groups: ${Object.keys(groups).length}`);
-    console.log(`[GROUPS] Community parents: ${communityParentIds.size}`);
+    console.log(`[GROUPS] Total raw groups: ${Object.keys(groups).length}`);
     console.log(`[GROUPS] Announcement groups: ${announcementGroups.length}`);
     console.log(`[GROUPS] Open chat groups: ${openGroups.length}`);
     
     return { announcementGroups, openGroups, totalUnique: announcementGroups.length + openGroups.length };
 }
 
-// List all chats function
+// List all chats - shows ONLY unique groups (communities shown once)
 async function listAllChats(sock, chatId, sender, reply, react) {
     await react('📋');
     const statusMsg = await reply(`📋 *Fetching all chats...*\n⏳ This may take a moment...`);
     
     try {
         const groups = await sock.groupFetchAllParticipating();
-        const groupList = Object.values(groups);
         
-        // Build report
+        // Group by name to find communities
+        const groupsByName = new Map();
+        
+        for (const [jid, group] of Object.entries(groups)) {
+            const name = group.subject;
+            if (!groupsByName.has(name)) {
+                groupsByName.set(name, []);
+            }
+            groupsByName.get(name).push({ jid, group });
+        }
+        
+        // Build report with unique groups only
         let report = `╔════════════════════════════════════════╗\n`;
         report += `║     WHATSAPP CHATS EXPORT             ║\n`;
         report += `╚════════════════════════════════════════╝\n\n`;
@@ -341,27 +351,40 @@ async function listAllChats(sock, chatId, sender, reply, react) {
         
         report += `📊 *SUMMARY*\n`;
         report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-        report += `Total Groups: ${groupList.length}\n`;
+        report += `Raw Groups (API): ${Object.keys(groups).length}\n`;
+        report += `Unique Groups: ${groupsByName.size}\n`;
         report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
         
-        report += `👥 *ALL GROUPS (${groupList.length})*\n`;
+        report += `👥 *ALL UNIQUE GROUPS (${groupsByName.size})*\n`;
         report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
         
-        for (let i = 0; i < groupList.length; i++) {
-            const g = groupList[i];
-            report += `[${i + 1}] ${g.subject}\n`;
+        let index = 1;
+        for (const [name, groupList] of groupsByName) {
+            const isCommunity = groupList.length > 1;
+            const mainGroup = groupList[0];
+            const isAnnouncement = mainGroup.group.announce === true;
+            
+            report += `[${index}] ${name}\n`;
             report += `    ────────────────────────────────────────────────\n`;
-            report += `    🆔 JID: ${g.id}\n`;
-            report += `    👥 Members: ${g.participants?.length || 0}\n`;
-            report += `    🔇 Announce: ${g.announce ? 'YES (Announcement-Only)' : 'NO (Open Messaging)'}\n`;
-            report += `    🔒 Restrict: ${g.restrict ? 'YES' : 'NO'}\n`;
-            report += `    👑 Creator: ${g.owner?.split('@')[0] || 'Unknown'}\n`;
-            report += `    📅 Created: ${g.creation ? new Date(g.creation * 1000).toLocaleString() : 'Unknown'}\n`;
-            if (g.parentGroupId) {
-                report += `    🏘️ PARENT GROUP ID: ${g.parentGroupId}\n`;
-                report += `    ⚠️ THIS IS A COMMUNITY SUBGROUP!\n`;
+            
+            if (isCommunity) {
+                report += `    🏘️ TYPE: COMMUNITY GROUP\n`;
+                report += `    🔇 Announcement-Only: YES (Community Main)\n`;
+                report += `    📊 Sub-groups in this community: ${groupList.length}\n`;
+            } else {
+                report += `    🏷️ TYPE: ${isAnnouncement ? 'ANNOUNCEMENT-ONLY' : 'OPEN CHAT'}\n`;
+            }
+            
+            report += `    👥 Members: ${mainGroup.group.participants?.length || 0}\n`;
+            report += `    🆔 JID: ${mainGroup.jid}\n`;
+            if (mainGroup.group.owner) {
+                report += `    👑 Creator: ${mainGroup.group.owner.split('@')[0]}\n`;
+            }
+            if (mainGroup.group.creation) {
+                report += `    📅 Created: ${new Date(mainGroup.group.creation * 1000).toLocaleString()}\n`;
             }
             report += `\n`;
+            index++;
         }
         
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -374,7 +397,7 @@ async function listAllChats(sock, chatId, sender, reply, react) {
             document: fs.readFileSync(reportFile),
             fileName: `whatsapp_chats_${timestamp}.txt`,
             mimetype: 'text/plain',
-            caption: `📊 *Chats Export Complete*\n\n👥 Total Groups: ${groupList.length}\n\n✅ Full report attached!`
+            caption: `📊 *Chats Export Complete*\n\n📁 Raw Groups: ${Object.keys(groups).length}\n📁 Unique Groups: ${groupsByName.size}\n👥 Communities: ${Array.from(groupsByName.values()).filter(list => list.length > 1).length}\n\n✅ Full report attached!`
         });
         
         fs.unlinkSync(reportFile);
@@ -604,7 +627,7 @@ module.exports = {
 async function showMainMenu(sock, chatId, sender, session, reply) {
     const groups = await sock.groupFetchAllParticipating();
     
-    // Process groups to handle community duplicates
+    // Process groups to handle communities (same name = community)
     const { announcementGroups, openGroups, totalUnique } = processGroups(groups);
     
     const totalAnnouncement = announcementGroups.length;
@@ -624,9 +647,9 @@ async function showMainMenu(sock, chatId, sender, session, reply) {
                        `📁 Processed Unique: ${totalGroups}\n` +
                        `🔇 Announcement-Only: ${totalAnnouncement}\n` +
                        `💬 Open Chat: ${totalOpen}\n\n` +
-                       `⚠️ *Note:* Only "Open Chat" groups can receive broadcasts.\n` +
-                       `Community subgroups have been filtered out.\n\n` +
-                       `📋 Use "List All Chats" to see raw group data.`;
+                       `⚠️ *Note:* Communities with same name are counted once.\n` +
+                       `Only "Open Chat" groups can receive broadcasts.\n\n` +
+                       `📋 Use "List All Chats" to see unique groups.`;
     
     const sessionId = session.id.split(':').pop();
     const leaveId = `leave_${sessionId}_${Date.now()}`;
@@ -644,7 +667,7 @@ async function showMainMenu(sock, chatId, sender, session, reply) {
         buttons.push({ id: testBroadcastId, text: `🧪 Test Broadcast` });
     }
     buttons.push({ id: bulkJoinId, text: `📥 Bulk Join from Links` });
-    buttons.push({ id: listChatsId, text: `📋 List All Chats (Raw Data)` });
+    buttons.push({ id: listChatsId, text: `📋 List All Chats` });
     
     const sentMsg = await sendButtons(sock, chatId, {
         text: statusMessage,
@@ -700,7 +723,7 @@ async function continueBroadcast(sock, chatId, sender, session, reply, react) {
     let batchList = '';
     for (let i = currentIndex; i < endIndex; i++) {
         const group = openGroups[i];
-        batchList += `\n${i + 1}. 📌 *${group.subject}*\n   🆔 ${group.id}\n   👥 ${group.members} members`;
+        batchList += `\n${i + 1}. 📌 *${group.subject}*\n   👥 ${group.members} members`;
     }
     
     const statusMsg = await reply(`📢 *Broadcasting to ${totalOpen} open chat groups...*\n\n` +
@@ -734,14 +757,11 @@ async function continueBroadcast(sock, chatId, sender, session, reply, react) {
                             }
                         }
                     });
-                    console.log(`[BROADCAST] ✅ Sent to ${group.subject} (${group.id}) with preview`);
                 } catch (e) {
                     await sock.sendMessage(group.id, { text: messageText });
-                    console.log(`[BROADCAST] ✅ Sent to ${group.subject} (${group.id}) plain text`);
                 }
             } else {
                 await sock.sendMessage(group.id, { text: messageText });
-                console.log(`[BROADCAST] ✅ Sent to ${group.subject} (${group.id})`);
             }
             successCount++;
             
@@ -754,7 +774,6 @@ async function continueBroadcast(sock, chatId, sender, session, reply, react) {
             failCount++;
             const errorMsg = `${group.subject}: ${error.message}`;
             failDetails.push(errorMsg);
-            console.error(`[BROADCAST] ❌ Failed to send to ${group.subject} (${group.id}):`, error.message);
             
             await sock.sendMessage(chatId, {
                 text: `📢 *❌ FAILED:* ${group.subject}\n⚠️ Error: ${error.message.substring(0, 100)}\n📊 Progress: ${groupNumber}/${totalOpen}\n✅ Success: ${successCount} | ❌ Failed: ${failCount}`,
