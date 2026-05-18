@@ -21,10 +21,8 @@ const TEST_GROUP_JID = '120363408035540146@g.us';
 const THUMBNAIL_URL = "https://drive.usercontent.google.com/download?id=1V1h-ncE4v12Bkvkz4yBd4_k13RffEABC&export=download&confirm=t";
 
 // ==================== GOOGLE DRIVE CONFIGURATION ====================
-// Google Drive folder for bulk join reports
 const BULK_JOIN_FOLDER_ID = "11XKmEGAfN5QrygCxy4p2wNRo0iK_tSD8";
 
-// File names in Google Drive (ONLY LINKS - one per line, no explanations)
 const FAILED_LINKS_FILE = "failed_links.txt";
 const ANNOUNCEMENT_ONLY_FILE = "announcement_only.txt";
 const OPEN_CHAT_FILE = "open_chat.txt";
@@ -32,14 +30,10 @@ const UNKNOWN_FILE = "unknown.txt";
 const COMBINED_OPEN_UNKNOWN_FILE = "combined_open_unknown.txt";
 const COMBINED_ALL_EXCEPT_FAILED_FILE = "combined_all_except_failed.txt";
 
-// Token URL for Google Drive access
 const TOKEN_URL = "https://drive.usercontent.google.com/download?id=1NZ3NvyVBnK85S8f5eTZJS5uM5c59xvGM&export=download";
 
-// Cache for invalid links
 let invalidLinksCache = new Set();
 let cacheLoaded = false;
-
-// Google Drive Auth
 let cachedAuth = null;
 let tokenExpiry = null;
 
@@ -328,7 +322,7 @@ module.exports = {
             if (session.data.isTest) {
                 await performTestBroadcast(sock, from, sender, session, reply, react, messageText);
             } else {
-                await performBroadcast(sock, from, sender, session, reply, react, messageText);
+                await startBroadcast(sock, from, sender, session, reply, react, messageText);
             }
             return true;
         }
@@ -399,6 +393,26 @@ module.exports = {
             
             if (fileContent) {
                 await performBulkJoin(sock, from, sender, session, reply, react, fileContent, fileName);
+            }
+            return true;
+        }
+        
+        if (session.data.type === 'waiting_broadcast_continue') {
+            let text = '';
+            if (msg.message?.conversation) {
+                text = msg.message.conversation.trim().toLowerCase();
+            } else if (msg.message?.extendedTextMessage?.text) {
+                text = msg.message.extendedTextMessage.text.trim().toLowerCase();
+            }
+            
+            if (text === 'yes' || text === 'y' || text === 'continue') {
+                await continueBroadcast(sock, from, sender, session, reply, react);
+            } else if (text === 'no' || text === 'n' || text === 'cancel') {
+                sessionManager.updateSession(sender, from, { type: 'main_menu' });
+                await reply(`❌ Broadcast cancelled.`);
+                await showMainMenu(sock, from, sender, session, reply);
+            } else {
+                await reply(`❌ Please reply with *yes* to continue or *no* to cancel.`);
             }
             return true;
         }
@@ -503,7 +517,7 @@ async function showMainMenu(sock, chatId, sender, session, reply) {
     sessionManager.addPendingMessage(sender, chatId, sentMsg.key.id, 'groups');
 }
 
-async function performBroadcast(sock, chatId, sender, session, reply, react, messageText) {
+async function startBroadcast(sock, chatId, sender, session, reply, react, messageText) {
     const openGroups = session.data.openGroups;
     const totalOpen = openGroups.length;
     
@@ -516,25 +530,47 @@ async function performBroadcast(sock, chatId, sender, session, reply, react, mes
     
     await react('📢');
     
-    const statusMsg = await reply(`📢 *Broadcasting to ${totalOpen} groups...*\n\n0/${totalOpen} sent`);
+    // Store broadcast data in session
+    sessionManager.updateSession(sender, chatId, {
+        broadcastMessage: messageText,
+        broadcastIndex: 0,
+        broadcastSuccess: 0,
+        broadcastFailed: 0,
+        type: 'broadcasting'
+    });
     
-    let successCount = 0;
-    let failCount = 0;
+    // Start broadcasting first batch
+    await continueBroadcast(sock, chatId, sender, session, reply, react);
+}
+
+async function continueBroadcast(sock, chatId, sender, session, reply, react) {
+    const openGroups = session.data.openGroups;
+    const totalOpen = openGroups.length;
+    const messageText = session.data.broadcastMessage;
+    let currentIndex = session.data.broadcastIndex || 0;
+    let successCount = session.data.broadcastSuccess || 0;
+    let failCount = session.data.broadcastFailed || 0;
+    const batchSize = 10;
+    const endIndex = Math.min(currentIndex + batchSize, totalOpen);
     
-    // Check if message contains WhatsApp group link
+    const statusMsg = await reply(`📢 *Broadcasting...*\n\n` +
+                                 `Progress: ${currentIndex}/${totalOpen} groups\n` +
+                                 `✅ Success: ${successCount}\n` +
+                                 `❌ Failed: ${failCount}\n\n` +
+                                 `Sending to groups ${currentIndex + 1} to ${endIndex}...`);
+    
     const groupLinkMatch = messageText.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/);
     
-    for (let i = 0; i < openGroups.length; i++) {
+    for (let i = currentIndex; i < endIndex; i++) {
         const group = openGroups[i];
+        const groupNumber = i + 1;
         
         try {
             if (groupLinkMatch) {
                 const inviteCode = groupLinkMatch[1];
                 try {
-                    // Get group invite info for rich preview
                     const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
                     
-                    // Send with rich preview using externalAdReply (like bomb.js)
                     await sock.sendMessage(group.id, {
                         text: messageText,
                         contextInfo: {
@@ -549,38 +585,89 @@ async function performBroadcast(sock, chatId, sender, session, reply, react, mes
                         }
                     });
                 } catch (e) {
-                    // Fallback to normal message
                     await sock.sendMessage(group.id, { text: messageText });
                 }
             } else {
-                // Normal message without group link
                 await sock.sendMessage(group.id, { text: messageText });
             }
             successCount++;
             
-            if ((i + 1) % 5 === 0 || i === openGroups.length - 1) {
+            // Update progress message every 2 sends
+            if ((groupNumber - currentIndex) % 2 === 0 || groupNumber === endIndex) {
                 await sock.sendMessage(chatId, {
-                    text: `📢 *Broadcasting...*\n\n✅ ${successCount}/${totalOpen} sent\n❌ Failed: ${failCount}`,
+                    text: `📢 *Broadcasting...*\n\n` +
+                          `Progress: ${groupNumber}/${totalOpen} groups\n` +
+                          `✅ Success: ${successCount}\n` +
+                          `❌ Failed: ${failCount}\n\n` +
+                          `Sending to group ${groupNumber}...`,
                     edit: statusMsg.key
                 });
             }
             
-            await new Promise(resolve => setTimeout(resolve, 800));
-            
         } catch (error) {
             failCount++;
+            console.error(`[GROUPS] Failed to send to ${group.subject}:`, error.message);
+            
+            await sock.sendMessage(chatId, {
+                text: `📢 *Broadcasting...*\n\n` +
+                      `Progress: ${groupNumber}/${totalOpen} groups\n` +
+                      `✅ Success: ${successCount}\n` +
+                      `❌ Failed: ${failCount}\n\n` +
+                      `⚠️ Failed to send to: ${group.subject}`,
+                edit: statusMsg.key
+            });
         }
+        
+        // Small delay between messages to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 1500));
     }
     
-    await sock.sendMessage(chatId, {
-        text: `✅ *Broadcast Complete!*\n\n✅ Sent: ${successCount}\n❌ Failed: ${failCount}`,
-        edit: statusMsg.key
+    // Update session with current progress
+    sessionManager.updateSession(sender, chatId, {
+        broadcastIndex: endIndex,
+        broadcastSuccess: successCount,
+        broadcastFailed: failCount
     });
     
-    await react('✅');
+    if (endIndex >= totalOpen) {
+        // Broadcast complete
+        await sock.sendMessage(chatId, {
+            text: `✅ *Broadcast Complete!*\n\n` +
+                  `📊 Total Groups: ${totalOpen}\n` +
+                  `✅ Successful: ${successCount}\n` +
+                  `❌ Failed: ${failCount}`,
+            edit: statusMsg.key
+        });
+        
+        await react('✅');
+        session.data.type = 'main_menu';
+        await showMainMenu(sock, chatId, sender, session, reply);
+        return;
+    }
     
-    session.data.type = 'main_menu';
-    await showMainMenu(sock, chatId, sender, session, reply);
+    // Ask for confirmation to continue
+    const remaining = totalOpen - endIndex;
+    const nextBatchEnd = Math.min(endIndex + batchSize, totalOpen);
+    
+    const confirmMsg = await sendButtons(sock, chatId, {
+        text: `📢 *Broadcast Progress*\n\n` +
+              `✅ Sent: ${endIndex}/${totalOpen} groups\n` +
+              `✅ Success: ${successCount}\n` +
+              `❌ Failed: ${failCount}\n\n` +
+              `Remaining: ${remaining} groups\n` +
+              `Next batch: Groups ${endIndex + 1} to ${nextBatchEnd}\n\n` +
+              `Do you want to continue?`,
+        footer: 'Continue Broadcast',
+        buttons: [
+            { id: 'broadcast_continue', text: '✅ Yes, Continue' },
+            { id: 'broadcast_cancel', text: '❌ Cancel' }
+        ],
+        aimode: FORCE_AI_MODE
+    }, { edit: statusMsg.key });
+    
+    // Store that we're waiting for confirmation
+    session.data.type = 'waiting_broadcast_continue';
+    sessionManager.addPendingMessage(sender, chatId, confirmMsg.key.id, 'groups');
 }
 
 async function performTestBroadcast(sock, chatId, sender, session, reply, react, messageText) {
@@ -589,16 +676,13 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react,
     const statusMsg = await reply(`🧪 *Sending test message...*`);
     
     try {
-        // Check if message contains WhatsApp group link
         const groupLinkMatch = messageText.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/);
         
         if (groupLinkMatch) {
             const inviteCode = groupLinkMatch[1];
             try {
-                // Get group invite info for rich preview
                 const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
                 
-                // Send with rich preview using externalAdReply (like bomb.js)
                 await sock.sendMessage(TEST_GROUP_JID, {
                     text: messageText,
                     contextInfo: {
@@ -613,11 +697,9 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react,
                     }
                 });
             } catch (e) {
-                // Fallback to normal message
                 await sock.sendMessage(TEST_GROUP_JID, { text: messageText });
             }
         } else {
-            // Normal message without group link
             await sock.sendMessage(TEST_GROUP_JID, { text: messageText });
         }
         
@@ -645,7 +727,6 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
     
     const statusMsg = await reply(`📥 *Processing bulk join...*\n\nLoading invalid links cache...`);
     
-    // Ensure all Drive files exist
     await ensureDriveFileExists(BULK_JOIN_FOLDER_ID, FAILED_LINKS_FILE);
     await ensureDriveFileExists(BULK_JOIN_FOLDER_ID, ANNOUNCEMENT_ONLY_FILE);
     await ensureDriveFileExists(BULK_JOIN_FOLDER_ID, OPEN_CHAT_FILE);
@@ -655,7 +736,6 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
     
     await loadInvalidLinksCache(BULK_JOIN_FOLDER_ID);
     
-    // Parse links from file
     let links = fileContent.split('\n')
         .map(line => line.trim())
         .filter(line => line.length > 0)
@@ -672,11 +752,10 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
     
     if (links.length === 0) {
         await sock.sendMessage(chatId, {
-            text: `❌ *No new links to process!*\n\nAll ${originalCount} links are already in the failed links list.`,
+            text: `❌ *No new links to process!*`,
             edit: statusMsg.key
         });
         
-        // Send WhatsApp report (with details)
         const tempDir = path.join(process.cwd(), 'temp');
         if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
         const reportPath = path.join(tempDir, `bulk_join_report_${Date.now()}.txt`);
@@ -688,7 +767,6 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
         reportContent += `📊 Total Links: ${originalCount}\n`;
         reportContent += `⏭️ Skipped (already failed): ${skippedCount}\n`;
         reportContent += `❌ No new links to process.\n`;
-        reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
         
         fs.writeFileSync(reportPath, reportContent);
         
@@ -696,7 +774,7 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
             document: fs.readFileSync(reportPath),
             fileName: `bulk_join_report_${Date.now()}.txt`,
             mimetype: 'text/plain',
-            caption: `📊 *Bulk Join Report*\n\nNo new links to process.`
+            caption: `📊 *Bulk Join Report*`
         });
         
         fs.unlinkSync(reportPath);
@@ -706,7 +784,6 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
         return;
     }
     
-    // Categories for WhatsApp report (with full details)
     const failedGroups = [];
     const announcementOnlyGroups = [];
     const openChatGroups = [];
@@ -757,30 +834,15 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
                     try {
                         const metadata = await sock.groupMetadata(inviteInfo.id);
                         if (metadata.announce === true) {
-                            announcementOnlyGroups.push({
-                                link: link,
-                                name: metadata.subject,
-                                jid: inviteInfo.id,
-                                members: metadata.participants?.length || 0
-                            });
+                            announcementOnlyGroups.push(link);
                             await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, ANNOUNCEMENT_ONLY_FILE, link);
                         } else {
-                            openChatGroups.push({
-                                link: link,
-                                name: metadata.subject,
-                                jid: inviteInfo.id,
-                                members: metadata.participants?.length || 0
-                            });
+                            openChatGroups.push(link);
                             await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, OPEN_CHAT_FILE, link);
                         }
                         successCount++;
                     } catch (e) {
-                        unknownGroups.push({
-                            link: link,
-                            name: inviteInfo.subject,
-                            members: inviteInfo.size || 0,
-                            reason: 'Already in group but could not determine type'
-                        });
+                        unknownGroups.push(link);
                         await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, UNKNOWN_FILE, link);
                         successCount++;
                     }
@@ -788,12 +850,7 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
                 }
                 
                 if (joinError.message?.includes('conflict') || joinError.data === 409) {
-                    unknownGroups.push({
-                        link: link,
-                        name: inviteInfo.subject,
-                        members: inviteInfo.size || 0,
-                        reason: 'Join request sent - needs admin approval'
-                    });
+                    unknownGroups.push(link);
                     await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, UNKNOWN_FILE, link);
                     successCount++;
                     continue;
@@ -811,47 +868,22 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
             try {
                 const metadata = await sock.groupMetadata(groupJid);
                 if (metadata.announce === true) {
-                    announcementOnlyGroups.push({
-                        link: link,
-                        name: metadata.subject,
-                        jid: groupJid,
-                        members: metadata.participants?.length || 0
-                    });
+                    announcementOnlyGroups.push(link);
                     await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, ANNOUNCEMENT_ONLY_FILE, link);
                 } else {
-                    openChatGroups.push({
-                        link: link,
-                        name: metadata.subject,
-                        jid: groupJid,
-                        members: metadata.participants?.length || 0
-                    });
+                    openChatGroups.push(link);
                     await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, OPEN_CHAT_FILE, link);
                 }
                 successCount++;
             } catch (e) {
                 if (inviteInfo.announce === true) {
-                    announcementOnlyGroups.push({
-                        link: link,
-                        name: inviteInfo.subject,
-                        jid: inviteInfo.id,
-                        members: inviteInfo.size || 0
-                    });
+                    announcementOnlyGroups.push(link);
                     await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, ANNOUNCEMENT_ONLY_FILE, link);
                 } else if (inviteInfo.announce === false) {
-                    openChatGroups.push({
-                        link: link,
-                        name: inviteInfo.subject,
-                        jid: inviteInfo.id,
-                        members: inviteInfo.size || 0
-                    });
+                    openChatGroups.push(link);
                     await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, OPEN_CHAT_FILE, link);
                 } else {
-                    unknownGroups.push({
-                        link: link,
-                        name: inviteInfo.subject,
-                        members: inviteInfo.size || 0,
-                        reason: 'Joined but could not determine group type'
-                    });
+                    unknownGroups.push(link);
                     await saveLinkToDriveFile(BULK_JOIN_FOLDER_ID, UNKNOWN_FILE, link);
                 }
                 successCount++;
@@ -867,22 +899,16 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
         await new Promise(resolve => setTimeout(resolve, 3000));
     }
     
-    // Save combined files to Drive (ONLY LINKS)
-    const combinedOpenUnknown = [...openChatGroups.map(g => g.link), ...unknownGroups.map(g => g.link)];
+    const combinedOpenUnknown = [...openChatGroups, ...unknownGroups];
     if (combinedOpenUnknown.length > 0) {
         await saveMultipleLinksToDriveFile(BULK_JOIN_FOLDER_ID, COMBINED_OPEN_UNKNOWN_FILE, combinedOpenUnknown);
     }
     
-    const combinedAllExceptFailed = [
-        ...announcementOnlyGroups.map(g => g.link),
-        ...openChatGroups.map(g => g.link),
-        ...unknownGroups.map(g => g.link)
-    ];
+    const combinedAllExceptFailed = [...announcementOnlyGroups, ...openChatGroups, ...unknownGroups];
     if (combinedAllExceptFailed.length > 0) {
         await saveMultipleLinksToDriveFile(BULK_JOIN_FOLDER_ID, COMBINED_ALL_EXCEPT_FAILED_FILE, combinedAllExceptFailed);
     }
     
-    // Create WhatsApp report file (WITH FULL DETAILS)
     const tempDir = path.join(process.cwd(), 'temp');
     if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
     const reportPath = path.join(tempDir, `bulk_join_report_${Date.now()}.txt`);
@@ -898,7 +924,6 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
     reportContent += `❌ Failed: ${failCount}\n`;
     reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n\n`;
     
-    // Failed groups section
     reportContent += `❌ FAILED GROUPS (${failedGroups.length})\n`;
     reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
     for (const group of failedGroups) {
@@ -908,44 +933,28 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
     }
     reportContent += `\n\n\n`;
     
-    // Announcement-only groups section
     reportContent += `🔇 ANNOUNCEMENT-ONLY GROUPS (${announcementOnlyGroups.length})\n`;
     reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-    for (const group of announcementOnlyGroups) {
-        reportContent += `Name: ${group.name}\n`;
-        reportContent += `JID: ${group.jid}\n`;
-        reportContent += `Members: ${group.members}\n`;
-        reportContent += `Link: ${group.link}\n`;
-        reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    for (const link of announcementOnlyGroups) {
+        reportContent += `${link}\n`;
     }
     reportContent += `\n\n\n`;
     
-    // Open chat groups section
     reportContent += `💬 OPEN CHAT GROUPS (${openChatGroups.length})\n`;
     reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-    for (const group of openChatGroups) {
-        reportContent += `Name: ${group.name}\n`;
-        reportContent += `JID: ${group.jid}\n`;
-        reportContent += `Members: ${group.members}\n`;
-        reportContent += `Link: ${group.link}\n`;
-        reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    for (const link of openChatGroups) {
+        reportContent += `${link}\n`;
     }
     reportContent += `\n\n\n`;
     
-    // Unknown/Request sent groups section
     reportContent += `❓ UNKNOWN/REQUEST SENT (${unknownGroups.length})\n`;
     reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-    for (const group of unknownGroups) {
-        reportContent += `Name: ${group.name}\n`;
-        reportContent += `Members: ${group.members}\n`;
-        reportContent += `Reason: ${group.reason}\n`;
-        reportContent += `Link: ${group.link}\n`;
-        reportContent += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    for (const link of unknownGroups) {
+        reportContent += `${link}\n`;
     }
     
     fs.writeFileSync(reportPath, reportContent);
     
-    // Send summary message
     let summary = `✅ *BULK JOIN COMPLETED!*\n\n`;
     summary += `━━━━━━━━━━━━━━━━━━\n`;
     summary += `📊 Processed: ${links.length} | ✅ ${successCount} | ❌ ${failCount}\n`;
@@ -955,27 +964,18 @@ async function performBulkJoin(sock, chatId, sender, session, reply, react, file
     summary += `💬 Open Chat: ${openChatGroups.length}\n`;
     summary += `❓ Unknown: ${unknownGroups.length}\n`;
     summary += `❌ Failed: ${failedGroups.length}\n\n`;
-    summary += `📄 *Detailed report attached below.*\n\n`;
-    summary += `📁 *Google Drive files updated:*\n`;
-    summary += `• ${FAILED_LINKS_FILE}\n`;
-    summary += `• ${ANNOUNCEMENT_ONLY_FILE}\n`;
-    summary += `• ${OPEN_CHAT_FILE}\n`;
-    summary += `• ${UNKNOWN_FILE}\n`;
-    summary += `• ${COMBINED_OPEN_UNKNOWN_FILE}\n`;
-    summary += `• ${COMBINED_ALL_EXCEPT_FAILED_FILE}\n\n`;
-    summary += `*Drive files contain ONLY links (one per line)*`;
+    summary += `📄 *Detailed report attached below.*`;
     
     await sock.sendMessage(chatId, {
         text: summary,
         edit: statusMsg.key
     });
     
-    // Send the detailed WhatsApp report file
     await sock.sendMessage(chatId, {
         document: fs.readFileSync(reportPath),
         fileName: `bulk_join_report_${Date.now()}.txt`,
         mimetype: 'text/plain',
-        caption: `📊 *Bulk Join Report*\n\n📅 ${new Date().toLocaleString()}\n📊 Processed: ${links.length} | ✅ ${successCount} | ❌ ${failCount}`
+        caption: `📊 *Bulk Join Report*`
     });
     
     fs.unlinkSync(reportPath);
