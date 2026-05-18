@@ -1,5 +1,6 @@
 /**
  * Telegram Bridge Command - Full featured Telegram to WhatsApp bridge with scheduling
+ * EXACT COPY of the working standalone script
  */
 
 const { Telegraf } = require('telegraf');
@@ -10,14 +11,9 @@ const axios = require('axios');
 const sharp = require('sharp');
 const { google } = require('googleapis');
 const config = require('../../config');
-const sessionManager = require('../../utils/sessionManager');
-const giftedBtns = require('gifted-btns');
-const { sendButtons } = giftedBtns;
-
-const FORCE_AI_MODE = true;
 
 // ===== CONFIGURATION =====
-const TELEGRAM_BOT_TOKEN = "8717510346:AAFE_BBeFoyvjw7WgiJlDvKUO2v2QXLFHWI";
+const TELEGRAM_BOT_TOKEN = "8717510346:AAFi_8U7L0KCh13UzEu69EGc7j8qDteyu70";
 const TELEGRAM_CHANNEL_ID = "-1001287988079";
 
 // WhatsApp targets
@@ -56,7 +52,6 @@ let isTelegramActive = false;
 let scheduledTask = null;
 let lastSendTime = null;
 const processingPosts = new Set();
-let keepAliveInterval = null;
 
 // Create temp directory
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
@@ -110,7 +105,7 @@ async function getDriveAuth() {
         return cachedAuth;
     }
     
-    console.log('[DRIVE] Getting auth token...');
+    console.log('[DRIVE] 📥 Getting auth...');
     const tokenResponse = await axios({
         method: 'GET',
         url: TOKEN_URL,
@@ -118,10 +113,7 @@ async function getDriveAuth() {
         timeout: 30000
     });
     
-    const tempDir = path.join(process.cwd(), 'temp');
-    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-    
-    const tokenFilename = path.join(tempDir, `token_${Date.now()}.json`);
+    const tokenFilename = path.join(TEMP_DIR, `token_${Date.now()}.json`);
     const tokenWriter = fs.createWriteStream(tokenFilename);
     tokenResponse.data.pipe(tokenWriter);
     await new Promise((resolve, reject) => {
@@ -132,9 +124,11 @@ async function getDriveAuth() {
     const tokenData = JSON.parse(fs.readFileSync(tokenFilename, 'utf8'));
     fs.unlinkSync(tokenFilename);
     
+    console.log('[DRIVE] ✅ Token loaded');
+    
     const expiryDate = new Date(tokenData.expiry);
     if (new Date() > expiryDate) {
-        console.log('[DRIVE] Refreshing token...');
+        console.log('[DRIVE] 🔄 Refreshing token...');
         const refreshData = {
             client_id: tokenData.client_id,
             client_secret: tokenData.client_secret,
@@ -159,16 +153,20 @@ async function saveScheduleToDrive() {
         const tempFile = path.join(TEMP_DIR, 'schedule.txt');
         fs.writeFileSync(tempFile, content);
         
-        console.log(`[DRIVE] Saving schedule to ID: ${SCHEDULE_FILE_ID}`);
+        console.log(`\n${'='.repeat(60)}`);
+        console.log(`[DRIVE] 📤 SAVING SCHEDULE`);
+        console.log(`[DRIVE] File ID: ${SCHEDULE_FILE_ID}`);
+        console.log(`[DRIVE] Content: "${content}"`);
         
         const drive = google.drive({ version: 'v3', headers: auth });
         const media = { mimeType: 'text/plain', body: fs.createReadStream(tempFile) };
-        
         await drive.files.update({ fileId: SCHEDULE_FILE_ID, media: media, fields: 'id' });
+        
         fs.unlinkSync(tempFile);
-        console.log('[DRIVE] Schedule saved successfully');
+        console.log(`[DRIVE] ✅ Schedule saved successfully`);
+        console.log(`${'='.repeat(60)}\n`);
     } catch (error) {
-        console.error('[DRIVE] Failed to save schedule:', error.message);
+        console.error('[DRIVE] ❌ Failed to save schedule:', error.message);
     }
 }
 
@@ -178,12 +176,14 @@ async function loadScheduleFromDrive() {
         const drive = google.drive({ version: 'v3', headers: auth });
         const response = await drive.files.get({ fileId: SCHEDULE_FILE_ID, alt: 'media' }, { responseType: 'text' });
         const content = response.data;
+        console.log(`[DRIVE] Loaded content: "${content}"`);
         
         if (content) {
             lastSendTime = new Date(content);
-            console.log(`[DRIVE] Schedule loaded - Last send: ${formatPakistanTime(lastSendTime)}`);
+            console.log(`[DRIVE] ✅ Schedule loaded - Last send: ${formatPakistanTime(lastSendTime)}`);
         } else {
             lastSendTime = null;
+            console.log('[DRIVE] Schedule file empty, starting fresh');
         }
     } catch (error) {
         console.log('[DRIVE] No schedule found, starting fresh');
@@ -204,9 +204,10 @@ async function saveMediaToDrive(buffer, mimeType, extension) {
         const response = await drive.files.create({ requestBody, media, fields: 'id' });
         
         fs.unlinkSync(tempFile);
+        console.log(`[DRIVE] ✅ Media saved: ${response.data.id}`);
         return response.data.id;
     } catch (error) {
-        console.error('[DRIVE] Failed to save media:', error.message);
+        console.error('[DRIVE] ❌ Failed to save media:', error.message);
         throw error;
     }
 }
@@ -218,7 +219,7 @@ async function loadMediaFromDrive(fileId) {
         const response = await drive.files.get({ fileId: fileId, alt: 'media' }, { responseType: 'arraybuffer' });
         return Buffer.from(response.data);
     } catch (error) {
-        console.error('[DRIVE] Failed to load media:', error.message);
+        console.error('[DRIVE] ❌ Failed to load media:', error.message);
         throw error;
     }
 }
@@ -228,15 +229,16 @@ async function deleteMediaFromDrive(fileId) {
         const auth = await getDriveAuth();
         const drive = google.drive({ version: 'v3', headers: auth });
         await drive.files.delete({ fileId: fileId });
-        console.log(`[DRIVE] Deleted media: ${fileId}`);
+        console.log(`[DRIVE] ✅ Deleted media: ${fileId}`);
     } catch (error) {
-        console.error('[DRIVE] Failed to delete media:', error.message);
+        console.error('[DRIVE] ❌ Failed to delete media:', error.message);
     }
 }
 
 async function savePostToDrive(messageData, uniqueId, scheduledTime, position, mediaFileId = null) {
     try {
         const auth = await getDriveAuth();
+        
         const saveData = {
             type: messageData.type,
             content: messageData.content,
@@ -268,9 +270,10 @@ async function savePostToDrive(messageData, uniqueId, scheduledTime, position, m
         const response = await drive.files.create({ requestBody, media, fields: 'id' });
         
         fs.unlinkSync(tempFile);
+        console.log(`[DRIVE] ✅ Post saved: ${response.data.id}`);
         return response.data.id;
     } catch (error) {
-        console.error('[DRIVE] Failed to save post:', error.message);
+        console.error('[DRIVE] ❌ Failed to save post:', error.message);
         throw error;
     }
 }
@@ -287,7 +290,7 @@ async function loadPostFromDrive(fileId) {
         }
         return messageData;
     } catch (error) {
-        console.error('[DRIVE] Failed to load post:', error.message);
+        console.error('[DRIVE] ❌ Failed to load post:', error.message);
         throw error;
     }
 }
@@ -297,9 +300,9 @@ async function deletePostFromDrive(fileId) {
         const auth = await getDriveAuth();
         const drive = google.drive({ version: 'v3', headers: auth });
         await drive.files.delete({ fileId: fileId });
-        console.log(`[DRIVE] Deleted post: ${fileId}`);
+        console.log(`[DRIVE] ✅ Deleted post: ${fileId}`);
     } catch (error) {
-        console.error('[DRIVE] Failed to delete post:', error.message);
+        console.error('[DRIVE] ❌ Failed to delete post:', error.message);
     }
 }
 
@@ -332,7 +335,7 @@ async function loadPendingPosts() {
         
         return posts.sort((a, b) => a.scheduledTime - b.scheduledTime);
     } catch (error) {
-        console.error('[DRIVE] Failed to load posts:', error.message);
+        console.error('[DRIVE] ❌ Failed to load posts:', error.message);
         return [];
     }
 }
@@ -365,15 +368,42 @@ function applyFormatting(text, entities) {
     const sortedEntities = [...entities].sort((a, b) => a.offset - b.offset);
     let result = '';
     let lastIndex = 0;
+    let i = 0;
     
-    for (const entity of sortedEntities) {
+    while (i < sortedEntities.length) {
+        const entity = sortedEntities[i];
+        
         if (entity.offset > lastIndex) {
             result += escapeHtml(text.substring(lastIndex, entity.offset));
         }
         
-        const entityText = text.substring(entity.offset, entity.offset + entity.length);
-        let openTag = '', closeTag = '';
+        const entityEnd = entity.offset + entity.length;
+        const nestedEntities = [];
+        let j = i + 1;
+        while (j < sortedEntities.length) {
+            const nextEntity = sortedEntities[j];
+            if (nextEntity.offset >= entity.offset && nextEntity.offset + nextEntity.length <= entityEnd) {
+                nestedEntities.push({
+                    type: nextEntity.type,
+                    offset: nextEntity.offset - entity.offset,
+                    length: nextEntity.length,
+                    url: nextEntity.url
+                });
+                j++;
+            } else {
+                break;
+            }
+        }
         
+        let entityContent = text.substring(entity.offset, entityEnd);
+        
+        if (nestedEntities.length > 0) {
+            entityContent = applyFormattingSimple(entityContent, nestedEntities);
+        } else {
+            entityContent = escapeHtml(entityContent);
+        }
+        
+        let openTag = '', closeTag = '';
         switch (entity.type) {
             case 'bold': openTag = '<b>'; closeTag = '</b>'; break;
             case 'italic': openTag = '<i>'; closeTag = '</i>'; break;
@@ -383,15 +413,51 @@ function applyFormatting(text, entities) {
             case 'code': openTag = '<code>'; closeTag = '</code>'; break;
             case 'pre': openTag = '<pre>'; closeTag = '</pre>'; break;
             case 'text_link': openTag = `<a href="${escapeHtml(entity.url)}">`; closeTag = '</a>'; break;
-            default: continue;
+            case 'url': openTag = ''; closeTag = ''; break;
+            case 'blockquote': openTag = '<blockquote>'; closeTag = '</blockquote>'; break;
+            default: openTag = ''; closeTag = '';
         }
         
-        result += openTag + escapeHtml(entityText) + closeTag;
-        lastIndex = entity.offset + entity.length;
+        result += openTag + entityContent + closeTag;
+        i += 1 + nestedEntities.length;
+        lastIndex = entityEnd;
     }
     
     if (lastIndex < text.length) {
         result += escapeHtml(text.substring(lastIndex));
+    }
+    
+    return result;
+}
+
+function applyFormattingSimple(text, entities) {
+    if (!entities || entities.length === 0) return escapeHtml(text);
+    
+    let result = escapeHtml(text);
+    const sortedEntities = [...entities].sort((a, b) => b.offset - a.offset);
+    
+    for (const entity of sortedEntities) {
+        let openTag = '', closeTag = '';
+        switch (entity.type) {
+            case 'bold': openTag = '<b>'; closeTag = '</b>'; break;
+            case 'italic': openTag = '<i>'; closeTag = '</i>'; break;
+            case 'underline': openTag = '<u>'; closeTag = '</u>'; break;
+            case 'strikethrough': openTag = '<s>'; closeTag = '</s>'; break;
+            case 'spoiler': openTag = '<tg-spoiler>'; closeTag = '</tg-spoiler>'; break;
+            case 'code': openTag = '<code>'; closeTag = '</code>'; break;
+            case 'pre': openTag = '<pre>'; closeTag = '</pre>'; break;
+            case 'text_link': openTag = `<a href="${escapeHtml(entity.url)}">`; closeTag = '</a>'; break;
+            case 'url': openTag = ''; closeTag = ''; break;
+            case 'blockquote': openTag = '<blockquote>'; closeTag = '</blockquote>'; break;
+            default: continue;
+        }
+        
+        const start = entity.offset;
+        const end = start + entity.length;
+        if (start < 0 || end > result.length || start >= end) continue;
+        
+        const content = result.substring(start, end);
+        result = result.substring(0, start) + openTag + content + closeTag + result.substring(end);
     }
     
     return result;
@@ -424,8 +490,8 @@ function entitiesToWhatsApp(text, entities) {
         if (start >= textArray.length || end > textArray.length) continue;
         
         const content = cleanText.substring(start, end);
-        let prefix = '', suffix = '';
         
+        let prefix = '', suffix = '';
         switch (entity.type) {
             case 'bold': prefix = '*'; suffix = '*'; break;
             case 'italic': prefix = '_'; suffix = '_'; break;
@@ -435,14 +501,27 @@ function entitiesToWhatsApp(text, entities) {
             default: continue;
         }
         
-        const lines = content.split('\n');
-        const wrappedLines = lines.map(line => line.trim() ? prefix + line.trim() + suffix : '');
-        const replacement = wrappedLines.join('\n');
+        let replacement;
+        if (entity.type === 'pre') {
+            replacement = prefix + content + suffix;
+        } else {
+            const lines = content.split('\n');
+            const wrappedLines = [];
+            for (const line of lines) {
+                if (line.trim()) {
+                    wrappedLines.push(prefix + line.trim() + suffix);
+                } else {
+                    wrappedLines.push('');
+                }
+            }
+            replacement = wrappedLines.join('\n');
+        }
         
         textArray.splice(start, end - start, replacement);
     }
     
-    return cleanWhitespace(textArray.join(''));
+    let result = textArray.join('');
+    return cleanWhitespace(result);
 }
 
 // ===== FORWARDING FUNCTIONS =====
@@ -478,7 +557,6 @@ async function sendToTelegramChannel(messageData) {
         const ext = messageData.mediaType === 'photo' ? 'jpg' : messageData.mediaType === 'video' ? 'mp4' : 'bin';
         const tempFilePath = path.join(TEMP_DIR, `send_tg_${Date.now()}.${ext}`);
         fs.writeFileSync(tempFilePath, mediaBuffer);
-        
         try {
             if (messageData.mediaType === 'photo') {
                 await sendBot.sendPhoto(TELEGRAM_CHANNEL_ID, tempFilePath, { caption: formattedCaption, parse_mode: 'HTML' });
@@ -709,14 +787,18 @@ async function forceSendNextPost() {
     return { success: false, message: "Failed to send" };
 }
 
-// ===== TELEGRAM BOT INIT =====
+// ===== TELEGRAM BOT HANDLER =====
 function initTelegramBot() {
     sendBot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: false });
     telegrafBot = new Telegraf(TELEGRAM_BOT_TOKEN);
     
     console.log('🤖 Telegram Bot Started!');
-    console.log(`👥 Groups: ${WHATSAPP_GROUPS.length}`);
-    console.log(`⏰ Delay: ${MIN_DELAY_HOURS}-${MAX_DELAY_HOURS} hours`);
+    console.log(`👥 Groups: ${WHATSAPP_GROUPS.length} groups configured`);
+    console.log(`📁 Posts Folder: ${POSTS_FOLDER_ID}`);
+    console.log(`📁 Media Folder: ${MEDIA_FOLDER_ID}`);
+    console.log(`📁 Schedule File ID: ${SCHEDULE_FILE_ID}`);
+    console.log(`⏰ Random delay: ${MIN_DELAY_HOURS}-${MAX_DELAY_HOURS} hours`);
+    console.log(`🕐 Current PKT: ${formatPakistanTime()}\n`);
     
     telegrafBot.command('start', (ctx) => {
         ctx.reply(
@@ -727,22 +809,34 @@ function initTelegramBot() {
             `• 🌐 *Telegram Channel* - Send to Telegram channel\n` +
             `• 👥 *ALL GROUPS* - Send to ${WHATSAPP_GROUPS.length} groups\n` +
             `• 📱 *Own Chat* - Send only to your WhatsApp\n` +
-            `• ⏰ *SCHEDULE TO ALL* - Send to ALL with ${MIN_DELAY_HOURS}-${MAX_DELAY_HOURS}h delay\n` +
-            `• 🚀 *SEND NOW TO ALL* - Send immediately\n` +
+            `• ⏰ *SCHEDULE TO ALL* - Send to ALL destinations with ${MIN_DELAY_HOURS}-${MAX_DELAY_HOURS}h delay\n` +
+            `• 🚀 *SEND NOW TO ALL* - Send immediately to ALL destinations\n` +
             `• ❌ *Cancel*\n\n` +
-            `*Commands:* /queue /time /send`,
+            `*Commands:*\n` +
+            `• /queue - Check queue status\n` +
+            `• /time - Current Pakistan time\n` +
+            `• /send - Force send next post`,
             { parse_mode: 'Markdown' }
         );
     });
     
     telegrafBot.command('send', async (ctx) => {
-        await ctx.reply('⏰ Force sending next post...');
-        const result = await forceSendNextPost();
-        await ctx.reply(result.success ? `✅ ${result.message}` : `❌ ${result.message}`);
+        await ctx.reply('⏰ *Force sending next post...*\n\nI will notify you when it\'s sent.', { parse_mode: 'Markdown' });
+        
+        forceSendNextPost().then(result => {
+            if (result.success) {
+                ctx.telegram.sendMessage(ctx.chat.id, `✅ *${result.message}*`, { parse_mode: 'Markdown' });
+            } else {
+                ctx.telegram.sendMessage(ctx.chat.id, `❌ *${result.message}*`, { parse_mode: 'Markdown' });
+            }
+        }).catch(err => {
+            console.error('Force send error:', err);
+            ctx.telegram.sendMessage(ctx.chat.id, '❌ Failed to send post.');
+        });
     });
     
     telegrafBot.command('time', (ctx) => {
-        ctx.reply(`🕐 Pakistan Time: ${formatPakistanTime()}\n🌙 Night Mode: ${isNightTime() ? 'ACTIVE' : 'INACTIVE'}`);
+        ctx.reply(`🕐 *Pakistan Time:* ${formatPakistanTime()}\n🌙 *Night Mode:* ${isNightTime() ? 'ACTIVE' : 'INACTIVE'}`, { parse_mode: 'Markdown' });
     });
     
     telegrafBot.command('queue', async (ctx) => {
@@ -751,7 +845,7 @@ function initTelegramBot() {
             await ctx.reply('📭 No posts in queue.');
             return;
         }
-        let msg = `📋 *Queue Status*\n\n📊 Total: ${posts.length}\n🕐 Current: ${formatPakistanTime()}\n\n`;
+        let msg = `📋 *Queue Status*\n\n📊 *Total queued:* ${posts.length}\n🕐 *Current PKT:* ${formatPakistanTime()}\n\n*Scheduled times:*\n`;
         for (let i = 0; i < Math.min(posts.length, 10); i++) {
             msg += `${i + 1}. Post #${posts[i].position}: ${formatPakistanTime(posts[i].scheduledTime)}\n`;
         }
@@ -784,7 +878,7 @@ function initTelegramBot() {
                         [{ text: `🌐 Telegram Channel`, callback_data: `${uniqueId}_telegram` }],
                         [{ text: `👥 ALL GROUPS (${WHATSAPP_GROUPS.length})`, callback_data: `${uniqueId}_groups` }],
                         [{ text: `📱 Own Chat`, callback_data: `${uniqueId}_own` }],
-                        [{ text: `⏰ SCHEDULE TO ALL`, callback_data: `${uniqueId}_schedule` }],
+                        [{ text: `⏰ SCHEDULE TO ALL (${MIN_DELAY_HOURS}-${MAX_DELAY_HOURS}h)`, callback_data: `${uniqueId}_schedule` }],
                         [{ text: `🚀 SEND NOW TO ALL`, callback_data: `${uniqueId}_sendnow` }],
                         [{ text: `❌ Cancel`, callback_data: `${uniqueId}_cancel` }]
                     ]
@@ -826,7 +920,7 @@ function initTelegramBot() {
                             [{ text: `🌐 Telegram Channel`, callback_data: `${uniqueId}_telegram` }],
                             [{ text: `👥 ALL GROUPS (${WHATSAPP_GROUPS.length})`, callback_data: `${uniqueId}_groups` }],
                             [{ text: `📱 Own Chat`, callback_data: `${uniqueId}_own` }],
-                            [{ text: `⏰ SCHEDULE TO ALL`, callback_data: `${uniqueId}_schedule` }],
+                            [{ text: `⏰ SCHEDULE TO ALL (${MIN_DELAY_HOURS}-${MAX_DELAY_HOURS}h)`, callback_data: `${uniqueId}_schedule` }],
                             [{ text: `🚀 SEND NOW TO ALL`, callback_data: `${uniqueId}_sendnow` }],
                             [{ text: `❌ Cancel`, callback_data: `${uniqueId}_cancel` }]
                         ]
@@ -834,6 +928,7 @@ function initTelegramBot() {
                 }
             );
         } catch (error) {
+            console.error('Error processing photo:', error.message);
             await ctx.reply('❌ Failed to process image.');
         }
     });
@@ -871,7 +966,7 @@ function initTelegramBot() {
                             [{ text: `🌐 Telegram Channel`, callback_data: `${uniqueId}_telegram` }],
                             [{ text: `👥 ALL GROUPS (${WHATSAPP_GROUPS.length})`, callback_data: `${uniqueId}_groups` }],
                             [{ text: `📱 Own Chat`, callback_data: `${uniqueId}_own` }],
-                            [{ text: `⏰ SCHEDULE TO ALL`, callback_data: `${uniqueId}_schedule` }],
+                            [{ text: `⏰ SCHEDULE TO ALL (${MIN_DELAY_HOURS}-${MAX_DELAY_HOURS}h)`, callback_data: `${uniqueId}_schedule` }],
                             [{ text: `🚀 SEND NOW TO ALL`, callback_data: `${uniqueId}_sendnow` }],
                             [{ text: `❌ Cancel`, callback_data: `${uniqueId}_cancel` }]
                         ]
@@ -879,6 +974,7 @@ function initTelegramBot() {
                 }
             );
         } catch (error) {
+            console.error('Error processing video:', error.message);
             await ctx.reply('❌ Failed to process video.');
         }
     });
@@ -892,7 +988,7 @@ function initTelegramBot() {
         const messageData = pendingMessages.get(uniqueId);
         
         if (!messageData) {
-            await ctx.answerCbQuery('❌ Expired!');
+            await ctx.answerCbQuery('❌ Message expired!');
             await ctx.editMessageText('❌ This message has expired.');
             return;
         }
@@ -906,27 +1002,33 @@ function initTelegramBot() {
         }
         
         if (target === 'schedule') {
-            await ctx.answerCbQuery('⏰ Scheduling...');
-            await ctx.editMessageText('⏰ Scheduling post...');
+            await ctx.answerCbQuery('⏰ Scheduling post...');
+            await ctx.editMessageText('⏰ *Post is being scheduled...*\n\nIt will be sent to ALL destinations at the scheduled time.', { parse_mode: 'Markdown' });
             
             queuePost(messageData, uniqueId).then(({ position, sent }) => {
                 if (sent) {
-                    ctx.telegram.sendMessage(ctx.chat.id, `✅ Post #${position} sent immediately!`);
+                    ctx.telegram.sendMessage(ctx.chat.id, `✅ *Post #${position} sent immediately to ALL destinations!*`, { parse_mode: 'Markdown' });
                 } else {
-                    ctx.telegram.sendMessage(ctx.chat.id, `⏰ Post #${position} scheduled!`);
+                    ctx.telegram.sendMessage(ctx.chat.id, `⏰ *Post #${position} scheduled!*\n\nIt will be sent to ALL destinations at the scheduled time.`, { parse_mode: 'Markdown' });
                 }
             }).catch(err => {
-                ctx.telegram.sendMessage(ctx.chat.id, '❌ Failed to schedule.');
+                console.error('Background processing error:', err);
+                ctx.telegram.sendMessage(ctx.chat.id, '❌ Failed to schedule post.');
             });
             return;
         }
         
         if (target === 'sendnow') {
-            await ctx.answerCbQuery('🚀 Sending...');
-            await ctx.editMessageText('🚀 Sending to ALL destinations...');
+            await ctx.answerCbQuery('🚀 Sending post now...');
+            await ctx.editMessageText('🚀 *Sending post to ALL destinations...*\n\nPlease wait.', { parse_mode: 'Markdown' });
             
             const success = await sendToAllDestinations(messageData);
-            await ctx.telegram.sendMessage(ctx.chat.id, success ? '✅ Sent to ALL destinations!' : '❌ Failed to send.');
+            
+            if (success) {
+                await ctx.telegram.sendMessage(ctx.chat.id, '✅ *Post sent immediately to ALL destinations!*', { parse_mode: 'Markdown' });
+            } else {
+                await ctx.telegram.sendMessage(ctx.chat.id, '❌ Failed to send post to ALL destinations.', { parse_mode: 'Markdown' });
+            }
             return;
         }
         
@@ -950,7 +1052,7 @@ function initTelegramBot() {
         }
         
         if (success) {
-            await ctx.editMessageText(`✅ Forwarded to ${targetText}`);
+            await ctx.editMessageText(`✅ Successfully forwarded to ${targetText}`);
         } else {
             await ctx.editMessageText('❌ Failed to forward.');
         }
@@ -1010,7 +1112,7 @@ module.exports = {
                            `👥 Groups: ${WHATSAPP_GROUPS.length}\n` +
                            `📺 Channel: ${WHATSAPP_CHANNEL}\n` +
                            `📱 Own Chat: ${WHATSAPP_NUMBER}\n\n` +
-                           `Send messages to your Telegram bot @${TELEGRAM_BOT_TOKEN.split(':')[0]}!`);
+                           `Send messages to your Telegram bot!`);
                 
             } catch (error) {
                 console.error('[TELEGRAM] Start error:', error);
