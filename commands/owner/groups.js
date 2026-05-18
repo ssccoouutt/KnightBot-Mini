@@ -454,6 +454,18 @@ module.exports = {
                 sessionManager.addPendingMessage(sender, from, sentMsg.key.id, 'groups');
                 return true;
             }
+            
+            if (buttonId === 'broadcast_continue') {
+                await continueBroadcast(sock, from, sender, session, reply, react);
+                return true;
+            }
+            
+            if (buttonId === 'broadcast_cancel') {
+                sessionManager.updateSession(sender, from, { type: 'main_menu' });
+                await reply(`❌ Broadcast cancelled.`);
+                await showMainMenu(sock, from, sender, session, reply);
+                return true;
+            }
         }
         
         return true;
@@ -536,6 +548,7 @@ async function startBroadcast(sock, chatId, sender, session, reply, react, messa
         broadcastIndex: 0,
         broadcastSuccess: 0,
         broadcastFailed: 0,
+        broadcastFailDetails: [],
         type: 'broadcasting'
     });
     
@@ -550,14 +563,25 @@ async function continueBroadcast(sock, chatId, sender, session, reply, react) {
     let currentIndex = session.data.broadcastIndex || 0;
     let successCount = session.data.broadcastSuccess || 0;
     let failCount = session.data.broadcastFailed || 0;
+    const failDetails = session.data.broadcastFailDetails || [];
     const batchSize = 10;
     const endIndex = Math.min(currentIndex + batchSize, totalOpen);
+    
+    // DEBUG: Log the first few groups
+    console.log('[BROADCAST DEBUG] Total groups:', totalOpen);
+    console.log('[BROADCAST DEBUG] Current index:', currentIndex);
+    console.log('[BROADCAST DEBUG] End index:', endIndex);
+    console.log('[BROADCAST DEBUG] First 5 groups:', openGroups.slice(0, 5).map(g => ({ id: g.id, subject: g.subject })));
+    console.log('[BROADCAST DEBUG] Message to send:', messageText.substring(0, 100));
     
     const statusMsg = await reply(`📢 *Broadcasting...*\n\n` +
                                  `Progress: ${currentIndex}/${totalOpen} groups\n` +
                                  `✅ Success: ${successCount}\n` +
                                  `❌ Failed: ${failCount}\n\n` +
-                                 `Sending to groups ${currentIndex + 1} to ${endIndex}...`);
+                                 `Sending to groups ${currentIndex + 1} to ${endIndex}...\n\n` +
+                                 `🔍 *Debug Info:*\n` +
+                                 `• First group ID: ${openGroups[0]?.id || 'None'}\n` +
+                                 `• First group name: ${openGroups[0]?.subject || 'None'}`);
     
     const groupLinkMatch = messageText.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/);
     
@@ -565,7 +589,14 @@ async function continueBroadcast(sock, chatId, sender, session, reply, react) {
         const group = openGroups[i];
         const groupNumber = i + 1;
         
+        console.log(`[BROADCAST DEBUG] Sending to group ${groupNumber}: ${group.id} - ${group.subject}`);
+        
         try {
+            // Verify group ID is valid
+            if (!group.id || !group.id.endsWith('@g.us')) {
+                throw new Error(`Invalid group ID: ${group.id}`);
+            }
+            
             if (groupLinkMatch) {
                 const inviteCode = groupLinkMatch[1];
                 try {
@@ -584,11 +615,15 @@ async function continueBroadcast(sock, chatId, sender, session, reply, react) {
                             }
                         }
                     });
+                    console.log(`[BROADCAST DEBUG] ✅ Sent to ${group.id} with preview`);
                 } catch (e) {
+                    console.log(`[BROADCAST DEBUG] Preview failed, sending plain text to ${group.id}:`, e.message);
                     await sock.sendMessage(group.id, { text: messageText });
+                    console.log(`[BROADCAST DEBUG] ✅ Sent plain text to ${group.id}`);
                 }
             } else {
                 await sock.sendMessage(group.id, { text: messageText });
+                console.log(`[BROADCAST DEBUG] ✅ Sent plain text to ${group.id}`);
             }
             successCount++;
             
@@ -599,21 +634,24 @@ async function continueBroadcast(sock, chatId, sender, session, reply, react) {
                           `Progress: ${groupNumber}/${totalOpen} groups\n` +
                           `✅ Success: ${successCount}\n` +
                           `❌ Failed: ${failCount}\n\n` +
-                          `Sending to group ${groupNumber}...`,
+                          `Last sent: ${group.subject}`,
                     edit: statusMsg.key
                 });
             }
             
         } catch (error) {
             failCount++;
-            console.error(`[GROUPS] Failed to send to ${group.subject}:`, error.message);
+            const errorMsg = `Group: ${group.subject} (${group.id}) - Error: ${error.message}`;
+            failDetails.push(errorMsg);
+            console.error(`[BROADCAST DEBUG] ❌ Failed to send to ${group.id}:`, error.message);
             
             await sock.sendMessage(chatId, {
                 text: `📢 *Broadcasting...*\n\n` +
                       `Progress: ${groupNumber}/${totalOpen} groups\n` +
                       `✅ Success: ${successCount}\n` +
                       `❌ Failed: ${failCount}\n\n` +
-                      `⚠️ Failed to send to: ${group.subject}`,
+                      `⚠️ Failed to send to: ${group.subject}\n` +
+                      `Error: ${error.message.substring(0, 100)}`,
                 edit: statusMsg.key
             });
         }
@@ -626,17 +664,36 @@ async function continueBroadcast(sock, chatId, sender, session, reply, react) {
     sessionManager.updateSession(sender, chatId, {
         broadcastIndex: endIndex,
         broadcastSuccess: successCount,
-        broadcastFailed: failCount
+        broadcastFailed: failCount,
+        broadcastFailDetails: failDetails
     });
     
     if (endIndex >= totalOpen) {
-        // Broadcast complete
+        // Build result message with failure details
+        let resultMsg = `✅ *Broadcast Complete!*\n\n` +
+                        `📊 Total Groups: ${totalOpen}\n` +
+                        `✅ Successful: ${successCount}\n` +
+                        `❌ Failed: ${failCount}`;
+        
+        if (failDetails.length > 0 && failDetails.length <= 10) {
+            resultMsg += `\n\n❌ *Failed Groups:*\n`;
+            for (const detail of failDetails) {
+                resultMsg += `• ${detail.substring(0, 150)}\n`;
+            }
+        } else if (failDetails.length > 10) {
+            resultMsg += `\n\n❌ *Failed: ${failDetails.length} groups*`;
+        }
+        
         await sock.sendMessage(chatId, {
-            text: `✅ *Broadcast Complete!*\n\n` +
-                  `📊 Total Groups: ${totalOpen}\n` +
-                  `✅ Successful: ${successCount}\n` +
-                  `❌ Failed: ${failCount}`,
+            text: resultMsg,
             edit: statusMsg.key
+        });
+        
+        console.log('[BROADCAST DEBUG] Final results:', {
+            total: totalOpen,
+            success: successCount,
+            failed: failCount,
+            failDetails: failDetails.slice(0, 5)
         });
         
         await react('✅');
@@ -675,6 +732,9 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react,
     
     const statusMsg = await reply(`🧪 *Sending test message...*`);
     
+    console.log('[TEST BROADCAST DEBUG] Test group JID:', TEST_GROUP_JID);
+    console.log('[TEST BROADCAST DEBUG] Message:', messageText.substring(0, 100));
+    
     try {
         const groupLinkMatch = messageText.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]+)/);
         
@@ -682,6 +742,7 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react,
             const inviteCode = groupLinkMatch[1];
             try {
                 const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
+                console.log('[TEST BROADCAST DEBUG] Invite info:', inviteInfo.subject);
                 
                 await sock.sendMessage(TEST_GROUP_JID, {
                     text: messageText,
@@ -696,11 +757,15 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react,
                         }
                     }
                 });
+                console.log('[TEST BROADCAST DEBUG] ✅ Sent with preview');
             } catch (e) {
+                console.log('[TEST BROADCAST DEBUG] Preview failed:', e.message);
                 await sock.sendMessage(TEST_GROUP_JID, { text: messageText });
+                console.log('[TEST BROADCAST DEBUG] ✅ Sent plain text');
             }
         } else {
             await sock.sendMessage(TEST_GROUP_JID, { text: messageText });
+            console.log('[TEST BROADCAST DEBUG] ✅ Sent plain text');
         }
         
         await sock.sendMessage(chatId, {
@@ -711,6 +776,7 @@ async function performTestBroadcast(sock, chatId, sender, session, reply, react,
         await react('✅');
         
     } catch (error) {
+        console.error('[TEST BROADCAST DEBUG] Error:', error);
         await sock.sendMessage(chatId, {
             text: `❌ *Test failed!*\n\nError: ${error.message}`,
             edit: statusMsg.key
