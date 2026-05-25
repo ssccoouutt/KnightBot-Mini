@@ -13,7 +13,7 @@ const { google } = require('googleapis');
 const config = require('../../config');
 
 // ===== CONFIGURATION =====
-const TELEGRAM_BOT_TOKEN = "8717510346:AAFE_BBeFoyvjw7WgiJlDvKUO2v2QXLFHWI";
+const TELEGRAM_BOT_TOKEN = "8717510346:AAH2IcCpTdIxZ8TJxK17UcFrTaS_6-qIUNo";
 const TELEGRAM_CHANNEL_ID = "-1001287988079";
 
 // WhatsApp targets
