@@ -45,7 +45,7 @@ module.exports = {
     autoDownload: false,
     
     // ===== NEW: Telegram Bridge Auto-Start =====
-    autoStartTelegram: false, // Set to false to disable auto-start of Telegram bridge
+    autoStartTelegram: true, // Set to false to disable auto-start of Telegram bridge
     
     // Group Settings Defaults
     defaultGroupSettings: {
